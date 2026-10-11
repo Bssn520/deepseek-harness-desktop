@@ -1,9 +1,10 @@
+import { SCHEDULE_TOOL_NAMES } from '../../shared/constants'
 import { task } from '../service/task'
 import { textBlock } from '../utils/tool'
 
 export function listTasksTool(): any {
   return {
-    name: 'scheduler_list',
+    name: SCHEDULE_TOOL_NAMES.list,
     description: 'List the unified scheduler tasks with delivery mode, bound session, terminal status, next occurrence, and reversible enabled state.',
     parameters: { type: 'object', properties: {} },
     output: {

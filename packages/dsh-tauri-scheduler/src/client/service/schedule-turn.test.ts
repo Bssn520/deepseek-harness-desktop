@@ -28,7 +28,7 @@ function start(turn = 3): SessionEvent<'turn/start'> {
   return { type: 'turn/start', seq: seq(1), time: 100, data: { turn } }
 }
 
-function call(callId = 'create', name = 'scheduler_create', turn = 3): SessionEvent<'tool/call'> {
+function call(callId = 'create', name = 'schedule_create', turn = 3): SessionEvent<'tool/call'> {
   return {
     type: 'tool/call',
     seq: seq(2),
@@ -91,7 +91,7 @@ function owner(data: ScheduleTurnData | undefined, cursor = 5, end?: number) {
   return { turn, seq: cursor, openFile: () => {} }
 }
 
-describe('scheduler_create turn-tail definition', () => {
+describe('schedule_create turn-tail definition', () => {
   it('publishes no tool-call view and accepts only start, call, and appended settled result events', () => {
     expect(scheduleTurnDefinition.kind).toBe('schedule-created')
     expect(scheduleTurnDefinition.target).toBeUndefined()
@@ -107,7 +107,7 @@ describe('scheduler_create turn-tail definition', () => {
     const called = update(initial, call())
     expect(initial.calls.size).toBe(0)
     expect(initial.created).toEqual([])
-    expect(called.calls.get('create')).toEqual({ name: 'scheduler_create' })
+    expect(called.calls.get('create')).toEqual({ name: 'schedule_create' })
     const settled = update(called, result())
     expect(called.created).toEqual([])
     expect(settled.created).toEqual([{ seq: 4, time: 1700000000127, callId: 'create', task: task() }])
@@ -121,13 +121,13 @@ describe('scheduler_create turn-tail definition', () => {
   it('ignores unmatched, different tools, failed, malformed, and wrong-turn results', () => {
     const initial = initialize()
     expect(update(initial, result())).toBe(initial)
-    const wrongTool = update(initial, call('create', 'scheduler_update'))
+    const wrongTool = update(initial, call('create', 'schedule_update'))
     expect(update(wrongTool, result())).toBe(wrongTool)
     const called = update(initial, call())
     expect(update(called, result('create', 4, { isError: true }))).toBe(called)
     expect(update(called, result('create', 4, { content: [{ type: 'text', text: '{' }] }))).toBe(called)
     expect(update(called, result('create', 4, {}, 4))).toBe(called)
-    expect(update(called, call('other', 'scheduler_create', 4))).toBe(called)
+    expect(update(called, call('other', 'schedule_create', 4))).toBe(called)
     expect(update(called, result('missing-source'))).toBe(called)
   })
 

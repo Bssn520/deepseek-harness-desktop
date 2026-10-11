@@ -1,4 +1,5 @@
 import type { TaskInput } from '../types'
+import { SCHEDULE_TOOL_NAMES } from '../../shared/constants'
 import { scheduler } from '../service/scheduler'
 import { task } from '../service/task'
 import { nullableText, scheduleParameters, textBlock } from '../utils/tool'
@@ -20,7 +21,7 @@ const outputSchema = {
 
 export function updateTaskTool(): any {
   return {
-    name: 'scheduler_update',
+    name: SCHEDULE_TOOL_NAMES.update,
     description:
       'Update a scheduled task by id: rename it, rewrite its instruction, replace its schedule, '
       + 'pause or resume it (enabled), or change the workspace/permission/model used by its runs. '
@@ -30,7 +31,7 @@ export function updateTaskTool(): any {
     parameters: {
       type: 'object',
       properties: {
-        expected: { type: 'object', additionalProperties: true, description: 'Optional complete task snapshot for optimistic concurrency; obtain from scheduler_list.' },
+        expected: { type: 'object', additionalProperties: true, description: `Optional complete task snapshot for optimistic concurrency; obtain from ${SCHEDULE_TOOL_NAMES.list}.` },
         delivery: { type: 'string', enum: ['this-session', 'new-session'], description: 'New delivery mode; resources cannot override this-session.' },
         sessionId: { type: 'string', description: 'Bound session for this-session only.' },
         task_id: { type: 'string', description: 'Task id.' },

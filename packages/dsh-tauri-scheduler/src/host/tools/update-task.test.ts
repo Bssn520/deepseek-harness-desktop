@@ -27,9 +27,9 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-describe('scheduler_update', () => {
-  it('对外只暴露四个 agent 工具之一：名称为 scheduler_update', () => {
-    expect(tool.name).toBe('scheduler_update')
+describe('schedule_update', () => {
+  it('对外只暴露四个 agent 工具之一：名称为 schedule_update', () => {
+    expect(tool.name).toBe('schedule_update')
   })
 
   it('task_id 是唯一必填参数，其余字段均可选', () => {

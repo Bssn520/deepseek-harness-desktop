@@ -64,7 +64,7 @@ Reforked contracts and local destinations:
 
 Retained local behavior and assembly:
 
-- [`cordis.patch.yml`](./cordis.patch.yml) disables official `schedule` and `ui-schedule`. This package alone owns the task store, `scheduler_*` tools, HTTP routes and task UI; it does not runtime-import either disabled feature package.
+- [`cordis.patch.yml`](./cordis.patch.yml) disables official `schedule` and `ui-schedule`. This package alone owns the task store, `schedule_*` tools, HTTP routes and task UI; it does not runtime-import either disabled feature package.
 - `delivery: 'this-session'` binds a validated original session and inherits its workspace, permission and model. `delivery: 'new-session'` retains unattended execution and per-task workspace / permission / provider / model / reasoning-effort overrides. Legacy local tasks are normalized as fresh-session tasks; no implicit import from the disabled official store is performed.
 - Reversible `enabled` pause/resume remains distinct from terminal `inactive`. Manual runs, recommendations and `runs/recover` remain supported. Both deliveries coalesce missed recurring occurrences to the latest due instant and preserve IANA calendar / DST semantics for the eight local schedule kinds.
 - The main task list, search and chat/manual creation buttons retain their wording. The catalog opens details in place without navigating to any conversation; only its explicit linked-session action navigates. The same rule/history view renders in native session task tabs. Local `draft: true` creation, collapsed delivery/resource settings and pause/resume share the reforked detail layout; page-level tabs and global-task arrow markers are removed.
