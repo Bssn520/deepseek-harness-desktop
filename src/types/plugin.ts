@@ -21,9 +21,7 @@ export interface DshPlugin {
   repo_url: string
   /** 是否在 dsh.profile.bundles 中（启动时自动加载） */
   bundled: boolean
-  /** 是否在禁用清单（disabled-plugins.json）中，独立于 bundled */
-  disabled: boolean
-  /** 是否在 cordis.patch.yml 中被配置覆盖禁用（disabled: true），优先级高于禁用清单 */
+  /** 是否在 profile 的 cordis.patch.yml 中被禁用（disabled: true），插件开关的唯一状态 */
   patchDisabled: boolean
   /** 预设清单中的「推荐」标记 */
   recommended: boolean
@@ -98,7 +96,7 @@ export interface MigrationEntry {
 }
 
 /** 档案级数据类别（Rust 侧 MigrationDataKind） */
-export type MigrationDataKind = 'patch' | 'disabled' | 'policy' | 'credentials'
+export type MigrationDataKind = 'patch' | 'policy' | 'credentials'
 
 /** Rust 侧 service::profile::migrate::MigrationDataItem 的序列化形态 */
 export interface MigrationDataItem {

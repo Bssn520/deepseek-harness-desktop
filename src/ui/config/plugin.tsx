@@ -338,29 +338,10 @@ export function ConfigPlugin() {
     await runAction(id, 'disable', () => manager.disable(id))
   }
 
-  async function onEnable(id: string, clearConfigOverride = false) {
+  async function onEnable(id: string) {
     if (rowBusy(id))
       return
-    if (clearConfigOverride) {
-      const name = plugins.find(p => p.id === id)?.name ?? id
-      try {
-        await openDialog({
-          status: 'warning',
-          title: t('plugins.enable_override_confirm_title'),
-          description: (
-            <p>
-              {t('plugins.enable_override_confirm_desc', { name })}
-            </p>
-          ),
-          confirmText: t('plugins.enable_override_confirm'),
-        })
-      }
-      catch (e) {
-        silence(e, 'plugin enable: config override dialog cancelled')
-        return
-      }
-    }
-    await runAction(id, 'enable', () => manager.enable(id, { clearConfigOverride }))
+    await runAction(id, 'enable', () => manager.enable(id))
   }
 
   async function onSnapshot(id: string, name: string, hasSnapshot: boolean) {
@@ -514,16 +495,11 @@ export function ConfigPlugin() {
                   {t('plugins.preset')}
                 </Chip>
               </If>
-              <If cond={plugin.disabled}>
+              {/* 禁用态：profile 的 cordis.patch.yml 中的 disabled 覆盖（内置插件同样标注，
+                  issue #399：Scheduler/Pet 行此前只有「内置」） */}
+              <If cond={plugin.patchDisabled}>
                 <Chip size="sm" variant="soft" color="default">
                   {t('plugins.disabled_badge')}
-                </Chip>
-              </If>
-              {/* 配置覆盖禁用：展示在 cordis.patch.yml 中被显式禁用的真实状态
-                  （内置插件同样标注，issue #399：Scheduler/Pet 行此前只有「内置」） */}
-              <If cond={plugin.patchDisabled}>
-                <Chip size="sm" variant="soft" color="warning">
-                  {t('plugins.patch_disabled_badge')}
                 </Chip>
               </If>
               <If cond={plugin.internal}>
@@ -561,13 +537,13 @@ export function ConfigPlugin() {
                 </span>
               </Chip>
             </If>
-            <If cond={plugin.patchDisabled || plugin.disabled}>
+            <If cond={plugin.patchDisabled}>
               <Chip
                 className={actionChip({ busy: rowBusy(plugin.id) })}
                 variant="primary"
                 color="accent"
                 size="sm"
-                onClick={() => onEnable(plugin.id, plugin.patchDisabled)}
+                onClick={() => onEnable(plugin.id)}
               >
                 <span className="flex items-center gap-1">
                   <If cond={busyWith(plugin.id, 'enable')} then={<Spinner size="sm" color="current" />} />
@@ -575,7 +551,7 @@ export function ConfigPlugin() {
                 </span>
               </Chip>
             </If>
-            <If cond={!plugin.patchDisabled && !plugin.disabled}>
+            <If cond={!plugin.patchDisabled}>
               <Chip
                 className={actionChip({ busy: rowBusy(plugin.id) })}
                 size="sm"

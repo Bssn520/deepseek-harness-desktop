@@ -79,7 +79,6 @@ function plugin(overrides: Partial<Plugin> = {}): Plugin {
     id: 'dsh-tauri-pet',
     name: 'Desktop Pet',
     internal: true,
-    disabled: false,
     patchDisabled: false,
     version: '1.0.0',
     description: '',
@@ -156,22 +155,13 @@ describe('built-in plugin toggles', () => {
     expect(manager.disable).not.toHaveBeenCalled()
   })
 
-  it('enables a desktop-disabled built-in without showing a disable action', async () => {
-    manager.installed = [plugin({ disabled: true })]
+  it('enables a disabled built-in without showing a disable action', async () => {
+    manager.installed = [plugin({ patchDisabled: true })]
     showBuiltIn()
     expect(screen.queryByRole('button', { name: 'plugins.disable' })).toBeNull()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'plugins.enable' })))
-    expect(manager.enable).toHaveBeenCalledExactlyOnceWith('dsh-tauri-pet', { clearConfigOverride: false })
+    expect(manager.enable).toHaveBeenCalledExactlyOnceWith('dsh-tauri-pet')
     expect(openDialog).not.toHaveBeenCalled()
-  })
-
-  it('keeps explicit confirmation for enabling a config-disabled built-in', async () => {
-    manager.installed = [plugin({ patchDisabled: true })]
-    openDialog.mockResolvedValue(undefined)
-    showBuiltIn()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'plugins.enable' })))
-    expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ title: 'plugins.enable_override_confirm_title' }))
-    expect(manager.enable).toHaveBeenCalledExactlyOnceWith('dsh-tauri-pet', { clearConfigOverride: true })
   })
 
   it('keeps non-built-in disabling direct', async () => {

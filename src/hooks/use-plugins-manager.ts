@@ -36,10 +36,7 @@ export interface UseDshPluginsManagerResult {
   upgrade: (refs: PluginRef | PluginRef[]) => Promise<PluginProcessResult[]>
   uninstall: (refs: PluginRef | PluginRef[]) => Promise<PluginProcessResult[]>
   disable: (refs: PluginRef | PluginRef[]) => Promise<PluginProcessResult[]>
-  enable: (
-    refs: PluginRef | PluginRef[],
-    options?: { clearConfigOverride?: boolean },
-  ) => Promise<PluginProcessResult[]>
+  enable: (refs: PluginRef | PluginRef[]) => Promise<PluginProcessResult[]>
   approve: (refs?: PluginRef | PluginRef[]) => Promise<PluginProcessResult[]>
   reject: (ref: PluginRef) => Promise<PluginProcessResult[]>
   cancel: () => Promise<void>
@@ -65,12 +62,8 @@ export function useDshPluginsManager(options: UseDshPluginsManagerOptions = {}):
   async function run(
     type: 'install' | 'upgrade' | 'uninstall' | 'disable' | 'enable',
     refs: PluginRef | PluginRef[],
-    enableOptions?: { clearConfigOverride?: boolean },
   ): Promise<PluginProcessResult[]> {
-    const results = await plugins.enqueue(type, refs, {
-      ...runtime,
-      clearConfigOverride: enableOptions?.clearConfigOverride ?? runtime.clearConfigOverride ?? false,
-    })
+    const results = await plugins.enqueue(type, refs, { ...runtime })
     void queryClient.invalidateQueries({ queryKey: queryKeys.plugins })
     return results
   }
@@ -114,7 +107,7 @@ export function useDshPluginsManager(options: UseDshPluginsManagerOptions = {}):
     upgrade: refs => run('upgrade', refs),
     uninstall: refs => run('uninstall', refs),
     disable: refs => run('disable', refs),
-    enable: (refs, enableOptions) => run('enable', refs, enableOptions),
+    enable: refs => run('enable', refs),
     approve: refs => plugins.approve(refs),
     reject: ref => plugins.reject(ref),
     cancel: () => plugins.cancel(),

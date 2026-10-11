@@ -1699,17 +1699,11 @@ mod tests {
         let profiles_root = tmp.join("profiles");
         let sessions = tmp.join("sessions");
 
-        // 档案：模板初始化后再塞入用户数据（插件依赖、补丁层、桌面禁用清单）
+        // 档案：模板初始化后再塞入用户数据（插件依赖）
         init_profile_dir(&profiles_root.join("web"), "web").unwrap();
         std::fs::write(
             profiles_root.join("web").join("package.json"),
             r#"{"name":"dsh-profile-web","dependencies":{"some-plugin":"1.2.3"}}"#,
-        )
-        .unwrap();
-        std::fs::write(profiles_root.join("web").join("cordis.patch.yml"), "[]\n").unwrap();
-        std::fs::write(
-            profiles_root.join("web").join("disabled-plugins.json"),
-            r#"["some-plugin"]"#,
         )
         .unwrap();
         // 会话位于档案目录之外，重置不得触碰
@@ -1729,10 +1723,6 @@ mod tests {
             manifest["dsh"]["profile"]["bundles"],
             serde_json::json!(["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"])
         );
-        assert!(!profiles_root
-            .join("web")
-            .join("disabled-plugins.json")
-            .exists());
         // 会话数据完整保留
         assert!(sessions.join("_no-cwd").join("s1.json").is_file());
 
