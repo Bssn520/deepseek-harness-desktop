@@ -44,18 +44,10 @@ pub struct DshPlugin {
     pub repo_url: String,
     /// 是否在 `dsh.profile.bundles` 中（启动时自动加载）
     pub bundled: bool,
-    /// 是否在禁用清单（`disabled-plugins.json`）中。
+    /// 是否在 profile 的 `cordis.patch.yml` 中被禁用（`disabled: true`）。
     ///
-    /// 与 `bundled` 独立：已安装但不在 `bundles` 中的插件，仅当同时存在于
-    /// 禁用清单时才视为「已禁用」；否则为「未加载」（用户未主动禁用，
-    /// 启用操作会返回 `ENABLE_NOT_DISABLED`，前端不应展示启用入口）。
-    pub disabled: bool,
-    /// 是否在 profile 的 `cordis.patch.yml` 中被配置层禁用（`disabled: true`）。
-    ///
-    /// 与 `disabled`（桌面禁用清单）独立：patch 覆盖是用户/第三方直接写在
-    /// 配置文件里的更高优先级禁用，运行期同样不加载。桌面「启用」操作不会
-    /// 静默清除它——需用户确认后才会移除对应覆盖（见
-    /// `disable::strip_patch_disable`），避免「声称成功却仍被配置禁用」。
+    /// 这是插件开关的唯一状态，与官方 Plugins 页 / dshmarket 共用：`bundled`
+    /// 只表示是否在 `dsh.profile.bundles` 中被自动加载，不代表用户开关。
     pub patch_disabled: bool,
     /// 预设清单中的「推荐」标记（绿色 chip）
     pub recommended: bool,
@@ -161,11 +153,8 @@ pub(crate) fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) ->
         .map(|p| installed_name(p).to_string())
         .collect();
 
-    // 禁用清单：用于区分「已禁用」（用户主动禁用）与「未加载」（不在 bundles
-    // 但也不在禁用清单，启用会返回 ENABLE_NOT_DISABLED）。
-    let disabled_map = crate::service::plugin::disable::load_disabled(profile);
-    // 配置覆盖禁用集合（cordis.patch.yml 顶层 `disabled: true` 条目）：命中的
-    // 插件按「配置覆盖禁用」展示，与桌面禁用清单区分（优先级更高）。
+    // 插件开关的唯一状态：`cordis.patch.yml` 顶层 `disabled: true` 条目（与官方
+    // Plugins 页 / dshmarket 共用）。
     let patch_disabled_set = crate::service::plugin::disable::load_patch_disabled(profile);
 
     let mut dep_ids: Vec<&String> = manifest.dependencies.keys().collect();
@@ -207,7 +196,6 @@ pub(crate) fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) ->
                     .unwrap_or_default(),
                 repo_url,
                 bundled: bundled.contains(id.as_str()),
-                disabled: disabled_map.contains_key(id),
                 patch_disabled: patch_disabled_set.contains(id.as_str()) || patch_disabled_by_name,
                 recommended: preset.map(|p| p.recommended).unwrap_or(false),
                 fix: preset.map(|p| p.fix).unwrap_or(false),
@@ -264,12 +252,11 @@ pub fn force_emit(app_handle: &AppHandle) {
 }
 
 /// 变化指纹：profile package.json、各直接依赖插件 package.json，以及
-/// `cordis.patch.yml` / `disabled-plugins.json` 的内容拼接。
+/// `cordis.patch.yml` 的内容拼接。
 ///
 /// pnpm add/remove/install 会重写 profile 清单（依赖与 bundles）并落盘插件包，
-/// 任一变化都会改变指纹；配置覆盖（patch）与桌面禁用清单被外部修改时也应
-/// 触发插件列表刷新（issue #399：监听 patch/禁用清单变化）。profile 未初始化
-/// （首次运行）时返回 None。
+/// 任一变化都会改变指纹；插件开关写在 patch 里，被官方插件页 / 手工编辑改动时也要
+/// 触发插件列表刷新（issue #399）。profile 未初始化（首次运行）时返回 None。
 fn fingerprint(app_handle: &AppHandle) -> Option<String> {
     let dir = profile_dir(app_handle);
     let manifest = std::fs::read_to_string(dir.join("package.json")).ok()?;
@@ -283,12 +270,10 @@ fn fingerprint(app_handle: &AppHandle) -> Option<String> {
             parts.push(content);
         }
     }
-    // 配置覆盖与桌面禁用清单不在依赖文件里，但直接影响插件列表的展示态：
-    // 一并纳入指纹，外部直接编辑这些文件时也能实时刷新。
-    for extra in ["cordis.patch.yml", "disabled-plugins.json"] {
-        if let Ok(content) = std::fs::read_to_string(dir.join(extra)) {
-            parts.push(content);
-        }
+    // patch 不在依赖文件里，但直接决定插件列表的开关状态：一并纳入指纹，
+    // 外部直接编辑该文件时也能实时刷新。
+    if let Ok(content) = std::fs::read_to_string(dir.join("cordis.patch.yml")) {
+        parts.push(content);
     }
     Some(parts.join("\n---\n"))
 }
@@ -531,7 +516,6 @@ mod tests {
             description: String::new(),
             repo_url: String::new(),
             bundled: true,
-            disabled: false,
             patch_disabled: false,
             recommended: false,
             fix: false,
@@ -564,7 +548,6 @@ mod tests {
             description: String::new(),
             repo_url: String::new(),
             bundled: true,
-            disabled: false,
             patch_disabled: false,
             recommended: false,
             fix: false,
@@ -611,10 +594,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 覆盖 `disabled` 字段的状态组合：
-    /// - 在 bundles 且不在禁用清单 → bundled=true, disabled=false（正常加载）
-    /// - 不在 bundles 但在禁用清单 → bundled=false, disabled=true（已禁用，可启用）
-    /// - 不在 bundles 且不在禁用清单 → bundled=false, disabled=false（未加载，启用会失败）
+    /// 三种状态由 `bundled`（是否在 `dsh.profile.bundles`）与 patch 禁用共同决定：
+    /// - 在 bundles 且未被 patch 禁用 → bundled=true, patch_disabled=false（正常加载）
+    /// - 不在 bundles 但被 patch 禁用 → bundled=false, patch_disabled=true（已禁用，可启用）
+    /// - 不在 bundles 且未被 patch 禁用 → bundled=false, patch_disabled=false（未加载）
     #[test]
     fn parse_plugins_distinguishes_disabled_from_unloaded() {
         let dir = std::env::temp_dir().join(format!("dsh-watch-disabled-{}", std::process::id()));
@@ -644,33 +627,28 @@ mod tests {
             )
             .unwrap();
         }
-        // 仅 dsh-disabled 写入禁用清单。
-        let disabled = serde_json::json!({
-            "dsh-disabled": { "disabledAt": "1700000000", "reason": "user" }
-        });
+        // 仅 dsh-disabled 在 patch 里被禁用。
         std::fs::write(
-            dir.join("disabled-plugins.json"),
-            serde_json::to_string_pretty(&disabled).unwrap(),
+            dir.join("cordis.patch.yml"),
+            "- id: dsh-disabled\n  disabled: true\n",
         )
         .unwrap();
 
         let plugins = parse_plugins(&dir, &[]);
         let loaded = plugins.iter().find(|p| p.id == "dsh-loaded").unwrap();
         assert!(loaded.bundled);
-        assert!(!loaded.disabled);
+        assert!(!loaded.patch_disabled);
         let disabled_plugin = plugins.iter().find(|p| p.id == "dsh-disabled").unwrap();
         assert!(!disabled_plugin.bundled);
-        assert!(disabled_plugin.disabled);
+        assert!(disabled_plugin.patch_disabled);
         let unloaded = plugins.iter().find(|p| p.id == "dsh-unloaded").unwrap();
         assert!(!unloaded.bundled);
-        assert!(!unloaded.disabled);
+        assert!(!unloaded.patch_disabled);
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `cordis.patch.yml` 配置覆盖禁用（`disabled: true`）独立于桌面禁用清单：
-    /// 命中条目目标（依赖键或包内 name 别名）的插件标记 `patch_disabled`，
-    /// `disabled: false` 与未禁用的条目不标记。
+    /// `cordis.patch.yml` 里 `disabled: false` 与未带 disabled 字段的条目不标记禁用。
     #[test]
     fn parse_plugins_marks_config_override_disabled() {
         let dir = build_profile(

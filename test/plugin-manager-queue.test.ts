@@ -98,13 +98,13 @@ describe('plugins manager queue', () => {
     expect(results.every(result => result.ok)).toBe(true)
   })
 
-  it('runs an enable group through the per-plugin command with the override flag', async () => {
+  it('runs an enable group through the per-plugin command', async () => {
     invoke.mockResolvedValue(undefined)
 
-    await plugins.enqueue('enable', ['a'], { ...RUNTIME, clearConfigOverride: true })
+    await plugins.enqueue('enable', ['a'], RUNTIME)
 
     expect(invoke).toHaveBeenCalledTimes(1)
-    expect(invoke).toHaveBeenCalledWith('enable_dsh_plugin', { id: 'a', clearConfigOverride: true })
+    expect(invoke).toHaveBeenCalledWith('enable_dsh_plugin', { id: 'a' })
   })
 
   it('keeps queue order when a later group is enqueued while an earlier one is settling', async () => {

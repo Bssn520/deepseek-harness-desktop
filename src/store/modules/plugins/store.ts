@@ -281,9 +281,9 @@ export const plugins = defineStore({
       const installed = this.installedSource.find(item => item.id === process.name || item.name === process.name)
       if (!installed)
         return process.type === 'uninstall' ? 'already-absent' : 'not-installed'
-      if (process.type === 'disable' && installed.disabled)
+      if (process.type === 'disable' && installed.patchDisabled)
         return 'already-absent'
-      if (process.type === 'enable' && !installed.disabled && !installed.patchDisabled)
+      if (process.type === 'enable' && !installed.patchDisabled)
         return 'already-absent'
       return null
     },
@@ -293,10 +293,7 @@ export const plugins = defineStore({
       if (group.type === 'disable' || group.type === 'enable') {
         const settled = await Promise.allSettled(
           targets.map(process =>
-            invoke<void>(COMMANDS[group.type], {
-              id: process.name,
-              ...(group.type === 'enable' ? { clearConfigOverride: group.options.clearConfigOverride ?? false } : {}),
-            }),
+            invoke<void>(COMMANDS[group.type], { id: process.name }),
           ),
         )
         const blocked: PluginProcess[] = []

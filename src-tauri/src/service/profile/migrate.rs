@@ -20,9 +20,7 @@ use tauri::AppHandle;
 use crate::config;
 use crate::service::fs_guard;
 use crate::service::plugin::compat::{self, PluginInspect};
-use crate::service::plugin::{
-    disable, inspect_specs, load_presets, packument, watch, ProfilePackageJson,
-};
+use crate::service::plugin::{inspect_specs, load_presets, packument, watch, ProfilePackageJson};
 
 /// 发布时长策略豁免键（与 `profile::profile_release_age_excludes` 同源）。
 const POLICY_KEY: &str = "minimumReleaseAgeExclude";
@@ -30,7 +28,6 @@ const POLICY_KEY: &str = "minimumReleaseAgeExclude";
 /// 档案级数据的落盘文件名。
 const CREDENTIALS_FILE: &str = ".credentials.yaml";
 const PATCH_FILE: &str = "cordis.patch.yml";
-const DISABLED_FILE: &str = "disabled-plugins.json";
 const POLICY_FILE: &str = "pnpm-workspace.yaml";
 
 /// 迁移条目的兼容性判定结果（判定基准 = 当前核心版本）。
@@ -65,8 +62,6 @@ pub struct MigrationEntry {
 pub enum MigrationDataKind {
     /// 补丁层 `cordis.patch.yml`
     Patch,
-    /// 桌面禁用清单 `disabled-plugins.json`
-    Disabled,
     /// 发布时长策略豁免 `pnpm-workspace.yaml`
     Policy,
     /// 凭据 `.credentials.yaml`
@@ -291,15 +286,6 @@ fn data_items(source: &Path, target: &Path) -> Vec<MigrationDataItem> {
             covered: patch_covered(&patch, target),
         });
     }
-    let disabled = disable::load_disabled(source);
-    if !disabled.is_empty() {
-        let existing = disable::load_disabled(target);
-        items.push(MigrationDataItem {
-            kind: MigrationDataKind::Disabled,
-            count: Some(disabled.len()),
-            covered: disabled.keys().all(|id| existing.contains_key(id)),
-        });
-    }
     let policy = release_age_excludes(source);
     if !policy.is_empty() {
         let existing = release_age_excludes(target);
@@ -367,7 +353,6 @@ fn release_age_excludes(dir: &Path) -> Vec<String> {
 fn merge(kind: MigrationDataKind, source: &Path, target: &Path) -> Result<bool, String> {
     match kind {
         MigrationDataKind::Patch => merge_patch(source, target),
-        MigrationDataKind::Disabled => merge_disabled(source, target),
         MigrationDataKind::Policy => merge_policy(source, target),
         MigrationDataKind::Credentials => merge_credentials(source, target),
     }
@@ -401,27 +386,6 @@ fn merge_patch(source: &Path, target: &Path) -> Result<bool, String> {
         .map_err(|e| format!("PROFILE_MIGRATION_PATCH_RENDER: {e}"))?;
     fs::write(target.join(PATCH_FILE), rendered)
         .map_err(|e| format!("PROFILE_MIGRATION_PATCH_WRITE: {e}"))?;
-    Ok(true)
-}
-
-/// 禁用清单按插件 id 求并集：目标已有的 id 保留目标记录（含禁用时间）。
-fn merge_disabled(source: &Path, target: &Path) -> Result<bool, String> {
-    if !source.join(DISABLED_FILE).is_file() {
-        return Ok(false);
-    }
-    let incoming = disable::load_disabled(source);
-    if incoming.is_empty() {
-        return Ok(false);
-    }
-    let mut merged = disable::load_disabled(target);
-    let before = merged.len();
-    for (id, entry) in incoming {
-        merged.entry(id).or_insert(entry);
-    }
-    if merged.len() == before {
-        return Ok(false);
-    }
-    disable::save_disabled(target, &merged)?;
     Ok(true)
 }
 
@@ -577,32 +541,6 @@ mod tests {
             !merge_patch(&source, &target).unwrap(),
             "无新增时必须报告未改动，避免无意义的写盘"
         );
-
-        let _ = fs::remove_dir_all(&source);
-        let _ = fs::remove_dir_all(&target);
-    }
-
-    #[test]
-    fn merge_disabled_keeps_target_entries() {
-        let source = workspace("disabled-source");
-        let target = workspace("disabled-target");
-        fs::write(
-            source.join(DISABLED_FILE),
-            r#"{"a":{"disabledAt":"1","reason":"user"},"b":{"disabledAt":"2","reason":"user"}}"#,
-        )
-        .unwrap();
-        fs::write(
-            target.join(DISABLED_FILE),
-            r#"{"a":{"disabledAt":"9","reason":"user"}}"#,
-        )
-        .unwrap();
-
-        assert!(merge_disabled(&source, &target).unwrap());
-
-        let merged = disable::load_disabled(&target);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged["a"].disabled_at, "9", "目标记录必须保留");
-        assert_eq!(merged["b"].disabled_at, "2");
 
         let _ = fs::remove_dir_all(&source);
         let _ = fs::remove_dir_all(&target);
