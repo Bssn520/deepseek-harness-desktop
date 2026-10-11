@@ -22,7 +22,21 @@
       ]
     },
     "ios": {
-      "bundleIdentifier": "com.dshtauri.dshbridge"
+      "bundleIdentifier": "com.dshtauri.dshbridge",
+      "supportsTablet": true,
+      "buildNumber": "1",
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "DSH Bridge 使用本地网络发现并连接您电脑上的 DSH 服务。",
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight"
+        ]
+      }
     },
     "experiments": {
       "typedRoutes": true,
@@ -51,6 +65,7 @@
         "expo-camera",
         {
           "cameraPermission": "允许 DSH Bridge 使用相机扫描连接二维码。",
+          "microphonePermission": false,
           "recordAudioAndroid": false
         }
       ],
@@ -58,10 +73,16 @@
         "expo-notifications",
         {
           "icon": "./assets/native/notification-icon.png",
-          "color": "#151517"
+          "color": "#151517",
+          "mode": "production"
         }
       ],
-      "expo-secure-store",
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": false
+        }
+      ],
       [
         "expo-build-properties",
         {
