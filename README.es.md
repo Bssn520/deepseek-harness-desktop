@@ -47,7 +47,7 @@
 
 - 🪶 **Escritorio nativo** — Tauri 2 + React 19 + HeroUI 3, con la interfaz local de Harness integrada.
 - 🔄 **Gestión del runtime** — Instalá dependencias, elegí versiones del núcleo y accedé a actualizaciones del escritorio y del núcleo.
-- **Sesiones con distintos motores** — Elegí Harness, Codex o Claude CLI local para nuevas sesiones, conservando el chat, historial, tarjetas de herramientas y aprobaciones oficiales; cambiar de motor solo afecta a las sesiones nuevas, sin migrar las existentes. Codex / Claude requieren instalar sus CLI por separado y un núcleo Harness con las API de enlace (base compatible: `0.2.1-alpha.2`; `0.2.0-rc.2` no es compatible).
+- 🔀 **Sesiones con distintos motores** — Usá Codex / Claude en una misma interfaz, con sus herramientas nativas.
 - 🧩 **Gestión de plugins** — 13 plugins integrados; instalación desde directorios locales, desactivación de integrados y gestión de plugins comunitarios.
 - 🗂️ **Configuración por perfiles** — Separá plugins y ajustes, con migración de los datos del perfil en un clic, backup y clonado.
 - 💽 **Directorio de datos** — Elegí la ubicación al instalar en Windows; migrá o revertí los datos desde Ajustes en Windows, macOS y Linux.
@@ -62,7 +62,7 @@ Plugins propios distribuidos con los recursos del escritorio:
 - [DSH Tauri](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri) — Plugin central: comunicación del escritorio con Harness, adaptadores de versión y gestión de dependencias de plugins
 - [DSH Tauri UI](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-ui) — Interfaz de ajustes del escritorio, componentes nativos del núcleo, temas y paletas
 - [DSH Tauri Mobile UI](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-mobile-ui) — Diseños táctiles y preferencias móviles
-- [DSH Tauri Kernel](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-kernel) — Motores locales Codex / Claude, indicadores del motor por sesión y selección de modelos nativos y profundidad de razonamiento
+- [DSH Tauri Kernel](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-kernel) — Integración local de Codex / Claude y selección de modelos
 - [DSH Tauri Worktree](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-worktree) — Worktrees Git por sesión y checkout
 - [DSH Tauri Extension](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-extension) — Gestor oficial de plugins, mercado de plugins, Skills y MCP
 - [DSH Tauri Scheduler](https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-scheduler) — Tareas programadas e historial
