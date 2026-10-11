@@ -16,6 +16,17 @@ export default c(`@media ${MOBILE_MEDIA_QUERIES.join(' and ')}`, [
     marginLeft: 'auto',
     flexShrink: '0',
   }),
+  c(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button', {
+    WebkitTapHighlightColor: 'transparent',
+  }),
+  c(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button:focus:not(:focus-visible)', {
+    outline: 'none',
+    boxShadow: 'none',
+  }),
+  c(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button:focus-visible', {
+    outline: 'var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))',
+    outlineOffset: '2px',
+  }),
   c('[data-slot="conversation.composer.bar"] [class$="_dock"]', {
     display: 'none !important',
   }),

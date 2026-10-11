@@ -338,6 +338,53 @@ describe('registerMobileSidebar', () => {
     root.style.removeProperty('--dsh-mobile-sidebar-width')
   })
 
+  it('restores navigation when the center is replaced while the overlay stays mounted', async () => {
+    const { center, overlay } = setupFrame()
+    register()
+    renderOverlay(overlay)
+    const replacement = document.createElement('div')
+    replacement.className = 'replacement_centerCol'
+    replacement.innerHTML = '<div data-slot="main"></div>'
+    center.replaceWith(replacement)
+    await waitFor(() => expect(replacement.querySelector('[data-dsh-mobile-navbar-title]')?.textContent).toBe('New Session'))
+    expect(screen.getByRole('button', { name: 'Open sidebar' }).closest('[data-dsh-mobile-navbar-host]')?.parentElement).toBe(replacement)
+  })
+
+  it('restores navigation when its portal content is removed without replacing the center', async () => {
+    const { center, overlay } = setupFrame()
+    register()
+    renderOverlay(overlay)
+    const host = center.querySelector('[data-dsh-mobile-navbar-host]')!
+    host.replaceChildren()
+    await waitFor(() => expect(center.querySelector('[data-dsh-mobile-navbar-title]')?.textContent).toBe('New Session'))
+    fireEvent.click(screen.getByRole('button', { name: 'Open sidebar' }))
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(true)
+  })
+
+  it('restores detached portal content before synchronous plugin unload', () => {
+    const { center, overlay } = setupFrame()
+    const { dispose } = register()
+    renderOverlay(overlay)
+    center.querySelector('[data-dsh-mobile-navbar-host]')!.replaceChildren()
+    act(() => dispose())
+    expect(() => cleanup()).not.toThrow()
+    expect(document.querySelector('[data-dsh-mobile-navbar-host]')).toBeNull()
+  })
+
+  it('resumes navigation after returning from the desktop breakpoint', () => {
+    const { center, overlay } = setupFrame()
+    register()
+    renderOverlay(overlay)
+    window.innerWidth = 1200
+    fireEvent(window, new Event('resize'))
+    expect(screen.queryByRole('navigation')).toBeNull()
+    window.innerWidth = 390
+    fireEvent(window, new Event('resize'))
+    expect(center.querySelector('[data-dsh-mobile-navbar-title]')?.textContent).toBe('New Session')
+    fireEvent.click(screen.getByRole('button', { name: 'Open sidebar' }))
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(true)
+  })
+
   it('hands the layout back at the desktop breakpoint without leftover navigation', () => {
     const { main, overlay } = setupFrame()
     const { dispose } = register()

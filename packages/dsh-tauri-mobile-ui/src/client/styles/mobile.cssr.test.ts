@@ -131,6 +131,20 @@ describe('mobile conversation layout', () => {
     })
   })
 
+  it('removes pointer focus boxes from mobile bottom buttons without hiding keyboard focus', () => {
+    expect(declarations(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button')).toMatchObject({
+      '-webkit-tap-highlight-color': 'transparent',
+    })
+    expect(declarations(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button:focus:not(:focus-visible)')).toMatchObject({
+      'outline': 'none',
+      'box-shadow': 'none',
+    })
+    expect(declarations(':is([data-dsh-mobile-preferences], [data-shell-bottom]) button:focus-visible')).toMatchObject({
+      'outline': 'var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))',
+      'outline-offset': '2px',
+    })
+  })
+
   it('keeps click transitions on the center and shade without drag-only overrides', () => {
     const css = root.toString()
     expect(css).not.toContain('data-dsh-mobile-sidebar-dragging')

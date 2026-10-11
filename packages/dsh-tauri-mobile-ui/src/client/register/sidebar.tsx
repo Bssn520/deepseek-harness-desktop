@@ -67,6 +67,7 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
   const previousWidthPriority = root.style.getPropertyPriority(SIDEBAR_WIDTH_PROPERTY)
   const navbarHost = document.createElement('div')
   navbarHost.setAttribute('data-dsh-mobile-navbar-host', '')
+  let navbar: HTMLElement | null = null
   const listeners = new Set<() => void>()
   const notify = (): void => listeners.forEach(listener => listener())
   const subscribe = (listener: () => void): (() => void) => {
@@ -159,6 +160,8 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
     const frame = getFrame()
     const center = snapshot.mobile ? frame?.querySelector<HTMLElement>('[class$="_centerCol"]') : null
     if (center) {
+      if (navbar !== null && navbar.parentNode === null && !navbarHost.hasChildNodes())
+        navbarHost.append(navbar)
       if (center.firstElementChild !== navbarHost)
         center.prepend(navbarHost)
     }
@@ -294,7 +297,7 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
     const layoutChanged = records.some((record) => {
       if (record.type === 'attributes')
         return record.target instanceof Element && record.target.matches(`${LAYOUT_SELECTOR}, [data-sidebar-collapsed], [data-dsh-mobile-sidebar]`)
-      if (record.target instanceof Element && record.target.matches('[class$="_frame"], [class$="_centerCol"]'))
+      if (record.target === navbarHost || (record.target instanceof Element && record.target.matches('[class$="_frame"], [class$="_centerCol"]')))
         return true
       if (focusedDrawer !== null && !focusedDrawer.element.isConnected)
         return true
@@ -312,6 +315,8 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
     subtree: true,
   })
   controller.add(() => {
+    if (navbar !== null && navbar.parentNode === null && !navbarHost.hasChildNodes())
+      navbarHost.append(navbar)
     listeners.clear()
     snapshot = { ...snapshot, mobile: false, open: false }
     syncDom()
@@ -338,7 +343,7 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
       return (
         <>
           {host && createPortal(
-            <nav data-dsh-mobile-topbar aria-label={locale.text('navbar.label')}>
+            <nav ref={(element) => { navbar = element }} data-dsh-mobile-topbar aria-label={locale.text('navbar.label')}>
               <Icon
                 as={LayoutSideContentLeft}
                 size={12}

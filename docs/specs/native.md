@@ -162,16 +162,16 @@ src-native/
 | --- | --- | --- | --- |
 | `.github/workflows/release-native.yml` | `Release Android APK (Native)` | 桌面端 `Build & Release` 完成（`workflow_run`）+ 手动 `workflow_dispatch`（输入 `tag`） | prepare → build → publish：构建 release APK，并把资产上传到**已存在的**GitHub Release |
 | `.github/workflows/build-android.yml` | `Android Native Build` | push `main`（按 `src-native/**`、`app.json`、`package.json` 等 paths 过滤）+ 手动 | 常规构建，只上传 Actions artifact `android-apk-${VERSION}`（retention 14），**不碰**Release |
-| `.github/workflows/build-android-test.yml` | `Build Android Test` | 仅手动 `workflow_dispatch` | 校验 native 工程能真编译，只出 debug APK，artifact `android-apk-debug`（retention 7） |
+| `.github/workflows/build-android-test.yml` | `Build Android Test` | 仅手动 `workflow_dispatch` | 复用 `build-android.yml`，产出内置 JS bundle、可脱离 Metro 运行的 release APK，artifact `android-apk-${VERSION}`（retention 14） |
 
 * **发版只由桌面端 Release 驱动**：`release-native.yml` 只执行 `gh release upload --clobber`，**从不** create / edit Release——`release.yml` 的 finalize 是 Release 的单一 writer。该 workflow 只保留 `types: [completed]`，并在 job 级校验 `conclusion == 'success'` 与「触发运行来自本仓库」。
 * `build-android-test.yml` **不跟随 CI 自动触发**（与 build-test.yml 同样只保留 `workflow_dispatch`），避免 Android SDK / NDK / Gradle 全量编译挤占 PR 队列；需要验证 native 可编译时手动触发即可。
-* `build-android-test.yml` 的 debug APK 不依赖任何签名 secret；debug 产物只做基础对齐与签名校验，16 KB 页对齐（`zipalign -P 16`）只在正式产物上强制。
+* `build-android-test.yml` 不传签名 secret 给复用工作流，因此 release APK 使用开发证书；仍检查 16 KB 页对齐、签名、内置非空 JS bundle 与非 debuggable 标记，不依赖 Metro。
 
 ### 8.2 版本与资产名
 
 * 三个 workflow 都从 `app.json` 的 `expo.version` 读取版本，并断言它等于 `package.json` 的 `version`，不一致直接 `::error::` 失败。
-* 资产名模板 `Deepseek.Harness.Android_<version>.apk`；debug 校验构建为 `Deepseek.Harness.Android_<version>_debug.apk`。版本跟随桌面端（见 §8.4）。
+* 三个 workflow 的资产名均为 `Deepseek.Harness.Android_<version>.apk`。版本跟随桌面端（见 §8.4）。
 * 发布资产同时包含 `SHA256SUMS.txt` 与 `THIRD_PARTY_NOTICES.md`；`app.config.js` 注入的声明会在签名校验步骤里与仓库内文件比对，缺全文即失败。
 * **只有提交了 `app.json` 的 tag 才能发版**：prepare 用 `git cat-file -e "${tag_commit}:app.json"` 守卫，早于本次迁移、不含 `app.json` 的历史 tag（如 `v0.21.0`）会被正确跳过；手动指定 tag 时用 `::error::`，`workflow_run` 触发时用 `::warning::` 跳过。
 * 手动触发要求 dispatch 的 ref 就是 tag 指向的提交；`release.yml` 的手动试跑（`test-<ref>-<run>` 预发布）不指向其构建提交，因此不会触发 Android 发版。
