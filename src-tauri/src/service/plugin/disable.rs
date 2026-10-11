@@ -103,14 +103,24 @@ pub(crate) fn has_patch_disable(profile: &Path, id: &str) -> bool {
 /// `Ok(false)` 且不写盘。
 pub(crate) fn add_patch_disable(profile: &Path, id: &str) -> Result<bool, String> {
     let path = profile.join(PATCH_FILE);
-    let content = fs::read_to_string(&path).unwrap_or_default();
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("DISABLE_PATCH_READ_FAILED: {e}")),
+    };
     let mut entries = match content.trim() {
         "" => Vec::new(),
         raw => match serde_yaml::from_str::<serde_yaml::Value>(raw)
             .map_err(|e| format!("DISABLE_PATCH_PARSE_FAILED: {e}"))?
         {
             serde_yaml::Value::Sequence(seq) => seq,
-            _ => Vec::new(),
+            serde_yaml::Value::Null => Vec::new(),
+            _ => {
+                return Err(
+                    "DISABLE_PATCH_UNSUPPORTED_SHAPE: cordis.patch.yml top level is not a list"
+                        .to_string(),
+                )
+            }
         },
     };
     let names = plugin_target_names(profile, id);
@@ -328,6 +338,67 @@ mod tests {
         assert!(!add_patch_disable(&profile, "dsh-better-sidebar").unwrap());
 
         let _ = fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn disable_rejects_non_sequence_patch_without_overwriting() {
+        let profile = build_profile("unsupported-shape", "m");
+        for original in [
+            "logLevel: debug\n",
+            "{}\n",
+            "existing patch content\n",
+            "true\n",
+            "42\n",
+            "!custom {config: keep}\n",
+        ] {
+            write_patch(&profile, original);
+            let result = disable_plugin_at(&profile, "dsh-better-sidebar");
+            assert_eq!(
+                fs::read(profile.join(PATCH_FILE)).unwrap(),
+                original.as_bytes(),
+                "patch was overwritten for {original:?}"
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "DISABLE_PATCH_UNSUPPORTED_SHAPE: cordis.patch.yml top level is not a list"
+            );
+        }
+        fs::remove_dir_all(&profile).unwrap();
+    }
+
+    #[test]
+    fn disable_rejects_unreadable_patch_without_overwriting() {
+        let profile = build_profile("unreadable-patch", "o");
+        let original = [0xff, 0xfe];
+        fs::write(profile.join(PATCH_FILE), original).unwrap();
+        let result = disable_plugin_at(&profile, "dsh-better-sidebar");
+        assert_eq!(fs::read(profile.join(PATCH_FILE)).unwrap(), original);
+        assert!(result
+            .unwrap_err()
+            .starts_with("DISABLE_PATCH_READ_FAILED:"));
+        fs::remove_dir_all(&profile).unwrap();
+    }
+
+    #[test]
+    fn disable_initializes_empty_patch_documents() {
+        let profile = build_profile("empty-documents", "n");
+        let expected: serde_yaml::Value =
+            serde_yaml::from_str("- id: dsh-better-sidebar\n  disabled: true\n").unwrap();
+        for original in [
+            "",
+            " \n",
+            "# empty patch\n",
+            "null\n",
+            "~\n",
+            "---\n",
+            "[]\n",
+        ] {
+            write_patch(&profile, original);
+            disable_plugin_at(&profile, "dsh-better-sidebar").unwrap();
+            let actual: serde_yaml::Value = serde_yaml::from_str(&read_patch(&profile)).unwrap();
+            assert_eq!(actual, expected, "unexpected patch for {original:?}");
+        }
+        fs::remove_dir_all(&profile).unwrap();
     }
 
     #[test]
