@@ -2,21 +2,25 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { BridgeRecordType, HostContext, RecordWatermark } from '../types'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
-import { z } from 'zod'
 import { KERNEL_RECORD_TYPE, MODEL_RECORD_TYPE } from '../config/constants'
 import { runtime } from '../config/runtime'
 import { server } from '../server'
 import { waitFor } from '../utils/abort'
-
-const watermarkSchema = z.object({
-  type: z.enum([KERNEL_RECORD_TYPE, MODEL_RECORD_TYPE]),
-  seq: z.number().int().nonnegative(),
-  encodedData: z.string(),
-}).strict().readonly().nullable()
+import { loadRuntimeZod } from '../utils/runtime-modules'
 
 export const checkpoint = defineService({
-  register(): () => void {
+  async register(): Promise<() => void> {
     const ctx = getServerContext<HostContext>(server)
+    const lifetime = runtime.lifetime
+    const z = await loadRuntimeZod(ctx.loader)
+    lifetime.signal.throwIfAborted()
+    if (runtime.lifetime !== lifetime || getServerContext<HostContext>(server) !== ctx)
+      throw new Error('BRIDGE_DISPOSED: Checkpoint projection owner changed during registration')
+    const watermarkSchema = z.object({
+      type: z.enum([KERNEL_RECORD_TYPE, MODEL_RECORD_TYPE]),
+      seq: z.number().int().nonnegative(),
+      encodedData: z.string(),
+    }).strict().readonly().nullable()
     return ctx.sessionProjections.register({
       key: 'bridgeCheckpoint',
       stateSchema: z.object({

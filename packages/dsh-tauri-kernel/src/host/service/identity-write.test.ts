@@ -8,6 +8,8 @@ import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { getServerContext } from 'dsh-h3/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
+import { resetRuntime, runtime } from '../config/runtime'
 import { loadRuntimeModules } from '../utils/runtime-modules'
 import { identity } from './identity'
 
@@ -44,7 +46,9 @@ function gateSessionImport(): { promise: Promise<typeof sessionModule>, resolve:
   return gate
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await resetRuntime()
+  runtime.lifetime = new AbortController()
   context = new Context()
   sessions = new SessionStore(context)
   projections = new SessionProjectionRegistry(context)
@@ -52,6 +56,8 @@ beforeEach(() => {
   context.on('session/event', (session, event) => published.push({ sessionId: session.id, event }))
   loader = {
     import: vi.fn(async (id) => {
+      if (id === 'zod')
+        return zodModule
       if (id === '@deepseek-ai/dsh-llm')
         return llmModule
       if (id === '@deepseek-ai/dsh-session')
@@ -66,6 +72,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await context.fiber.dispose()
+  await resetRuntime()
   vi.restoreAllMocks()
 })
 
@@ -78,7 +85,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it.each(['codex', 'claude'] as const)('commits one complete ignorable %s record using the real attached Session store', async (backend) => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     const candidate: KernelBinding = { backend, nativeSessionId: `native-${backend}`, sessionId: 'session-a' }
     const changed = vi.fn()
@@ -98,7 +106,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('snapshots caller-owned binding input without freezing or retaining the mutable input object', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     const candidate = { ...binding }
     await identity.append(agentOf(session), candidate)
@@ -111,7 +120,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('returns the current accepted watermark for duplicate identity without logging another record', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     expect(await identity.append(agentOf(session), binding)).toBe(0)
     const state = projections.stateOf(session, 'bridgeKernel')
@@ -130,7 +140,8 @@ describe('official Alpha2 kernel identity writer', () => {
     { ...binding, backend: 'claude' as const },
     { ...binding, nativeSessionId: 'native-b' },
   ])('refuses replacing an already committed native identity before importing any writer: %j', async (different) => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(session), binding)
     vi.mocked(loader.import).mockClear()
@@ -142,7 +153,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('rejects a foreign owner before a first native binding can enter the official log', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     await expect(identity.append(agentOf(session), { ...binding, sessionId: 'session-other' })).rejects.toThrow('BRIDGE_INHERITED_SESSION: A native binding must belong to the exact official session')
     expect(loader.import).not.toHaveBeenCalled()
@@ -152,7 +164,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('binds a real fork to its own distinct native identity without changing its parent', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(parent), binding)
     const child = sessions.fork(parent, undefined, SessionId('session-child'))
@@ -173,7 +186,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('rejects taking over the parent native id before importing any child writer', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(parent), binding)
     const child = sessions.fork(parent, undefined, SessionId('session-child'))
@@ -189,7 +203,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('freezes the first real child binding against a second native fork assignment', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(parent), binding)
     const child = sessions.fork(parent, undefined, SessionId('session-child'))
@@ -205,7 +220,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('cold-restores a repaired child and real descendant without reusing ancestor native ids', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(parent), binding)
     const child = sessions.fork(parent, undefined, SessionId('session-child'))
@@ -230,7 +246,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('allows only the first conflicting binding after concurrently awaited runtime imports', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     const gate = gateSessionImport()
     const results = Promise.allSettled([
@@ -253,7 +270,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('deduplicates concurrently awaited identical bindings into one real log commit', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     const gate = gateSessionImport()
     const results = Promise.all([
@@ -268,7 +286,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('rechecks projection capability after awaited imports and refuses writes after unregister', async () => {
-    const unregister = identity.register()
+    const unregister = await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessions.create(SessionId('session-a'))
     const gate = gateSessionImport()
     const pending = identity.append(agentOf(session), binding)
@@ -282,7 +301,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('recovers exact identity from real written log bytes without consulting any backend catalog', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const original = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(original), binding)
     const events: SessionEvent[] = JSON.parse(JSON.stringify(eventsOf(original)))
@@ -298,7 +318,8 @@ describe('official Alpha2 kernel identity writer', () => {
   })
 
   it('hydrates a usable detached checkpoint over real published events and freezes the canonical restored binding', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const original = sessions.create(SessionId('session-a'))
     await identity.append(agentOf(original), binding)
     original.append('turn/start', { turn: 0 })

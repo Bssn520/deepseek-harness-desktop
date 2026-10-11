@@ -11,13 +11,13 @@ import { session } from './service/session'
 import { sink } from './service/sink'
 
 export function apply(ctx: HostContext, config: Config = {}): void {
-  ctx.effect(function* () {
+  ctx.effect(async function* () {
     runtime.lifetime = new AbortController()
     yield server(ctx, config)
     yield () => session.dispose()
-    yield identity.register()
-    yield model.register()
-    yield checkpoint.register()
+    yield await identity.register()
+    yield await model.register()
+    yield await checkpoint.register()
     yield ctx.provide('nativeSessionBridge', { create: session.createInherited, prepare: session.prepare })
     yield ctx.on('agent/pre-step', adapter.admit, { global: true, prepend: true })
     yield ctx.on('agent/request', adapter.request, { global: true, prepend: true })
@@ -29,9 +29,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
     yield ctx.on('agent/disposed', ({ agent }) => {
       void adapter.remove(agent).catch((error: unknown) => ctx.logger.warn('dsh-tauri-kernel: native session disposal failed', error))
     }, { global: true })
-    yield ctx.effect(async function* () {
-      yield await adapter.register()
-      yield () => session.dispose()
-    }, `${PLUGIN_ID}: adapter lifetime`)
+    yield await adapter.register()
+    yield () => session.dispose()
   }, `${PLUGIN_ID}: official native adapter`)
 }

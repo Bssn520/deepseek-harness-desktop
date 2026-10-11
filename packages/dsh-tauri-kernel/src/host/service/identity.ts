@@ -4,29 +4,32 @@ import type { KernelBinding, KernelProjectionState } from '../../shared/types'
 import type { HostContext } from '../types'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
-import { z } from 'zod'
 import { BRIDGE_PROVIDER, KERNEL_RECORD_TYPE } from '../config/constants'
 import { runtime } from '../config/runtime'
 import { server } from '../server'
-import { loadRuntimeModules } from '../utils/runtime-modules'
-
-const nonemptyId = z.string().min(1).refine(value => value.trim().length > 0)
-const bindingSchema = z.object({
-  backend: z.enum(['codex', 'claude']),
-  nativeSessionId: nonemptyId,
-  sessionId: nonemptyId,
-}).strict().readonly()
-const viewSchema = bindingSchema.nullable()
-const stateSchema = z.object({
-  ownerSessionId: nonemptyId,
-  inheritedEventCount: z.number().int().nonnegative(),
-  inheritedBinding: viewSchema,
-  binding: viewSchema,
-}).strict().readonly()
+import { loadRuntimeModules, loadRuntimeZod } from '../utils/runtime-modules'
 
 export const identity = defineService({
-  register(): () => void {
+  async register(): Promise<() => void> {
     const ctx = getServerContext<HostContext>(server)
+    const lifetime = runtime.lifetime
+    const z = await loadRuntimeZod(ctx.loader)
+    lifetime.signal.throwIfAborted()
+    if (runtime.lifetime !== lifetime || getServerContext<HostContext>(server) !== ctx)
+      throw new Error('BRIDGE_DISPOSED: Kernel projection owner changed during registration')
+    const nonemptyId = z.string().min(1).refine(value => value.trim().length > 0)
+    const bindingSchema = z.object({
+      backend: z.enum(['codex', 'claude']),
+      nativeSessionId: nonemptyId,
+      sessionId: nonemptyId,
+    }).strict().readonly()
+    const viewSchema = bindingSchema.nullable()
+    const stateSchema = z.object({
+      ownerSessionId: nonemptyId,
+      inheritedEventCount: z.number().int().nonnegative(),
+      inheritedBinding: viewSchema,
+      binding: viewSchema,
+    }).strict().readonly()
     const projections = ctx.get('sessionProjections')
     if (typeof projections?.register !== 'function')
       throw new Error('BRIDGE_CORE_UNAVAILABLE: The official session projection registry is unavailable')
@@ -56,6 +59,7 @@ export const identity = defineService({
       wire: { viewSchema, view: state => state.binding },
       stateVersion: 2,
     })
+    runtime.bindingSchema = bindingSchema
     const dispose = ctx.on('agent/created', ({ agent, source }) => {
       if (source !== 'resume' || projections.stateOf(agent.session, 'bridgeKernel')?.binding == null)
         return
@@ -74,6 +78,8 @@ export const identity = defineService({
     return () => {
       dispose()
       unregister()
+      if (runtime.bindingSchema === bindingSchema)
+        runtime.bindingSchema = undefined
       runtime.coldRoutes.clear()
     }
   },
@@ -159,7 +165,9 @@ export const identity = defineService({
 })
 
 function parseBinding(value: unknown): KernelBinding {
-  const parsed = bindingSchema.safeParse(value)
+  if (!runtime.bindingSchema)
+    throw new Error('BRIDGE_CORE_UNAVAILABLE: The official kernel projection is not registered')
+  const parsed = runtime.bindingSchema.safeParse(value)
   if (!parsed.success)
     throw new Error('BRIDGE_BINDING_INVALID: Expected a complete supported backend, nonempty native session id, and nonempty official session id')
   return parsed.data

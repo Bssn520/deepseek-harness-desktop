@@ -1,4 +1,14 @@
+import type { z } from 'zod'
 import type { PlatformLoader, RuntimeModules } from '../types'
+
+export async function loadRuntimeZod(loader: PlatformLoader): Promise<typeof z> {
+  const value = await loader.import('zod')
+  const direct = (value as { z?: typeof z } | null)?.z
+  const resolved = direct ?? (loader.unwrapExports(value) as { z?: typeof z } | null)?.z
+  if (typeof resolved?.object !== 'function' || typeof resolved.string !== 'function' || typeof resolved.enum !== 'function' || typeof resolved.number !== 'function' || typeof resolved.array !== 'function')
+    throw new TypeError('BRIDGE_RUNTIME_EXPORT_MISSING: zod.z')
+  return resolved
+}
 
 export async function loadRuntimeModules(loader: PlatformLoader): Promise<RuntimeModules> {
   const [llm, session] = await Promise.all([loader.import('@deepseek-ai/dsh-llm'), loader.import('@deepseek-ai/dsh-session')])

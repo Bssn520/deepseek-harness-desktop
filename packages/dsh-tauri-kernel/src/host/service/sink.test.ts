@@ -21,6 +21,7 @@ import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import { getServerContext } from 'dsh-h3/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
 import { apply } from '../apply'
 import { BRIDGE_PROVIDER } from '../config/constants'
 import { resetRuntime, runtime } from '../config/runtime'
@@ -159,6 +160,8 @@ beforeEach(async () => {
   } as unknown as HostContext['webServer'])
   const loader: PlatformLoader = {
     async import(id) {
+      if (id === 'zod')
+        return zodModule
       if (id === '@deepseek-ai/dsh-llm')
         return llmModule
       if (id === '@deepseek-ai/dsh-session')
