@@ -88,6 +88,7 @@
         {
           "android": {
             "usesCleartextTraffic": true,
+            "buildArchs": ["arm64-v8a"],
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true,
             "enableBundleCompression": true,

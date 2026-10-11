@@ -53,6 +53,7 @@ describe('public Expo configuration packaged by expo-constants', () => {
     expect(exp.plugins).toContainEqual(['expo-build-properties', {
       android: {
         usesCleartextTraffic: true,
+        buildArchs: ['arm64-v8a'],
         enableMinifyInReleaseBuilds: true,
         enableShrinkResourcesInReleaseBuilds: true,
         enableBundleCompression: true,
