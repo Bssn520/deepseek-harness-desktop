@@ -712,16 +712,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // node 会让 dsh 派生的子进程各自新建可见控制台窗口（频繁闪烁 cmd 黑窗），
     // 因此 Windows 上改用“隐藏控制台”方式启动，见 win_spawn 模块。
     let active_profile = crate::service::profile::active_profile(&app_handle);
-    let app_core_dir = config::get_dsh_install_path(&app_handle);
-    let core_dir = if dsh_binary_path == config::get_dsh_binary_path(&app_handle) {
-        app_core_dir
-    } else {
-        dsh_binary_path
-            .parent()
-            .and_then(std::path::Path::parent)
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or(app_core_dir)
-    };
+    let core_dir = crate::service::core::active_core_dir(&app_handle);
     mark_phase("pre_spawn_setup", &mut phase_started);
     super::startup::note_spawn();
     let spawn_result: SpawnResult = {

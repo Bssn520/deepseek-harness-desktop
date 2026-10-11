@@ -23,18 +23,16 @@ const VERDICT_CHIPS: Record<MigrationVerdict, { key: string, color: 'default' | 
 /** 档案级数据类别 → 源档案里的文件名 */
 const DATA_FILES: Record<MigrationDataKind, string> = {
   patch: 'cordis.patch.yml',
-  disabled: 'disabled-plugins.json',
   policy: 'pnpm-workspace.yaml',
   credentials: '.credentials.yaml',
 }
 
 /** 数据项的列出顺序：凭据固定最后 */
-const DATA_ORDER: MigrationDataKind[] = ['patch', 'disabled', 'policy', 'credentials']
+const DATA_ORDER: MigrationDataKind[] = ['patch', 'policy', 'credentials']
 
 /** 档案级数据类别 → 说明文案 key */
 const DATA_LABEL_KEYS: Record<MigrationDataKind, string> = {
   patch: 'profiles.migrate_data_patch',
-  disabled: 'profiles.migrate_data_disabled',
   policy: 'profiles.migrate_data_policy',
   credentials: 'profiles.migrate_data_credentials',
 }

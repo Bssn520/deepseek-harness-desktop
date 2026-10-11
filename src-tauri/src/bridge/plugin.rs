@@ -286,9 +286,9 @@ pub fn recover_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 禁用单个已安装插件：从 profile 的 `dsh.profile.bundles` 移除（代码完全不加载），
-/// 并写入 profile 的独立禁用清单。与卸载不同，禁用保留 node_modules 内的包体，
-/// 启用时无需重新下载。
+/// 禁用单个已安装插件：在 profile 的 `cordis.patch.yml` 写入 `disabled: true` 覆盖
+/// （与官方 Plugins 页 / dshmarket 同一处状态）。与卸载不同，禁用保留 node_modules
+/// 内的包体与 `dsh.profile.bundles` 选择，启用时无需重新下载。
 #[tauri::command]
 pub fn disable_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
     plugin::disable(&app_handle, &id)?;
@@ -296,19 +296,13 @@ pub fn disable_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), Strin
     Ok(())
 }
 
-/// 启用单个已禁用的插件：加回 `dsh.profile.bundles` 并从独立禁用清单移除。
+/// 启用单个已禁用的插件：摘除 patch 里该插件的禁用覆盖（其余配置保留）。
 ///
-/// 若插件同时被 profile 的 `cordis.patch.yml` 配置覆盖禁用（`disabled: true`，
-/// 优先级高于桌面禁用清单），必须显式传 `clear_config_override=true`（前端
-/// 弹窗确认后）才会移除该覆盖；否则返回 `ENABLE_CONFIG_OVERRIDE`，避免
-/// 「声称启用成功、运行期却仍被配置禁用」的虚假成功（issue #399）。
+/// 未能摘除时会返回 `ENABLE_NOT_DISABLED`，避免「声称启用成功、运行期却仍被禁用」
+/// 的虚假成功（issue #399）。
 #[tauri::command]
-pub fn enable_dsh_plugin(
-    app_handle: AppHandle,
-    id: String,
-    clear_config_override: Option<bool>,
-) -> Result<(), String> {
-    plugin::enable(&app_handle, &id, clear_config_override.unwrap_or(false))?;
+pub fn enable_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::enable(&app_handle, &id)?;
     plugin::watch::force_emit(&app_handle);
     Ok(())
 }

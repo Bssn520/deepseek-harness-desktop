@@ -308,6 +308,18 @@ npx vitest run --project unit packages/dsh-tauri-scheduler  # 9 test files, 74 t
 新增单测 `src/host/tools/update-task.test.ts`（8 例）：工具名、`task_id` 唯一必填与字段集、
 只并入显式字段、`enabled` 启停语义、`run_now` 触发时机、更新失败不触发、更新成功后触发失败如实回报。
 
+### 调度工具名称与子代理限制对齐（2026-10-11）
+
+桌面公开工具名统一为 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete`，不保留 `scheduler_*` 可调用别名。宿主注册、参数中的工具引用、客户端创建卡片匹配统一消费 `src/shared/constants.ts` 的 `SCHEDULE_TOOL_NAMES`；插件包名、HTTP 路径、存储键、错误码与 CSS 前缀不变。
+
+根因取证：已安装的 `@deepseek-ai/dsh-web-app@0.2.1-alpha.2` 在 `presets/standard.patch.yml:93-115`、`presets/ptc.patch.yml:93-115`、`presets/cordis.patch.yml:92-114` 独立为 `tool-subagent` 与 `tool-subagent-fork` 配置 `toolFilter.deny`，其中四项均为 `schedule_*`。`@deepseek-ai/dsh-tool-subagent/lib/index.js:395-405` 从插件配置构造请求并透传该 filter（不是模型传参），随后 `@deepseek-ai/dsh-subagent/lib/types/manager.js:388` 将其放入 composition，`lib/types/child-agent.js:169-170` 调用 `childCtx.tools.restrict(composition.toolFilter)`。当桌面只注册 `scheduler_*` 时，严格校验报未知 `schedule_*`，在子作用域创建阶段失败；没有调度工具被调用。
+
+`cordis.patch.yml` 对官方 `schedule`、`ui-schedule` 的永久禁用保持不变，它只禁用这些 loader 条目，不改写 Web 预设里其他条目的配置。此次使用同一公开工具名后，现有核心限制可以正确隐藏子代理的桌面调度工具，父作用域仍可调用；不删除 deny、不忽略未知项、不加壳层补丁。
+
+回归检查先在旧注册名下实跑，复现精确的 `tools.restrict() names unknown global tools "schedule_create", "schedule_delete", "schedule_list", "schedule_update"`，再验证迁移后的真实 ToolRuntime 能建立限制作用域且保留父作用域工具。测试使用内存 Context，不读写真实用户目录；本地未执行 Build。
+
+验证：源码 typecheck 与全仓 lint 通过；`vitest run --project unit --sequence.shuffle --sequence.seed=<1101..1105> packages/dsh-tauri-scheduler test/plugin-patch-targets.test.ts` 连续五次通过，每次 35 个文件 / 809 个用例。
+
 ## 待同步项
 
 无。`f1bc91a..ecfe1e6` 的全部提交已评估并由用户逐条裁决（见上），本地行为要求「等待中」已实施。

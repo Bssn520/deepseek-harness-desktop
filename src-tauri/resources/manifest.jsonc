@@ -73,7 +73,8 @@
       "dsh-tauri-panel-scheduler",
       "dsh-tauri-ssh-ui",
       "dsh-tauri-turnrewind",
-      "dsh-tauri-connection"
+      "dsh-tauri-connection",
+      "dsh-tauri-bridge"
     ],
     "built-in": [
       {
@@ -93,6 +94,12 @@
         "spec": "dsh-tauri-mobile-ui",
         "name": "DSH Tauri Mobile UI",
         "repo": "https://github.com/dsh-tauri-desk/deepseek-harness-desktop/tree/main/packages/dsh-tauri-mobile-ui"
+      },
+      {
+        "id": "dsh-tauri-kernel",
+        "spec": "dsh-tauri-kernel",
+        "name": "DSH Tauri Kernel",
+        "repo": "https://github.com/dsh-tauri/deepseek-harness-desktop/tree/main/packages/dsh-tauri-kernel"
       },
       {
         "id": "dsh-tauri-worktree",

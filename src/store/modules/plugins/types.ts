@@ -17,7 +17,6 @@ export interface Plugin {
   description: string
   repoUrl: string
   bundled: boolean
-  disabled: boolean
   patchDisabled: boolean
   recommended: boolean
   fix: boolean
@@ -87,7 +86,6 @@ export interface PluginSearchResult {
 export interface PluginsManagerRuntime {
   toast: boolean
   restartOnSettle: boolean
-  clearConfigOverride?: boolean
 }
 
 export interface PluginGroup {

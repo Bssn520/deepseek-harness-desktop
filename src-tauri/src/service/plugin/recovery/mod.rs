@@ -24,7 +24,7 @@ use extract::{
     classify_reason, extract_duplicate_loader_entry, extract_plugin_refs, extract_slot_conflict,
 };
 use ownership::resolve_recovery_plugins;
-pub(crate) use uninstall::{patch_entry_targets, remove_bundle};
+pub(crate) use uninstall::patch_entry_targets;
 use uninstall::{remove_plugin_dir, remove_plugin_from_manifest, strip_cordis_patch_for};
 
 // plugin 兄弟模块的再导出：子模块经 `super::` 统一从这里取。

@@ -31,6 +31,7 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
+    "THIRD_PARTY_NOTICES.md",
     "cordis.patch.yml",
     "dist"
   ],
@@ -52,8 +53,8 @@
     }
   },
   "scripts": {
-    "build": "tsx scripts/taiwindcss.ts && tsdown",
-    "dev": "tsx scripts/taiwindcss.ts --watch --no-minify & tsdown --watch",
+    "build": "tsx scripts/taiwindcss.ts --minify && tsdown && tsx scripts/taiwindcss.ts",
+    "dev": "tsx scripts/taiwindcss.ts --watch & tsdown --watch",
     "generate": "tsx scripts/taiwindcss.ts",
     "prepublishOnly": "nr build",
     "start": "tsx src/index.ts",
@@ -66,8 +67,6 @@
   },
   "devDependencies": {
     "@css-render/plugin-bem": "catalog:ui",
-    "@deepseek-ai/dsh-client-ui-primitives": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-renderer": "catalog:dsh",
     "@gravity-ui/icons": "catalog:runtime",
     "@tailwindcss/postcss": "catalog:build",
     "css-render": "catalog:ui",

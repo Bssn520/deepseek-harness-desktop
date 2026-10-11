@@ -61,16 +61,13 @@
     "unstorage": "catalog:utils"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-api-session-controller": "catalog:dsh",
-    "@deepseek-ai/dsh-api-workspace-controller": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-renderer": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-slots": "catalog:dsh",
     "@reause/core": "catalog:runtime",
     "@types/lodash-es": "catalog:types",
     "css-render": "catalog:ui",
     "date-fns": "catalog:utils",
     "dsh-tauri-tsdown": "workspace:*",
     "lodash-es": "catalog:utils",
+    "react-if-lite": "catalog:runtime",
     "tailwind-variants": "catalog:runtime",
     "tsdown": "catalog:cli",
     "valtio": "catalog:",
