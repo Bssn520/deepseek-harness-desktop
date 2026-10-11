@@ -47,7 +47,7 @@
 
 - 🪶 **Escritorio nativo** — Tauri 2 + React 19 + HeroUI 3, con la interfaz local de Harness integrada.
 - 🔄 **Gestión del runtime** — Instalá dependencias, elegí versiones del núcleo y accedé a actualizaciones del escritorio y del núcleo.
-- 🔀 **Sesiones con distintos motores** — Usá Codex / Claude en una misma interfaz, con sus herramientas nativas.
+- 🔀 **Soporte para distintos motores** — Usá DSH / Codex / Claude en una misma interfaz, con sus herramientas nativas.
 - 🧩 **Gestión de plugins** — 13 plugins integrados; instalación desde directorios locales, desactivación de integrados y gestión de plugins comunitarios.
 - 🗂️ **Configuración por perfiles** — Separá plugins y ajustes, con migración de los datos del perfil en un clic, backup y clonado.
 - 💽 **Directorio de datos** — Elegí la ubicación al instalar en Windows; migrá o revertí los datos desde Ajustes en Windows, macOS y Linux.

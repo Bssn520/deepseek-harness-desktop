@@ -47,7 +47,7 @@
 
 - 🪶 **Native desktop** — Tauri 2 + React 19 + HeroUI 3, embedding the local Harness UI.
 - 🔄 **Runtime management** — Install dependencies, select core versions, and access desktop/core updates.
-- 🔀 **Multi-backend sessions** — Use Codex / Claude in one interface, powered by their native tools.
+- 🔀 **Multi-backend support** — Use DSH / Codex / Claude in one interface, powered by their native tools.
 - 🧩 **Plugin management** — 13 built-in plugins, plus local-directory installs, built-in disabling, community plugin installation, upgrades, removal, and error details.
 - 🗂️ **Profile configuration** — Separate plugin/settings configurations, with one-click profile data migration, backup, and cloning.
 - 💽 **Data directory** — Pick where data lives during installation (Windows); migrate or roll it back later in Settings on Windows, macOS, and Linux.
