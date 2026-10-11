@@ -1,3 +1,4 @@
+import { SCHEDULE_TOOL_NAMES } from '../../shared/constants'
 import { task } from '../service/task'
 import { nullableText, scheduleParameters, textBlock } from '../utils/tool'
 
@@ -17,7 +18,7 @@ const outputSchema = {
 
 export function createTaskTool(): any {
   return {
-    name: 'scheduler_create',
+    name: SCHEDULE_TOOL_NAMES.create,
     description:
       'Create a scheduled task that runs a prompt automatically on a schedule. '
       + 'Use when the user asks to set up a daily, weekly, workday, or interval automation '

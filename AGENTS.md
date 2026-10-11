@@ -40,6 +40,12 @@
 
 ---
 
+## 调度能力归属与排查边界
+
+- 桌面调度由 `packages/dsh-tauri-scheduler` 唯一承载，公开工具名为 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete`；不注册 `scheduler_*` 别名。
+- 包内 `cordis.patch.yml` 始终禁用官方 `schedule`、`ui-schedule` 条目。接管官方工具名不等于启用官方包；存储、执行和 UI 仍归桌面实现。
+- 官方 Web 预设的 `tool-subagent`、`tool-subagent-fork` 分别配置 `toolFilter.deny: schedule_*`。禁用调度条目不会删除其他条目的限制配置；`tools.restrict()` 报未知工具名是作用域构造失败，不是模型调用了该工具。必须先定位实际预设与注册名再判断，不能把 guard、提示词、调用三者混为一谈。
+
 ## 沟通与评论规范 (Reply & Comment Rules)
 
 回复用户、以及在 issue / PR 下留言时，一律适用：

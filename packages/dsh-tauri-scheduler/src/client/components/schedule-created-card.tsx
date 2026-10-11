@@ -2,6 +2,7 @@ import type { ReactElement } from 'react'
 import type { Translate } from '../locales/index.types'
 import type { TaskView } from '../types'
 import { Button, Card, Clock, Icon } from 'dsh-tauri-ui/client'
+import { SCHEDULE_TOOL_NAMES } from '../../shared/constants'
 import { describeSchedule } from './schedule.utils'
 
 export function ScheduleCreatedCard({ task, currentTask, openTaskDetail, t }: {
@@ -13,7 +14,7 @@ export function ScheduleCreatedCard({ task, currentTask, openTaskDetail, t }: {
   const current = currentTask ?? task
   const deleted = currentTask === null
   return (
-    <Card data-tool="scheduler_create" className="mx-0 max-w-[520px]">
+    <Card data-tool={SCHEDULE_TOOL_NAMES.create} className="mx-0 max-w-[520px]">
       <Card.Header>
         <Card.Icon className="h-[32px] w-[32px] border-none"><Icon as={Clock} size={18} aria-hidden="true" /></Card.Icon>
         <Card.Content>

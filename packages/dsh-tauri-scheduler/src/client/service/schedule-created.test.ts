@@ -22,7 +22,7 @@ function content(value: unknown) {
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-describe('durable scheduler_create payload', () => {
+describe('durable schedule_create payload', () => {
   it.each<TaskView['schedule']>([
     { kind: 'once', at: '2026-10-11T09:00:00Z', timeZone: 'UTC' },
     { kind: 'hourly', minute: 15, timeZone: 'UTC' },

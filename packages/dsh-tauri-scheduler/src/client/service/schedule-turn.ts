@@ -1,5 +1,6 @@
 import type { ConversationNodeDefinition, TurnLocation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { TaskView } from '../types'
+import { SCHEDULE_TOOL_NAMES } from '../../shared/constants'
 import { decodeCreatedTask } from './schedule-created'
 
 export interface ScheduleCreatedTask {
@@ -75,7 +76,7 @@ export const scheduleTurnDefinition: ConversationNodeDefinition<ScheduleTurnStat
       return context.state
     const message = match.event.data.message
     const callId = String(message.source.callId)
-    if (context.state.calls.get(callId)?.name !== 'scheduler_create' || message.isError === true)
+    if (context.state.calls.get(callId)?.name !== SCHEDULE_TOOL_NAMES.create || message.isError === true)
       return context.state
     if (context.state.created.some(created => created.callId === callId))
       return context.state
