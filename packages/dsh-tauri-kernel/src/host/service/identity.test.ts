@@ -9,6 +9,8 @@ import * as sessionModule from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { getServerContext } from 'dsh-h3/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
+import { resetRuntime, runtime } from '../config/runtime'
 import { identity } from './identity'
 
 vi.mock('dsh-h3/utils', () => ({ getServerContext: vi.fn() }))
@@ -37,11 +39,13 @@ function agentOf(session: Session): Agent {
   return { id: session.id, session } as Agent
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await resetRuntime()
+  runtime.lifetime = new AbortController()
   context = new Context()
   projections = new SessionProjectionRegistry(context)
   loader = {
-    import: vi.fn(async id => id === '@deepseek-ai/dsh-llm' ? llmModule : sessionModule),
+    import: vi.fn(async id => id === 'zod' ? zodModule : id === '@deepseek-ai/dsh-llm' ? llmModule : sessionModule),
     unwrapExports: value => value,
   }
   context.provide('loader', loader as HostContext['loader'])
@@ -50,12 +54,38 @@ beforeEach(() => {
 
 afterEach(async () => {
   await context.fiber.dispose()
+  await resetRuntime()
   vi.restoreAllMocks()
 })
 
 describe('official kernel identity projection', () => {
-  it('registers a nullable complete wire value rather than inferring native identity from model routes', () => {
-    identity.register()
+  it('refuses a late schema registration after the captured bridge lifetime is aborted', async () => {
+    const schemaImport = Promise.withResolvers<typeof zodModule>()
+    vi.mocked(loader.import).mockImplementation(() => schemaImport.promise)
+    const registering = identity.register()
+    const rejection = expect(registering).rejects.toThrow('BRIDGE_DISPOSED')
+    await resetRuntime()
+    schemaImport.resolve(zodModule)
+    await rejection
+    expect(projections.snapshot(sessionFrom()).values).toEqual({})
+    expect(runtime.bindingSchema).toBeUndefined()
+  })
+
+  it('refuses a late schema registration after a new bridge lifetime supersedes it', async () => {
+    const schemaImport = Promise.withResolvers<typeof zodModule>()
+    vi.mocked(loader.import).mockImplementation(() => schemaImport.promise)
+    const registering = identity.register()
+    const rejection = expect(registering).rejects.toThrow('BRIDGE_DISPOSED: Kernel projection owner changed during registration')
+    runtime.lifetime = new AbortController()
+    schemaImport.resolve(zodModule)
+    await rejection
+    expect(projections.snapshot(sessionFrom()).values).toEqual({})
+    expect(runtime.bindingSchema).toBeUndefined()
+  })
+
+  it('registers a nullable complete wire value rather than inferring native identity from model routes', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = Session.create(SessionId('session-a'))
     expect(projections.stateOf(session, 'bridgeKernel')?.binding).toBeNull()
     expect(projections.snapshot(session)).toEqual({ asOfSeq: -1, values: { bridgeKernel: null } })
@@ -63,8 +93,9 @@ describe('official kernel identity projection', () => {
     expect(() => identity.resolve(agent)).toThrow('BRIDGE_BINDING_MISSING')
   })
 
-  it('reads the exact native and owner identity from a legal ignorable official log record', () => {
-    identity.register()
+  it('reads the exact native and owner identity from a legal ignorable official log record', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessionFrom([kernelEvent(binding)])
     expect(identity.resolve(agentOf(session))).toEqual({ backend: 'codex', nativeSessionId: 'native-a', sessionId: 'session-a' })
     expect(projections.snapshot(session).values).toEqual({ bridgeKernel: { backend: 'codex', nativeSessionId: 'native-a', sessionId: 'session-a' } })
@@ -72,8 +103,9 @@ describe('official kernel identity projection', () => {
     expect(Object.isFrozen(projections.stateOf(session, 'bridgeKernel'))).toBe(true)
   })
 
-  it('restores the whole identity after cold JSON roundtrip using the real official projection restore API', () => {
-    identity.register()
+  it('restores the whole identity after cold JSON roundtrip using the real official projection restore API', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const events: SessionEvent[] = JSON.parse(JSON.stringify([kernelEvent({ backend: 'claude', nativeSessionId: 'native-cold', sessionId: 'session-a' })]))
     const session = sessionFrom(events)
     const restored = projections.restore({}, events, SessionLogOffset(0), session.header, session.inheritedEventCount)
@@ -82,8 +114,9 @@ describe('official kernel identity projection', () => {
     expect(projections.viewCheckpoint(restored.checkpoint)).toEqual({ bridgeKernel: { backend: 'claude', nativeSessionId: 'native-cold', sessionId: 'session-a' } })
   })
 
-  it('freezes the official binding when a cold checkpoint is parsed and hydrated into the registry', () => {
-    identity.register()
+  it('freezes the official binding when a cold checkpoint is parsed and hydrated into the registry', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const events: SessionEvent[] = [
       kernelEvent(binding),
       { type: 'session/end-seed', seq: SessionSeq(1), time: 1001, data: {} },
@@ -103,8 +136,9 @@ describe('official kernel identity projection', () => {
     expect(Object.isFrozen(projections.snapshot(restored).values.bridgeKernel)).toBe(true)
   })
 
-  it('ignores foreign record types and records without the legal ignorable marker', () => {
-    identity.register()
+  it('ignores foreign record types and records without the legal ignorable marker', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const events = [
       kernelEvent({ backend: 'codex' }, 0, { type: 'plugin:other/kernel', ignorable: true }),
       kernelEvent(binding, 1, { type: 'turn/start' }),
@@ -127,14 +161,16 @@ describe('official kernel identity projection', () => {
     { ...binding, sessionId: '' },
     { ...binding, sessionId: '\t' },
     { ...binding, delta: true },
-  ])('rejects malformed or incomplete plugin identity without accepting a partial payload: %j', (value) => {
-    identity.register()
+  ])('rejects malformed or incomplete plugin identity without accepting a partial payload: %j', async (value) => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessionFrom([kernelEvent(value)])
     expect(() => projections.stateOf(session, 'bridgeKernel')).toThrow('BRIDGE_BINDING_INVALID')
   })
 
-  it('reuses the same state reference for duplicate complete records and unrelated official events', () => {
-    identity.register()
+  it('reuses the same state reference for duplicate complete records and unrelated official events', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const first = kernelEvent(binding)
     const second = kernelEvent({ ...binding }, 1)
     const third: SessionEvent = { type: 'turn/start', seq: SessionSeq(2), time: 1002, data: { turn: 0 } }
@@ -153,14 +189,16 @@ describe('official kernel identity projection', () => {
   it.each([
     { ...binding, backend: 'claude' as const },
     { ...binding, nativeSessionId: 'native-b' },
-  ])('refuses conflicting complete binding history on cold replay: %j', (different) => {
-    identity.register()
+  ])('refuses conflicting complete binding history on cold replay: %j', async (different) => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessionFrom([kernelEvent(binding), kernelEvent(different, 1)])
     expect(() => projections.stateOf(session, 'bridgeKernel')).toThrow('BRIDGE_BINDING_IMMUTABLE')
   })
 
-  it('retains an inherited parent identity only as a non-executable fork source', () => {
-    identity.register()
+  it('retains an inherited parent identity only as a non-executable fork source', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessionFrom([kernelEvent(binding)])
     const child = Session.create(SessionId('session-child'), [kernelEvent(binding)], {
       ...parent.header,
@@ -180,8 +218,9 @@ describe('official kernel identity projection', () => {
     expect(identity.resolve(agentOf(parent))).toEqual(binding)
   })
 
-  it('rejects a foreign owner record outside the exact inherited prefix on cold replay', () => {
-    identity.register()
+  it('rejects a foreign owner record outside the exact inherited prefix on cold replay', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const foreign = { ...binding, sessionId: 'session-other' }
     const original = sessionFrom([kernelEvent(foreign)])
     expect(() => projections.stateOf(original, 'bridgeKernel')).toThrow('BRIDGE_INHERITED_SESSION')
@@ -195,8 +234,9 @@ describe('official kernel identity projection', () => {
     expect(() => projections.restore({}, events, SessionLogOffset(0), child.header, child.inheritedEventCount)).toThrow('BRIDGE_INHERITED_SESSION')
   })
 
-  it('accepts the first child-owned record at the exact fork cut and keeps it immutable', () => {
-    identity.register()
+  it('accepts the first child-owned record at the exact fork cut and keeps it immutable', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessionFrom([kernelEvent(binding)])
     const childBinding: KernelBinding = { backend: 'codex', nativeSessionId: 'native-child', sessionId: 'session-child' }
     const child = Session.create(SessionId('session-child'), [kernelEvent(binding)], {
@@ -216,8 +256,9 @@ describe('official kernel identity projection', () => {
     expect(identity.resolve(agentOf(parent))).toEqual(binding)
   })
 
-  it('rejects a child-owned record that tries to reuse its inherited native session', () => {
-    identity.register()
+  it('rejects a child-owned record that tries to reuse its inherited native session', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessionFrom([kernelEvent(binding)])
     const events = [kernelEvent(binding), kernelEvent({ ...binding, sessionId: 'session-child' }, 1)]
     expect(() => projections.restore({}, events, SessionLogOffset(0), {
@@ -228,8 +269,9 @@ describe('official kernel identity projection', () => {
     }, SessionLogOffset(1))).toThrow('BRIDGE_INHERITED_SESSION: A fork must receive a distinct native session identity')
   })
 
-  it('does not mistake a grandparent prefix binding for an unbound immediate fork parent', () => {
-    identity.register()
+  it('does not mistake a grandparent prefix binding for an unbound immediate fork parent', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const parent = sessionFrom([kernelEvent(binding)])
     const child = Session.create(SessionId('session-grandchild'), [kernelEvent(binding)], {
       ...parent.header,
@@ -242,8 +284,9 @@ describe('official kernel identity projection', () => {
     expect(() => identity.resolve(agentOf(child))).toThrow('BRIDGE_BINDING_MISSING')
   })
 
-  it('cold-restores a descendant using only its own identity while retaining the exact immediate fork parent', () => {
-    identity.register()
+  it('cold-restores a descendant using only its own identity while retaining the exact immediate fork parent', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const childBinding: KernelBinding = { backend: 'codex', nativeSessionId: 'native-child', sessionId: 'session-child' }
     const descendantBinding: KernelBinding = { backend: 'codex', nativeSessionId: 'native-grandchild', sessionId: 'session-grandchild' }
     const events: SessionEvent[] = JSON.parse(JSON.stringify([kernelEvent(binding), kernelEvent(childBinding, 1), { type: 'session/end-seed', seq: 2, time: 1002, data: { inherited: true } }, kernelEvent(descendantBinding, 3)]))
@@ -266,8 +309,9 @@ describe('official kernel identity projection', () => {
     expect(Object.isFrozen(projections.stateOf(descendant, 'bridgeKernel')!.inheritedBinding)).toBe(true)
   })
 
-  it('discards old version-one checkpoints instead of exposing an inherited binding as the child identity', () => {
-    identity.register()
+  it('discards old version-one checkpoints instead of exposing an inherited binding as the child identity', async () => {
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const events = [kernelEvent(binding)]
     const child = Session.create(SessionId('session-child'), events, {
       ...Session.create(SessionId('session-child')).header,
@@ -282,8 +326,9 @@ describe('official kernel identity projection', () => {
     expect(restored.checkpoint.bridgeKernel).toEqual({ ver: 2, seq: 0, val: { ownerSessionId: 'session-child', inheritedEventCount: 1, inheritedBinding: binding, binding: null } })
   })
 
-  it('removes the projection capability when its registering contribution unloads', () => {
-    const unregister = identity.register()
+  it('removes the projection capability when its registering contribution unloads', async () => {
+    const unregister = await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessionFrom([kernelEvent(binding)])
     expect(identity.resolve(agentOf(session))).toEqual(binding)
     unregister()
@@ -293,7 +338,8 @@ describe('official kernel identity projection', () => {
   })
 
   it('fails before any append when the actual alpha official module lacks the plugin record writer', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = Session.create(SessionId('session-a'))
     const append = vi.spyOn(session, 'append')
     const before = session.seq
@@ -306,7 +352,8 @@ describe('official kernel identity projection', () => {
   })
 
   it('rejects a different binding before importing runtime capabilities or modifying the log', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = sessionFrom([kernelEvent(binding)])
     const before = session.seq
     const append = vi.spyOn(session, 'append')
@@ -318,7 +365,8 @@ describe('official kernel identity projection', () => {
   })
 
   it('rejects a requested foreign owner before importing runtime capabilities or modifying the log', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = Session.create(SessionId('session-a'))
     const append = vi.spyOn(session, 'append')
     await expect(identity.append(agentOf(session), { ...binding, sessionId: 'session-other' })).rejects.toThrow('BRIDGE_INHERITED_SESSION')
@@ -335,7 +383,8 @@ describe('official kernel identity projection', () => {
   })
 
   it('rejects invalid append payloads before any log write', async () => {
-    identity.register()
+    await identity.register()
+    vi.mocked(loader.import).mockClear()
     const session = Session.create(SessionId('session-a'))
     await expect(identity.append(agentOf(session), { ...binding, nativeSessionId: '  ' })).rejects.toThrow('BRIDGE_BINDING_INVALID')
     expect(loader.import).not.toHaveBeenCalled()

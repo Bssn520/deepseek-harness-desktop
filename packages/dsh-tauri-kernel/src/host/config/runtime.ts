@@ -1,5 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { BackendDetection } from '../../shared/types'
+import type { z } from 'zod'
+import type { NativeModelCatalog, NativeTurnOptions } from '../../shared/native-model'
+import type { BackendDetection, KernelBinding } from '../../shared/types'
 import type { NativeSink } from '../backends/types'
 import type { OfficialSink } from '../service/sink.types'
 import type { AdmittedStep, BridgeRecordType, NativeEntry, NativePending, RecordWatermark } from '../types'
@@ -19,12 +21,18 @@ export const runtime = {
   modelWrites: new Map<Agent, Promise<void>>(),
   checkpoints: new Map<Agent, Promise<void>>(),
   verified: new Map<Agent, Map<BridgeRecordType, RecordWatermark>>(),
+  bindingSchema: undefined as z.ZodType<KernelBinding> | undefined,
+  optionsSchema: undefined as z.ZodType<NativeTurnOptions> | undefined,
+  catalogSchema: undefined as z.ZodType<NativeModelCatalog> | undefined,
   ready: false,
   lifetime: new AbortController(),
 }
 
 export async function resetRuntime(): Promise<void> {
   runtime.ready = false
+  runtime.bindingSchema = undefined
+  runtime.optionsSchema = undefined
+  runtime.catalogSchema = undefined
   runtime.lifetime.abort(new Error('BRIDGE_DISPOSED'))
   for (const controller of runtime.controllers.values())
     controller.abort(new Error('BRIDGE_DISPOSED'))

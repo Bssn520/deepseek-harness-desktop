@@ -6,6 +6,7 @@ import * as llmModule from '@deepseek-ai/dsh-llm'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { getServerContext } from 'dsh-h3/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
 import { apply } from './apply'
 import { resetRuntime, runtime } from './config/runtime'
 import { server } from './server'
@@ -22,6 +23,7 @@ function deferred<T>() {
 }
 
 let context: Context
+let loader: PlatformLoader
 let projections: SessionProjectionRegistry
 let registered: Map<string, WebRoute>
 let imports: ReturnType<typeof deferred<void>>
@@ -49,8 +51,10 @@ beforeEach(async () => {
       return () => registered.delete(route.path)
     },
   } as unknown as HostContext['webServer'])
-  const loader: PlatformLoader = {
+  loader = {
     async import(id) {
+      if (id === 'zod')
+        return zodModule
       importStarted.resolve()
       await imports.promise
       if (id === '@deepseek-ai/dsh-llm')
@@ -88,6 +92,57 @@ async function ready() {
 }
 
 describe('owned bridge application lifecycle', () => {
+  it('holds projection registration until host Zod resolves and removes the late schema on unload', async () => {
+    const schemaImport = deferred<typeof zodModule>()
+    const schemaStarted = deferred<void>()
+    releases.push(() => schemaImport.resolve(zodModule))
+    const originalImport = loader.import.bind(loader)
+    loader.import = vi.fn(async (id) => {
+      if (id !== 'zod')
+        return originalImport(id)
+      schemaStarted.resolve()
+      return schemaImport.promise
+    })
+    const fiber = start()
+    await schemaStarted.promise
+    const official = sessionModule.Session.create(sessionModule.SessionId('schema-startup'))
+    expect(getServerContext(server)).toBe(fiber.ctx)
+    expect(projections.stateOf(official, 'bridgeKernel')).toBeUndefined()
+    expect(runtime.bindingSchema).toBeUndefined()
+    expect(runtime.optionsSchema).toBeUndefined()
+    expect(runtime.catalogSchema).toBeUndefined()
+    const unloading = fiber.dispose()
+    schemaImport.resolve(zodModule)
+    await unloading
+    expect(projections.snapshot(official).values).toEqual({})
+    expect(runtime.bindingSchema).toBeUndefined()
+    expect(runtime.optionsSchema).toBeUndefined()
+    expect(runtime.catalogSchema).toBeUndefined()
+    expect(registerAdapter).not.toHaveBeenCalled()
+    expect(registered.size).toBe(0)
+    expect(() => getServerContext(server)).toThrow('dsh-h3: service is not active')
+  }, 10_000)
+
+  it('rolls back already registered schemas when a later host Zod import rejects', async () => {
+    const failure = new Error('official model schema import refused')
+    loader.import = vi.fn()
+      .mockResolvedValueOnce(zodModule)
+      .mockRejectedValueOnce(failure)
+    const fiber = start()
+    await vi.waitFor(() => expect(loader.import).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(registered.size).toBe(0))
+    await fiber.dispose()
+    const official = sessionModule.Session.create(sessionModule.SessionId('schema-failure'))
+    expect(vi.mocked(loader.import).mock.calls).toEqual([['zod'], ['zod']])
+    expect(projections.snapshot(official).values).toEqual({})
+    expect(runtime.bindingSchema).toBeUndefined()
+    expect(runtime.optionsSchema).toBeUndefined()
+    expect(runtime.catalogSchema).toBeUndefined()
+    expect(registerAdapter).not.toHaveBeenCalled()
+    expect(runtime.ready).toBe(false)
+    expect(() => getServerContext(server)).toThrow('dsh-h3: service is not active')
+  }, 10_000)
+
   it('activates the real H3 service before awaited adapter registration', async () => {
     const fiber = start()
     await importStarted.promise
@@ -101,9 +156,15 @@ describe('owned bridge application lifecycle', () => {
     expect(registerAdapter.mock.calls[0]![0]).toEqual(['dsh-tauri-kernel'])
     expect(registerAdapter.mock.calls[0]![1]).toBeInstanceOf(llmModule.LlmAdapter)
     expect(runtime.ready).toBe(true)
+    expect(runtime.bindingSchema?.safeParse({ backend: 'codex', nativeSessionId: 'native-startup', sessionId: 'startup' }).success).toBe(true)
+    expect(runtime.optionsSchema?.safeParse({ model: null, reasoningEffort: null }).success).toBe(true)
+    expect(runtime.catalogSchema?.safeParse({ models: [] }).success).toBe(true)
     await fiber.dispose()
     expect(unregisterAdapter).toHaveBeenCalledOnce()
     expect(runtime.ready).toBe(false)
+    expect(runtime.bindingSchema).toBeUndefined()
+    expect(runtime.optionsSchema).toBeUndefined()
+    expect(runtime.catalogSchema).toBeUndefined()
     expect(registered.size).toBe(0)
     expect(() => getServerContext(server)).toThrow('dsh-h3: service is not active')
   }, 10_000)

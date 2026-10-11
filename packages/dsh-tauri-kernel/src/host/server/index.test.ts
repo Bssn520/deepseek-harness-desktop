@@ -24,6 +24,7 @@ import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
 import * as bridge from '../../index'
 import { createClaudeSession } from '../backends/claude'
 import { createCodexSession } from '../backends/codex'
@@ -214,6 +215,8 @@ beforeEach(async () => {
   } as unknown as HostContext['webServer'])
   const loader: PlatformLoader = {
     async import(id) {
+      if (id === 'zod')
+        return zodModule
       if (id === '@deepseek-ai/dsh-llm')
         return llmModule
       if (id === '@deepseek-ai/dsh-session')

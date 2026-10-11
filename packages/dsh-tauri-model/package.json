@@ -75,15 +75,6 @@
     "h3": "catalog:"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "catalog:dsh",
-    "@deepseek-ai/dsh-client-connection": "catalog:dsh",
-    "@deepseek-ai/dsh-client-locale": "catalog:dsh",
-    "@deepseek-ai/dsh-client-store": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-primitives": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-renderer": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-settings": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-slots": "catalog:dsh",
-    "@deepseek-ai/dsh-util-values": "catalog:dsh",
     "@types/node": "catalog:types",
     "dsh-tauri-tsdown": "workspace:*",
     "tsdown": "catalog:cli",

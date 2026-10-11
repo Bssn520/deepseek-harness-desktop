@@ -17,6 +17,7 @@ import { assertContiguous, materializeAppendBatch, materializeCreateHeader, Sess
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as zodModule from 'zod'
 import { apply } from '../apply'
 import { createClaudeSession } from '../backends/claude'
 import { createCodexSession } from '../backends/codex'
@@ -215,6 +216,8 @@ beforeEach(async () => {
     async import(id) {
       if (id === '@deepseek-ai/dsh-session')
         return sessionModule
+      if (id === 'zod')
+        return zodModule
       if (id === '@deepseek-ai/dsh-llm')
         return llmModule
       throw new Error(`unexpected module: ${id}`)

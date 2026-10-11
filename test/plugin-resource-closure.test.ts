@@ -8,13 +8,6 @@ const BUNDLE_MANIFEST = new URL('../packages/dsh-tauri-bundle/package.json', imp
 const RESOURCE_NODE_MODULES = new URL('../src-tauri/resources/node_modules/', import.meta.url)
 const DSH_STATIC_IMPORT = /\b(?:from|import)\s*['"]@deepseek-ai\/[^'"]+['"]|\brequire\s*\(\s*['"]@deepseek-ai\/[^'"]+['"]\s*\)/
 
-/**
- * 部署产物 `src-tauri/resources/node_modules/` 由 `pnpm build:plugins` 生成，不随仓库提交。
- * 未构建时整组用例跳过——否则每次干净检出都会报「文件不存在」，把缺前置误报成缺陷。
- * 本文件归 `unit` project（由 `vitest.unit.config.ts` 的 `test` 通配收集），
- * CI 的 Unit Tests job 已加 `pnpm build:plugins` 前置，故门禁上照常执行。
- * `plugins-e2e` job 只收 `test/e2e/plugins` 下的 `*.e2e.ts`，不会跑到本文件。
- */
 const BUILT = existsSync(fileURLToPath(RESOURCE_NODE_MODULES))
 
 interface PluginManifest {
@@ -68,11 +61,11 @@ describe.skipIf(!BUILT)('bundled plugin resource closure', () => {
     }
   })
 
-  it('does not ship build-only date-fns or any nested copy', () => {
-    const dateFnsPackages = packageJsonFiles(RESOURCE_NODE_MODULES)
-      .filter(file => readJson(pathToFileURL(file)).name === 'date-fns')
+  it('does not ship build tools or runtime-owned Zod in any nested package', () => {
+    const excludedPackages = packageJsonFiles(RESOURCE_NODE_MODULES)
+      .filter(file => ['date-fns', 'typescript', '@genapi/shared', 'zod'].includes(String(readJson(pathToFileURL(file)).name)))
 
-    expect(dateFnsPackages).toEqual([])
+    expect(excludedPackages).toEqual([])
   })
 
   it('keeps DSH-owned host modules loader-resolved', () => {

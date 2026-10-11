@@ -58,8 +58,6 @@
     "typecheck": "tsc"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "catalog:dsh",
-    "@deepseek-ai/dsh-client-ui-layout": "catalog:dsh",
     "dsh-tauri": "workspace:*",
     "dsh-tauri-tsdown": "workspace:*",
     "dsh-tauri-ui": "workspace:*",

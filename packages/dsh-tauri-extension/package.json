@@ -70,7 +70,6 @@
     "yaml": "catalog:testing"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-skill-filesystem": "catalog:dsh",
     "@types/lodash-es": "catalog:types",
     "dompurify": "catalog:ui",
     "dsh-tauri-tsdown": "workspace:*",

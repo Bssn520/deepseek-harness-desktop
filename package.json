@@ -87,6 +87,7 @@
     "@deepseek-ai/dsh-user-approval": "catalog:dsh",
     "@deepseek-ai/dsh-user-questions": "catalog:dsh",
     "@deepseek-ai/dsh-util-code-language": "catalog:dsh",
+    "@deepseek-ai/dsh-util-values": "catalog:dsh",
     "@deepseek-ai/dsh-workspace": "catalog:dsh",
     "@eslint-react/eslint-plugin": "catalog:lint",
     "@genapi/core": "catalog:",

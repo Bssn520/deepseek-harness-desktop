@@ -4,36 +4,39 @@ import type { NativeModelCatalog, NativeModelDirectory, NativeTurnOptions } from
 import type { HostContext } from '../types'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
-import { z } from 'zod'
 import { MODEL_RECORD_TYPE } from '../config/constants'
 import { runtime } from '../config/runtime'
 import { server } from '../server'
 import { waitFor } from '../utils/abort'
-import { loadRuntimeModules } from '../utils/runtime-modules'
+import { loadRuntimeModules, loadRuntimeZod } from '../utils/runtime-modules'
 import { checkpoint } from './checkpoint'
 import { identity } from './identity'
 import { session } from './session'
 
-const identifier = z.string().min(1).max(512).refine(value => value.trim().length > 0)
-const optionsSchema = z.object({ model: identifier.nullable(), reasoningEffort: identifier.nullable() }).strict().readonly()
-const catalogSchema = z.object({
-  models: z.array(z.object({
-    id: identifier,
-    name: z.string().min(1),
-    description: z.string().optional(),
-    reasoning: z.object({
-      efforts: z.array(z.object({ id: identifier, name: z.string().min(1), description: z.string().optional() })).min(1),
-      defaultEffort: identifier.optional(),
-    }).optional(),
-  })).max(2048),
-  defaultModel: identifier.optional(),
-  defaultReasoningEffort: identifier.optional(),
-})
-
 export const model = defineService({
-  register(): () => void {
+  async register(): Promise<() => void> {
     const ctx = getServerContext<HostContext>(server)
-    return ctx.sessionProjections.register({
+    const lifetime = runtime.lifetime
+    const z = await loadRuntimeZod(ctx.loader)
+    lifetime.signal.throwIfAborted()
+    if (runtime.lifetime !== lifetime || getServerContext<HostContext>(server) !== ctx)
+      throw new Error('BRIDGE_DISPOSED: Model projection owner changed during registration')
+    const identifier = z.string().min(1).max(512).refine(value => value.trim().length > 0)
+    const optionsSchema = z.object({ model: identifier.nullable(), reasoningEffort: identifier.nullable() }).strict().readonly()
+    const catalogSchema = z.object({
+      models: z.array(z.object({
+        id: identifier,
+        name: z.string().min(1),
+        description: z.string().optional(),
+        reasoning: z.object({
+          efforts: z.array(z.object({ id: identifier, name: z.string().min(1), description: z.string().optional() })).min(1),
+          defaultEffort: identifier.optional(),
+        }).optional(),
+      })).max(2048),
+      defaultModel: identifier.optional(),
+      defaultReasoningEffort: identifier.optional(),
+    })
+    const unregister = ctx.sessionProjections.register({
       key: 'bridgeModel',
       stateSchema: optionsSchema,
       init: () => ({ model: null, reasoningEffort: null }),
@@ -46,6 +49,15 @@ export const model = defineService({
       wire: { viewSchema: optionsSchema, view: state => state },
       stateVersion: 1,
     })
+    runtime.optionsSchema = optionsSchema
+    runtime.catalogSchema = catalogSchema
+    return () => {
+      unregister()
+      if (runtime.optionsSchema === optionsSchema)
+        runtime.optionsSchema = undefined
+      if (runtime.catalogSchema === catalogSchema)
+        runtime.catalogSchema = undefined
+    }
   },
 
   resolve(agent: Agent): NativeTurnOptions {
@@ -121,7 +133,9 @@ export const model = defineService({
 })
 
 function parseOptions(value: unknown): NativeTurnOptions {
-  const parsed = optionsSchema.safeParse(value)
+  if (!runtime.optionsSchema)
+    throw new Error('BRIDGE_CORE_UNAVAILABLE: 原生模型投影不可用。')
+  const parsed = runtime.optionsSchema.safeParse(value)
   if (!parsed.success)
     throw new Error('BRIDGE_MODEL_INVALID: 模型与推理深度必须是完整的原生选项。')
   return parsed.data
@@ -153,6 +167,9 @@ async function getCatalog(agent: Agent, lifetime: AbortController): Promise<Nati
   assertLive(agent, lifetime)
   if (typeof native.models !== 'function')
     throw new Error('BRIDGE_MODEL_UNSUPPORTED: 当前本机内核未提供模型目录。')
+  const catalogSchema = runtime.catalogSchema
+  if (!catalogSchema)
+    throw new Error('BRIDGE_CORE_UNAVAILABLE: 原生模型投影不可用。')
   const parsed = catalogSchema.safeParse(await waitFor(native.models(lifetime.signal), lifetime.signal))
   assertLive(agent, lifetime)
   if (!parsed.success)
