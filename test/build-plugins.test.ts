@@ -84,7 +84,7 @@ describe('plugin deployment build-tool pruning', () => {
     expect(readFileSync(join(dir, 'index.js'), 'utf8')).toBe('export const value = 42')
   })
 
-  it.each(['dependencies', 'peerDependencies'])('retains TypeScript declared by another package through %s', (field) => {
+  it.each(['dependencies', 'peerDependencies', 'optionalDependencies'])('retains TypeScript declared by another package through %s', (field) => {
     const root = deploymentFixture()
     writeFileSync(join(root, 'plugin', 'package.json'), JSON.stringify({
       main: './index.js',

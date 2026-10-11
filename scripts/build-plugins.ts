@@ -239,7 +239,7 @@ function deploymentIndex(root: string): DeploymentIndex {
 
 /** 可达性用宽松口径：可选 peer 也可能被动态 import，一律计入，只裁真正无人声明的包。 */
 function reachabilityDependencies(manifest: PackageManifest): string[] {
-  return [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})]
+  return [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.optionalDependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})]
 }
 
 /** 校验用严格口径：显式依赖与必需 peer 必须可解析；可选 peer 允许缺席。 */
