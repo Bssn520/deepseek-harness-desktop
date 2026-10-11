@@ -471,9 +471,6 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = crate::service::patch::plugin_visibility::apply(&app_handle) {
         log::warn!("plugin visibility patch failed: {e}");
     }
-    if let Err(e) = crate::service::patch::schedule_order::apply(&app_handle) {
-        log::warn!("schedule bundle order patch failed: {e}");
-    }
     mark_phase("core_patches", &mut phase_started);
     // 预防性处理：pnpm 在无 TTY 环境（dsh-market 等子进程）下重装/更新插件时，
     // 清理/重建 node_modules 会触发交互确认并因无 TTY 直接中止
@@ -520,9 +517,6 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = crate::service::core::prepare_active_runtime(&app_handle).await {
         log::error!("prepare active core runtime failed: {e}");
         return Err(e);
-    }
-    if let Err(e) = crate::service::patch::schedule_order::apply(&app_handle) {
-        log::warn!("schedule bundle order patch after runtime repair failed: {e}");
     }
     mark_phase("prepare_active_runtime", &mut phase_started);
     // prepare 可能因核心原生模块的 ABI 与本地 node 不匹配而改用捆绑运行时
