@@ -47,6 +47,20 @@ describe('public Expo configuration packaged by expo-constants', () => {
     }])
   })
 
+  it('shrinks release code and resources and compresses APK payloads', () => {
+    const { exp } = getConfig(projectRoot, { skipSDKVersionRequirement: true })
+
+    expect(exp.plugins).toContainEqual(['expo-build-properties', {
+      android: {
+        usesCleartextTraffic: true,
+        enableMinifyInReleaseBuilds: true,
+        enableShrinkResourcesInReleaseBuilds: true,
+        enableBundleCompression: true,
+        useLegacyPackaging: true,
+      },
+    }])
+  })
+
   it('keeps TestFlight build numbers on the EAS remote source', () => {
     const eas = JSON.parse(readFileSync(resolve(projectRoot, 'eas.json'), 'utf8')) as {
       cli?: { appVersionSource?: string }
