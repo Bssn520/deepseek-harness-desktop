@@ -26,8 +26,8 @@
 //! 中断的首次初始化、外部 mkdir、用户手工编辑清单都会留下缺 web 层的档案。此时
 //! 宿主不会提供 webServer/connection/webRuntime，内置插件与市场插件全部停在
 //! pending，服务启动必然失败。因此 [`init_profile_dir`] 与 spawn 前自愈
-//! （[`ensure_active_profile_core_bundles`]）都会校核并**补齐**核心层：只前插
-//! 缺失的核心 bundle，绝不删除或改写任何用户/内置插件条目。
+//! （[`ensure_active_profile_core_bundles`]）都会补齐核心层，并禁用与内置调度冲突的
+//! 历史官方实验调度 bundle；依赖与其它插件条目保留。
 
 use crate::config;
 use crate::service::fs_guard;
@@ -807,22 +807,8 @@ fn web_profile_manifest(id: &str) -> serde_json::Value {
     })
 }
 
-/// 校核并补齐档案的核心 web bundle 层，返回是否写回了清单。
-///
-/// 覆盖三种状态，全部只做「补齐」、绝不删除或改写其它字段：
-/// - 清单缺失（目录被外部创建、初始化中断、被清理）→ 按官方 `initProfile` 形态
-///   写入 web 模板清单；
-/// - 清单存在但缺核心 bundle（典型：`dsh plugin add` 用
-///   `DEFAULT_PROFILE_BUNDLES` 初始化出的「只有 dsh-base + 插件」档案）→ 把核心
-///   bundle 前插回列表头部，保持 `dsh-base` → `dsh-web-app` 的补丁应用顺序；
-/// - 清单已含核心 bundle → 不写盘（幂等，避免无谓改写用户文件）。
-///
-/// 清单不可读/不可解析（外部截断、非对象、`dsh`/`profile` 非对象）时报错交由
-/// 调用方告警：这种状态可能承载用户数据，宁可留着让人工处理，也绝不静默重建。
-///
-/// 非 web 表面的档案（CLI 侧 headless/acp/sdk 模板）一律不动：它们与 web 层有
-/// 同名 insert（如 `code-runtime`），叠加会触发 `duplicate loader entry` 硬崩溃；
-/// 桌面端无法承载这类档案，但绝不能为了「修好桌面端」而破坏 CLI 用途的档案。
+/// 补齐 web 核心层，禁用与内置调度冲突的历史官方实验 bundle；不卸载依赖。
+/// 非 web 档案保持原样；损坏清单报错，不静默重建。返回是否写回清单。
 fn ensure_profile_core_bundles(dir: &Path, id: &str) -> Result<bool, String> {
     let manifest_path = dir.join("package.json");
     let mut manifest: serde_json::Value = match fs::read_to_string(&manifest_path) {
@@ -873,9 +859,7 @@ fn ensure_profile_core_bundles(dir: &Path, id: &str) -> Result<bool, String> {
         return Ok(false);
     }
 
-    // 核心层固定在列表最前（补丁层按 `dsh.profile.bundles` 顺序应用，
-    // dsh-web-app 的覆写行必须在 dsh-base 之后落地）；其余条目原样保留相对顺序，
-    // 因此已就绪的档案得到与输入完全一致的列表（幂等）。
+    // 历史实验调度若排在桌面调度后，禁用覆写会落空；直接关闭组合包，不改核心加载器。
     let mut desired: Vec<String> = WEB_PROFILE_BUNDLES
         .iter()
         .map(|bundle| (*bundle).to_string())
@@ -883,7 +867,10 @@ fn ensure_profile_core_bundles(dir: &Path, id: &str) -> Result<bool, String> {
     desired.extend(
         current
             .iter()
-            .filter(|bundle| !WEB_PROFILE_BUNDLES.contains(&bundle.as_str()))
+            .filter(|bundle| {
+                !WEB_PROFILE_BUNDLES.contains(&bundle.as_str())
+                    && bundle.as_str() != "@deepseek-ai/dsh-experimental-schedule-bundle"
+            })
             .cloned(),
     );
     if existing.is_some() && current == desired {
@@ -916,10 +903,9 @@ fn ensure_profile_core_bundles(dir: &Path, id: &str) -> Result<bool, String> {
     profile.insert("bundles".to_string(), serde_json::json!(desired));
     write_profile_manifest_file(&manifest_path, &manifest)?;
     log::warn!(
-        "PROFILE_CORE_BUNDLES_RESTORED: profile {id} was missing the web core bundle layer; \
-         restored {:?} before {:?} in {}",
-        WEB_PROFILE_BUNDLES,
+        "PROFILE_CORE_BUNDLES_RESTORED: profile {id} web bundles normalized from {:?} to {:?} in {}",
         current,
+        desired,
         manifest_path.display()
     );
     Ok(true)
@@ -1586,6 +1572,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn core_bundles_disable_legacy_official_schedule_without_removing_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        for bundles in [
+            serde_json::json!([
+                "@deepseek-ai/dsh-base",
+                "@deepseek-ai/dsh-web-app",
+                "dsh-tauri-scheduler",
+                "user-plugin",
+                "@deepseek-ai/dsh-experimental-schedule-bundle"
+            ]),
+            serde_json::json!([
+                "@deepseek-ai/dsh-base",
+                "@deepseek-ai/dsh-web-app",
+                "@deepseek-ai/dsh-experimental-schedule-bundle",
+                "dsh-tauri-scheduler",
+                "user-plugin",
+                "@deepseek-ai/dsh-experimental-schedule-bundle"
+            ]),
+        ] {
+            let mut expected = serde_json::json!({
+                "name": "dsh-profile-tauri",
+                "private": true,
+                "dependencies": {
+                    "@deepseek-ai/dsh-experimental-schedule-bundle": "0.2.0-rc.2",
+                    "user-plugin": "1.0.0"
+                },
+                "dsh": { "profile": { "bundles": bundles, "custom": "keep" } }
+            });
+            std::fs::write(&path, serde_json::to_string(&expected).unwrap()).unwrap();
+            expected["dsh"]["profile"]["bundles"] = serde_json::json!([
+                "@deepseek-ai/dsh-base",
+                "@deepseek-ai/dsh-web-app",
+                "dsh-tauri-scheduler",
+                "user-plugin"
+            ]);
+
+            assert!(ensure_profile_core_bundles(dir.path(), "tauri").unwrap());
+            let repaired = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&repaired).unwrap(),
+                expected
+            );
+            assert!(!ensure_profile_core_bundles(dir.path(), "tauri").unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), repaired);
+        }
+    }
+
     /// 非 web 表面（CLI 的 headless/acp/sdk 档案）不参与 web 层补齐：web 层与其
     /// 存在同名 insert（`code-runtime`），叠加会 duplicate loader entry 硬崩溃。
     #[test]
@@ -1593,7 +1628,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dsh-profile-surface-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let raw = r#"{"name":"dsh-profile-headless","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless"]}}}"#;
+        let raw = r#"{"name":"dsh-profile-headless","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless","@deepseek-ai/dsh-experimental-schedule-bundle"]}}}"#;
         std::fs::write(dir.join("package.json"), raw).unwrap();
 
         assert!(!ensure_profile_core_bundles(&dir, "headless").unwrap());
