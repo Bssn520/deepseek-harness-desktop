@@ -787,7 +787,7 @@ async fn run_plugin_command(
         sub_args,
     ));
 
-    let cwd = config::get_dsh_install_path(app_handle);
+    let cwd = crate::service::core::active_core_dir(app_handle);
     log::info!("Running dsh plugin {action} for {ids:?}");
     let (exit_code, output, last_attempt) = run_plugin_with_allow_build_retry(
         app_handle, &node, &args, &cwd, &envs, &window, action, None, owner,

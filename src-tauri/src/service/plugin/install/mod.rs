@@ -231,10 +231,10 @@ fn preset_targets(app_handle: &AppHandle, ids: &[String]) -> Result<Vec<InstallT
 fn spec_targets(app_handle: &AppHandle, specs: &[String]) -> Result<Vec<InstallTarget>, String> {
     let core_version = crate::service::core::active_version(app_handle);
     let presets = load_presets(app_handle);
-    // 相对路径的基准：`dsh plugin` 不切换 cwd，pnpm 在 `$AppData/dependencies/dsh`
-    // 下执行（与 [`install_with_cancel`] 传入的 cwd 同源），故本地 spec 必须在这里
-    // 先绝对化，用户输入的 `./plugins/x` 才不会被解析到应用安装目录里。
-    let base = config::get_dsh_install_path(app_handle);
+    // 相对路径的基准：`dsh plugin` 不切换 cwd，pnpm 在活动核心目录下执行（与
+    // [`install_with_cancel`] 传入的 cwd 同源），故本地 spec 必须在这里先绝对化，
+    // 用户输入的 `./plugins/x` 才不会被解析到应用安装目录里。
+    let base = crate::service::core::active_core_dir(app_handle);
     let mut targets = Vec::with_capacity(specs.len());
     for spec in specs {
         let spec = spec.trim();
@@ -424,7 +424,7 @@ async fn install_with_cancel(
     ];
     args.extend(specs.iter().map(OsString::from));
 
-    let cwd = config::get_dsh_install_path(app_handle);
+    let cwd = crate::service::core::active_core_dir(app_handle);
     // 日志打印实际传给 dsh 的 spec（此前打印 id 会误导排查：安装用的是 spec）
     log::info!("Running dsh plugin install for {specs:?}");
 
@@ -656,7 +656,7 @@ pub async fn allow_version_exemptions(
     }
 
     let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle));
-    let cwd = config::get_dsh_install_path(app_handle);
+    let cwd = crate::service::core::active_core_dir(app_handle);
     let profile = active_profile(app_handle);
     let owner = new_process_owner();
     let mut failures: Vec<String> = Vec::new();

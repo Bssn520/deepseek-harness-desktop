@@ -36,7 +36,7 @@ pub async fn inspect_specs(
         .map_err(|e| format!("INSPECT_CLIENT: {e}"))?;
 
     // 与安装同源：本地 spec 的相对路径按 `dsh plugin add` 子进程的 cwd 解析。
-    let base = crate::config::get_dsh_install_path(app_handle);
+    let base = crate::service::core::active_core_dir(app_handle);
     let mut results = Vec::with_capacity(specs.len());
     for raw in specs {
         results.push(inspect_one(&client, raw, &base, runtime.as_deref()).await);
