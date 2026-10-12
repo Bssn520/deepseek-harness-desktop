@@ -115,6 +115,61 @@ describe('parseConnectionSnapshot trust boundary', () => {
   })
 })
 
+describe('connection editing', () => {
+  it('keeps a trimmed display name through reconnect, load and snapshot restoration without changing the URL', () => {
+    load(alpha, 10)
+    const generation = connection.viewGeneration
+    connection.rename(alpha.id, '  我的电脑  ')
+    expect(connection.current).toEqual({ ...alpha, name: '我的电脑' })
+    expect(connection.viewGeneration).toBe(generation)
+    expect(parseConnectionSnapshot(connection.serialize()).history).toEqual([{ ...alpha, name: '我的电脑', lastConnectedAt: 10 }])
+    load(alpha, 20)
+    expect(connection.current).toEqual({ ...alpha, name: '我的电脑' })
+    expect(connection.history).toEqual([{ ...alpha, name: '我的电脑', lastConnectedAt: 20 }])
+    connection.rename(alpha.id, '   ')
+    expect(connection.history[0]?.name).toBe('我的电脑')
+  })
+
+  it('removes the active connection and invalidates late view callbacks while returning to idle', () => {
+    load(alpha, 10)
+    connection.markHydrated({ [alpha.id]: 'secret' })
+    connection.dismissHint()
+    connection.setDrawerOpen(true)
+    connection.queueFocus({ origin: alpha.id, sessionId: 's1', title: 'Task', tag: 'task' })
+    const generation = connection.viewGeneration
+    connection.remove(alpha.id)
+    connection.markLoaded(generation, 20)
+    expect(connection.current).toBeNull()
+    expect(connection.stage).toBe('idle')
+    expect(connection.history).toEqual([])
+    expect(connection.tokens).toEqual({})
+    expect(connection.health).toEqual({})
+    expect(connection.guidedHosts).toEqual([])
+    expect(connection.pendingFocus).toBeNull()
+    expect(connection.drawerOpen).toBe(false)
+    expect(connection.viewGeneration).toBeGreaterThan(generation)
+  })
+
+  it('removes an inactive entry without interrupting the current connection', () => {
+    load(alpha, 10)
+    load(beta, 20)
+    const generation = connection.viewGeneration
+    connection.remove(alpha.id)
+    expect(connection.current).toEqual(beta)
+    expect(connection.viewGeneration).toBe(generation)
+    expect(connection.stage).toBe('connected')
+    expect(connection.history).toEqual([{ ...beta, lastConnectedAt: 20 }])
+  })
+
+  it('normalizes only string display names at the persistence boundary', () => {
+    const snapshot = parseConnectionSnapshot({ version: 1, history: [
+      { ...alpha, name: '  工作电脑  ', lastConnectedAt: 10 },
+      { ...beta, name: { url: 'evil' }, lastConnectedAt: 20 },
+    ] })
+    expect(snapshot.history).toEqual([{ ...beta, lastConnectedAt: 20 }, { ...alpha, name: '工作电脑', lastConnectedAt: 10 }])
+  })
+})
+
 describe('connection hydration', () => {
   it('starts the singleton store with an isolated empty method-selection state', () => {
     expect(connection.$state).toEqual({

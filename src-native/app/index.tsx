@@ -1,10 +1,13 @@
+import type { BridgeAddress } from '@/utils/bridge-protocol'
 import { router, useNavigation } from 'expo-router'
 import { Button } from 'heroui-native/button'
+import { Dialog } from 'heroui-native/dialog'
 import { useThemeColor } from 'heroui-native/hooks'
-import { useEffect } from 'react'
+import { Input } from 'heroui-native/input'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Else, If, Then } from 'react-if-lite'
-import { BackHandler, ScrollView, Text, useWindowDimensions, View } from 'react-native'
+import { Alert, BackHandler, ScrollView, Text, useWindowDimensions, View } from 'react-native'
 import { Drawer } from 'react-native-drawer-layout'
 import { History, Radar, RefreshCw, ScanLine, X } from 'react-native-lucide'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -13,7 +16,7 @@ import { BreathingLight } from '@/components/breathing-light'
 import { Dot } from '@/components/dot'
 import { Logo, Wordmark } from '@/components/icons'
 import { connection } from '@/store/modules/connection'
-import { cancelAutoScan, connectAddress, disconnectAndScan, refreshHealth, startAutoScan } from '@/store/modules/connection/runtime'
+import { cancelAutoScan, connectAddress, disconnectAndScan, refreshHealth, startAutoScan, stopConnectionRuntime } from '@/store/modules/connection/runtime'
 import { BridgeWebView } from '@/ui/webview'
 import { connectionLabel } from '@/utils/bridge-protocol'
 
@@ -34,6 +37,35 @@ function ConnectionDrawer() {
   const { t } = useTranslation()
   const state = useStore(connection)
   const [background, foreground, muted] = useThemeColor(['surface', 'foreground', 'muted'])
+  const [renaming, setRenaming] = useState<BridgeAddress | null>(null)
+  const [name, setName] = useState('')
+  function editConnection(entry: BridgeAddress) {
+    Alert.alert(connectionLabel(entry), entry.url, [
+      { text: t('connection.rename'), onPress: () => {
+        setName(connectionLabel(entry))
+        setRenaming(entry)
+      } },
+      { text: t('connection.delete'), style: 'destructive', onPress: () => {
+        let message = t('connection.deleteConfirm')
+        if (connection.current?.id === entry.id)
+          message = t('connection.deleteCurrentConfirm')
+        Alert.alert(t('connection.delete'), message, [
+          { text: t('common.cancel'), style: 'cancel' },
+          { text: t('connection.delete'), style: 'destructive', onPress: () => {
+            stopConnectionRuntime()
+            connection.remove(entry.id)
+          } },
+        ])
+      } },
+      { text: t('common.cancel'), style: 'cancel' },
+    ])
+  }
+  function saveName() {
+    if (!renaming || !name.trim())
+      return
+    connection.rename(renaming.id, name)
+    setRenaming(null)
+  }
   let currentLabel: string = t('connection.noConnection')
   if (state.current)
     currentLabel = connectionLabel(state.current)
@@ -59,6 +91,10 @@ function ConnectionDrawer() {
             className="h-auto min-h-16 justify-start gap-3 rounded-xl px-3 py-4"
             isDisabled={!state.current}
             accessibilityLabel={t('connection.reconnect')}
+            onLongPress={() => {
+              if (connection.current)
+                editConnection(connection.current)
+            }}
             accessibilityHint={t('connection.hostStatus', { host: currentLabel, status: t(`connection.${currentStatus}`) })}
             onPress={() => {
               if (connection.current)
@@ -96,6 +132,8 @@ function ConnectionDrawer() {
                       variant="ghost"
                       className="h-auto min-h-16 justify-start gap-3 rounded-xl px-3 py-4"
                       accessibilityLabel={t('connection.hostStatus', { host: connectionLabel(entry), status: t(`connection.${status}`) })}
+                      accessibilityHint={t('connection.editHint')}
+                      onLongPress={() => editConnection(entry)}
                       onPress={() => connectAddress(entry)}
                     >
                       <Dot status={status} />
@@ -109,6 +147,25 @@ function ConnectionDrawer() {
           </If>
         </View>
       </ScrollView>
+      <Dialog
+        isOpen={renaming !== null}
+        onOpenChange={(open) => {
+          if (!open)
+            setRenaming(null)
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay />
+          <Dialog.Content>
+            <Dialog.Title>{t('connection.rename')}</Dialog.Title>
+            <Input accessibilityLabel={t('connection.name')} value={name} onChangeText={setName} autoFocus returnKeyType="done" onSubmitEditing={saveName} />
+            <View className="flex-row justify-end gap-3">
+              <Button variant="ghost" onPress={() => setRenaming(null)}>{t('common.cancel')}</Button>
+              <Button isDisabled={!name.trim()} onPress={saveName}>{t('common.save')}</Button>
+            </View>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
       <View className="gap-3 border-t border-border px-5 pb-4 pt-5">
         <Button variant="danger" isDisabled={!state.current} onPress={disconnectAndScan}>{t('connection.disconnect')}</Button>
         <Button variant="ghost" accessibilityLabel={t('connection.closeDrawer')} onPress={() => connection.setDrawerOpen(false)}>

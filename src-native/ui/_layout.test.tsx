@@ -113,6 +113,16 @@ vi.mock('heroui-native/button', async () => {
   }
   return { Button: Object.assign(Button, { Label: 'Text' }) }
 })
+vi.mock('heroui-native/input', () => ({ Input: 'Input' }))
+vi.mock('heroui-native/dialog', async () => {
+  const { createElement } = await import('react')
+  function Dialog({ children, isOpen, ...props }: { children?: ReactNode, isOpen: boolean }) {
+    if (!isOpen)
+      return null
+    return createElement('Dialog', props, children)
+  }
+  return { Dialog: Object.assign(Dialog, { Portal: 'Portal', Overlay: 'Overlay', Content: 'Content', Title: 'Text' }) }
+})
 vi.mock('react-native-gesture-handler', () => ({ GestureHandlerRootView: 'GestureHandlerRootView' }))
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaProvider: 'SafeAreaProvider', SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ top: 59, bottom: 34, left: 0, right: 0 }) }))
 vi.mock('react-native-lucide', () => ({ History: 'Icon', Radar: 'Icon', ScanLine: 'Icon', RefreshCw: 'Icon', X: 'Icon', ArrowLeft: 'Icon', Hand: 'Icon' }))

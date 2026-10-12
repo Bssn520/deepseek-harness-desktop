@@ -213,6 +213,21 @@ describe('registerMobileSidebar', () => {
     expect(toggle.querySelector('path')?.getAttribute('d')).toBe(sidebarPath)
   })
 
+  it.each(['Open sidebar', 'New Session'])('resets retained keyboard focus before pointer activation of %s', (name) => {
+    const { overlay } = setupFrame()
+    register()
+    renderOverlay(overlay)
+    const icon = screen.getByRole('button', { name })
+    icon.focus()
+    expect(document.activeElement).toBe(icon)
+    fireEvent.pointerDown(icon)
+    expect(document.activeElement).toBe(document.body)
+    icon.focus()
+    fireEvent.keyDown(icon, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(icon)
+    expect(icon.getAttribute('tabindex')).toBe('0')
+  })
+
   it('keeps navigation in the moving center while only drawer/main content becomes inert', () => {
     const { sidebar, center, main, overlay } = setupFrame()
     sidebar.setAttribute('aria-hidden', 'false')

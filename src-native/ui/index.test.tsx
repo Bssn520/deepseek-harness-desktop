@@ -18,11 +18,13 @@ const native = vi.hoisted(() => ({
   setNotificationChannelAsync: vi.fn<(...args: unknown[]) => Promise<null>>(),
   scheduleNotificationAsync: vi.fn<(...args: unknown[]) => Promise<string>>(),
   cancelAnimation: vi.fn(),
+  alert: vi.fn<typeof import('react-native').Alert.alert>(),
   dimensions: { width: 440, height: 900 },
   theme: { 'background': '#ffffff', 'foreground': '#0f1115', 'accent-foreground': '#ffffff' } as Record<string, string>,
 }))
 
 vi.mock('react-native', () => ({
+  Alert: { alert: native.alert },
   View: 'View',
   Text: 'Text',
   Image: 'Image',
@@ -79,6 +81,16 @@ vi.mock('heroui-native/button', async () => {
     return createElement('Button', props, children)
   }
   return { Button: Object.assign(Button, { Label: 'Text' }) }
+})
+vi.mock('heroui-native/input', () => ({ Input: 'Input' }))
+vi.mock('heroui-native/dialog', async () => {
+  const { createElement } = await import('react')
+  function Dialog({ children, isOpen, ...props }: { children?: ReactNode, isOpen: boolean }) {
+    if (!isOpen)
+      return null
+    return createElement('Dialog', props, children)
+  }
+  return { Dialog: Object.assign(Dialog, { Portal: 'Portal', Overlay: 'Overlay', Content: 'Content', Title: 'Text' }) }
 })
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }))
 vi.mock('react-native-lucide', () => ({ History: 'HistoryIcon', Radar: 'RadarIcon', QrCode: 'QrCodeIcon', ScanLine: 'ScanLineIcon', RefreshCw: 'RefreshIcon', X: 'Icon', ArrowLeft: 'Icon', Hand: 'Icon' }))
@@ -408,6 +420,54 @@ describe('rendered Home scanning and idle actions', () => {
     expect(native.push).toHaveBeenCalledExactlyOnceWith('/scan')
     expect(drawer().props.open).toBe(false)
     expect(connection.stage).toBe('idle')
+  })
+})
+
+describe('rendered Home connection editing', () => {
+  it('opens rename on long press and saves a display name without reconnecting the WebView', async () => {
+    hydrate(history)
+    runtime.connectAddress(alpha)
+    await mount()
+    await ready()
+    await act(async () => connection.setDrawerOpen(true))
+    const generation = connection.viewGeneration
+    await act(async () => button('重新连接').props.onLongPress())
+    const actions = native.alert.mock.calls.at(-1)![2]!
+    expect(actions.map(action => action.text)).toEqual(['重命名', '删除连接', '取消'])
+    await act(async () => actions[0]!.onPress!())
+    const input = root().find(node => String(node.type) === 'Input')
+    await act(async () => input.props.onChangeText('  我的电脑  '))
+    await press('保存')
+    expect(texts()).toContain('我的电脑')
+    expect(connection.current).toMatchObject({ ...alpha, name: '我的电脑' })
+    expect(connection.viewGeneration).toBe(generation)
+    expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })
+    expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
+  })
+
+  it('keeps the active connection on cancel and removes it only after confirming the disconnect warning', async () => {
+    hydrate(history)
+    runtime.connectAddress(alpha)
+    await mount()
+    await ready()
+    await act(async () => connection.setDrawerOpen(true))
+    await act(async () => button('one.local:3080，可用').props.onLongPress())
+    await act(async () => native.alert.mock.calls.at(-1)![2]![1]!.onPress!())
+    const confirmation = native.alert.mock.calls.at(-1)!
+    expect(confirmation[1]).toBe('这条连接正在使用。删除后将停止连接并返回初始页，是否继续？')
+    expect(confirmation[2]![0]!.style).toBe('cancel')
+    expect(connection.current?.id).toBe(alpha.id)
+    expect(root().findAll(node => String(node.type) === 'WebView')).toHaveLength(1)
+    native.fetch.mockClear()
+    await act(async () => confirmation[2]![1]!.onPress!())
+    expect(connection.current).toBeNull()
+    expect(connection.stage).toBe('idle')
+    expect(connection.history.some(entry => entry.id === alpha.id)).toBe(false)
+    expect(connection.tokens[alpha.id]).toBeUndefined()
+    expect(drawer().props.open).toBe(false)
+    expect(root().findAll(node => String(node.type) === 'WebView')).toHaveLength(0)
+    expect(button('自动扫描局域网').props.isDisabled).toBe(false)
+    expect(native.fetch).not.toHaveBeenCalled()
   })
 })
 

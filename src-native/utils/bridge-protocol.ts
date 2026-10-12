@@ -6,6 +6,7 @@ export interface BridgeAddress {
   host: string
   port: number
   token?: string
+  name?: string
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -88,6 +89,8 @@ export function buildConnectUrl(address: BridgeAddress): string {
 }
 
 export function connectionLabel(address: BridgeAddress): string {
+  if (address.name)
+    return address.name
   const url = new URL(address.url)
   if (url.port)
     return `${address.host}:${address.port}`

@@ -351,6 +351,7 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
                 role="button"
                 tabIndex={0}
                 focusable="true"
+                onPointerDown={event => event.currentTarget.blur()}
                 aria-label={locale.text(current.open ? 'toggle.close' : 'toggle.open')}
                 aria-expanded={current.open}
                 onClick={toggle}
@@ -364,6 +365,7 @@ export const registerMobileSidebar = defineRegister<ClientContext>((controller, 
                 role="button"
                 tabIndex={0}
                 focusable="true"
+                onPointerDown={event => event.currentTarget.blur()}
                 aria-label={locale.text('session.new')}
                 aria-disabled={current.starting}
                 aria-busy={current.starting}

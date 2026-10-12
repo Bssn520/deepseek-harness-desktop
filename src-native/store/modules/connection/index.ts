@@ -63,8 +63,12 @@ export function parseConnectionSnapshot(value: unknown): ConnectionSnapshot {
     if (!address)
       continue
     const previous = entries.get(address.id)
-    if (!previous || entry.lastConnectedAt > previous.lastConnectedAt)
-      entries.set(address.id, { id: address.id, url: address.url, host: address.host, port: address.port, lastConnectedAt: entry.lastConnectedAt })
+    if (!previous || entry.lastConnectedAt > previous.lastConnectedAt) {
+      const historyEntry: HistoryEntry = { id: address.id, url: address.url, host: address.host, port: address.port, lastConnectedAt: entry.lastConnectedAt }
+      if (typeof entry.name === 'string' && entry.name.trim())
+        historyEntry.name = entry.name.trim()
+      entries.set(address.id, historyEntry)
+    }
   }
   snapshot.history = [...entries.values()].sort((a, b) => b.lastConnectedAt - a.lastConnectedAt)
   snapshot.history = snapshot.history.slice(0, HISTORY_LIMIT)
@@ -225,6 +229,11 @@ export const connection = defineStore({
       const normalized = parseQrPayload(address.url)
       if (!normalized)
         return false
+      let name = this.history.find(entry => entry.id === normalized.id)?.name
+      if (!name && this.current?.id === normalized.id)
+        name = this.current.name
+      if (name)
+        normalized.name = name
       const token = address.token ?? normalized.token ?? this.tokens[normalized.id]
       if (token) {
         normalized.token = token
@@ -246,8 +255,11 @@ export const connection = defineStore({
       if (!this.current || generation !== this.viewGeneration || this.loadError || !this.loading)
         return
       this.loading = false
-      const { id, url, host, port } = this.current
-      this.history = [{ id, url, host, port, lastConnectedAt: at }, ...this.history.filter(entry => entry.id !== id)].slice(0, HISTORY_LIMIT)
+      const { id, url, host, port, name } = this.current
+      const entry: HistoryEntry = { id, url, host, port, lastConnectedAt: at }
+      if (name)
+        entry.name = name
+      this.history = [entry, ...this.history.filter(entry => entry.id !== id)].slice(0, HISTORY_LIMIT)
       const retained = new Set(this.history.map(entry => entry.id))
       this.guidedHosts = this.guidedHosts.filter(origin => retained.has(origin))
       this.swipeHintVisible = !this.guidedHosts.includes(id)
@@ -281,11 +293,31 @@ export const connection = defineStore({
       this.pendingFocus = focus
       this.focusGeneration++
     },
-    disconnect() {
+    rename(id: string, name: string) {
+      const trimmed = name.trim()
+      if (!trimmed)
+        return
+      const entry = this.history.find(entry => entry.id === id)
+      if (entry)
+        entry.name = trimmed
+      if (this.current?.id === id)
+        this.current.name = trimmed
+    },
+    remove(id: string) {
+      if (this.current?.id === id)
+        this.disconnect('idle')
+      this.history = this.history.filter(entry => entry.id !== id)
+      this.guidedHosts = this.guidedHosts.filter(origin => origin !== id)
+      delete this.tokens[id]
+      delete this.health[id]
+      if (this.pendingFocus?.origin === id)
+        this.queueFocus(null)
+    },
+    disconnect(stage: 'scanning' | 'idle' = 'scanning') {
       this.scanGeneration++
       this.viewGeneration++
       this.current = null
-      this.stage = 'scanning'
+      this.stage = stage
       this.loading = false
       this.loadError = null
       this.notice = null
@@ -297,7 +329,7 @@ export const connection = defineStore({
     serialize(): ConnectionSnapshot {
       return parseConnectionSnapshot({
         version: this.version,
-        history: this.history.map(({ id, url, host, port, lastConnectedAt }) => ({ id, url, host, port, lastConnectedAt })),
+        history: this.history,
         guidedHosts: [...this.guidedHosts],
       })
     },

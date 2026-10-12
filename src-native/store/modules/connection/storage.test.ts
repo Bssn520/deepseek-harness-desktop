@@ -84,6 +84,21 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('connection editing persistence', () => {
+  it('persists a renamed host and deletes its secure token when the active connection is removed', async () => {
+    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [alpha.id] }, { [alpha.id]: 'secret' })
+    bind()
+    connection.accept(alpha)
+    connection.rename(alpha.id, '我的电脑')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(JSON.parse(writtenPayloads().at(-1)!)).toEqual({ version: 1, history: [{ ...alpha, name: '我的电脑', lastConnectedAt: 10 }], guidedHosts: [alpha.id] })
+    connection.remove(alpha.id)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writtenPayloads().at(-1)).toBe(emptyPayload)
+    expect(native.deleteToken).toHaveBeenCalledExactlyOnceWith(alphaKey)
+  })
+})
+
 describe('restoreConnections', () => {
   it('restores sanitized history and retrieves tokens exclusively from native secure storage by normalized origin', async () => {
     native.read.mockResolvedValue(JSON.stringify({
