@@ -414,7 +414,7 @@ describe('real official cross-step native sink', () => {
     expect(connection.submit.mock.calls[0]![0]).toMatchObject([{ content: [{ type: 'text', text: 'native task' }] }])
     expect(assistants().map(event => event.data.step)).toEqual([1, 2])
     expect(toolResults().map(event => event.data.message.toolCallId)).toEqual(['policy-notice'])
-    expect(events.filter(event => event.type === 'agent/inbox/spliced' && event.data.target === 'next-step').flatMap(event => event.data.inserted).map(message => message.source.kind)).toEqual(['user-approval'])
+    expect(events.filter((event): event is Extract<SessionEvent, { type: 'agent/inbox/spliced' }> => event.type === 'agent/inbox/spliced' && event.data.target === 'next-step').flatMap(event => event.data.inserted).map(message => message.source.kind)).toEqual(['user-approval'])
     expect(events.filter(event => event.type === 'user/message').map(event => event.data.source.kind)).toEqual(['user', 'user-approval'])
     expect(runtime.exchanges.size).toBe(0)
   }, 10_000)
