@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import postcss from 'postcss'
 import { describe, expect, it } from 'vitest'
 import globalStyle from './global.cssr'
@@ -93,17 +94,6 @@ describe('center column surface', () => {
   })
 })
 
-/**
- * 聊天流屏外渲染契约。
- *
- * 官方 `ChatView` 把整条会话的节点全量挂在 `[data-chat-flow]` 列里，没有滚动虚拟化：
- * 每个节点是列的直接子元素 `[data-chat-anchor-key]`（`flowItem`）。长会话因此把上千棵
- * markdown 与工具卡片子树留在文档里，布局与绘制开销随会话长度线性增长。本仓不动 DOM
- * 与产品逻辑，把浏览器原生的 `content-visibility: auto` 交给这些节点：屏外节点跳过
- * 布局与绘制，滚回来仍按真实尺寸渲染；`contain-intrinsic-size` 的 `auto` 关键字让浏览器
- * 记住上次渲染尺寸，只有首次滚过用估算值，避免把滚动位置顶偏。这里按生成 CSS 断言规则
- * 只做「跳过渲染」，不得用 `hidden`（那会让屏外内容在浏览器查找与无障碍树里消失）。
- */
 describe('chat flow off-screen rendering', () => {
   const rules: Record<string, Record<string, string>> = {}
   postcss.parse(globalStyle.render()).walkRules((rule) => {
@@ -115,11 +105,35 @@ describe('chat flow off-screen rendering', () => {
     }
   })
 
-  it('对聊天流锚点启用原生屏外跳过渲染并保留尺寸记忆', () => {
-    expect(rules['[data-chat-flow] > [data-chat-anchor-key]']).toEqual({
+  it('对可见聊天流锚点启用原生屏外跳过渲染并保留尺寸记忆', () => {
+    expect(rules['[data-chat-flow] > [data-chat-anchor-key]:not([hidden])']).toEqual({
       'content-visibility': 'auto',
       'contain-intrinsic-size': 'auto 320px',
     })
+  })
+
+  it('隐藏聊天节点不匹配渲染优化，展开后重新匹配（issue #1023）', () => {
+    const flow = document.createElement('div')
+    flow.setAttribute('data-chat-flow', '')
+    const node = document.createElement('div')
+    node.setAttribute('data-chat-anchor-key', '')
+    flow.append(node)
+    document.body.append(flow)
+    try {
+      const optimized = Object.keys(rules).filter(selector =>
+        'content-visibility' in rules[selector] || 'contain-intrinsic-size' in rules[selector],
+      )
+      expect(optimized.filter(selector => node.matches(selector))).toHaveLength(1)
+      for (const hidden of ['until-found', '', 'hidden']) {
+        node.setAttribute('hidden', hidden)
+        expect(optimized.filter(selector => node.matches(selector)), `hidden="${hidden}"`).toEqual([])
+      }
+      node.removeAttribute('hidden')
+      expect(optimized.filter(selector => node.matches(selector))).toHaveLength(1)
+    }
+    finally {
+      flow.remove()
+    }
   })
 
   it('只移除带 continue 标记的外层聊天节点，不留下间距', () => {
