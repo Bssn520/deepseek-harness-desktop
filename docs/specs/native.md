@@ -1,4 +1,4 @@
-# DeepSeek Harness 移动端（DSH Bridge）规范
+# DeepSeek Harness 移动端（DSH Mobile）规范
 
 > **定位**：移动端是与桌面端同仓维护的 Expo / React Native 子工程，用于在局域网内发现 DSH 主机并以全屏 WebView 承载 Harness 网页。它不替代桌面端，只在**官方未推出移动端服务期间**维护。
 > **根目录**：`src-native/` 为源码根；Expo / Metro / 类型 / 测试配置位于仓库根目录，与桌面端（`src/`、`src-tauri/`）共用同一 `package.json`。
@@ -32,7 +32,7 @@ pnpm typecheck:native   # tsc --project tsconfig.native.json --noEmit
 
 | 文件 | 作用 |
 | --- | --- |
-| `app.json` | Expo 静态配置：应用名 `DSH Bridge`、slug `dsh-bridge`、`expo.version`、Android 包名 `com.dshtauri.dshbridge`、`versionCode`、plugins、权限 |
+| `app.json` | Expo 静态配置：应用名 `DSH Mobile`、slug `dsh-bridge`、`expo.version`、Android 包名 `com.dshtauri.dshbridge`、`versionCode`、plugins、权限 |
 | `app.config.js` | Expo 动态配置（ESM）：把 `THIRD_PARTY_NOTICES.md` 全文注入 `extra.thirdPartyNotices` |
 | `metro.config.js` | Metro 配置：`expo/metro-config.js` 全扩展名导入、`withUniwindConfig` 接入 CSS 入口、自定义 `resolver.resolveRequest` 钉住 `@/x`、`blockList` 屏蔽 `src-tauri` / `source` / `dist` 等大目录 |
 | `src-native/entry.ts` | 移动端应用入口（只 `import 'expo-router/entry'`），由 `package.json` 的 `"main"` 指向 |
@@ -86,7 +86,7 @@ src-native/
 ### 3.2 apis
 
 * `src-native/apis/index.types.ts` 是宿主 HTTP 契约的类型 SSOT（`AuthStatus`、`BridgeManifest`、路径参数类型）。
-* `src-native/apis/index.ts` 提供 `getAuthStatus` / `getManifest`：内部 `fetch` + 校验，非 2xx、响应体不合法或校验失败一律返回 `null`（含义是「这个 origin 不是 DSH Bridge 宿主」）。
+* `src-native/apis/index.ts` 提供 `getAuthStatus` / `getManifest`：内部 `fetch` + 校验，非 2xx、响应体不合法或校验失败一律返回 `null`（含义是「这个 origin 不是 DSH Mobile 宿主」）。
 * `src-native/utils/bridge-protocol.ts` 以 **type-only** 方式引用这些类型，避免协议工具与访问层耦合。
 
 ---

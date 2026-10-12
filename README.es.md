@@ -116,7 +116,7 @@ brew install dsh-tauri/desktop/deepseek-harness
 
 ## Soporte móvil
 
-El mismo repositorio también mantiene la app móvil **DSH Bridge** (Expo / React Native): descubre un host DSH en la red local y muestra la interfaz web de Harness en un WebView a pantalla completa. El código está en `src-native/`.
+El mismo repositorio también mantiene la app móvil **DSH Mobile** (Expo / React Native): descubre un host DSH en la red local y muestra la interfaz web de Harness en un WebView a pantalla completa. El código está en `src-native/`.
 
 - Los APK de Android se descargan desde la página de [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) como `Deepseek.Harness.Android_x.x.x.apk`, y la versión sigue a la de escritorio.
 - **iOS todavía no se publica**: solo existe el flujo de compilación y publicación de Android.

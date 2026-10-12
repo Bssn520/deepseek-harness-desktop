@@ -115,7 +115,7 @@ brew install dsh-tauri/desktop/deepseek-harness
 
 ## 移动端支持
 
-同一仓库内维护移动端 **DSH Bridge**（Expo / React Native）：在局域网发现 DSH 主机，并以全屏 WebView 承载 Harness 网页，源码位于 `src-native/`。
+同一仓库内维护移动端 **DSH Mobile**（Expo / React Native）：在局域网发现 DSH 主机，并以全屏 WebView 承载 Harness 网页，源码位于 `src-native/`。
 
 - Android APK 可在 [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) 页面下载，资产名形如 `Deepseek.Harness.Android_x.x.x.apk`，版本跟随桌面端。
 - **iOS 尚未发布**，当前只有 Android 构建与发版流程。
