@@ -812,7 +812,7 @@ fn create_directory_junction(source: &Path, destination: &Path) -> std::io::Resu
     // dunce::simplified 去掉 canonicalize 产生的 verbatim（`\\?\`）前缀，
     // 避免双重前缀导致内核解析失败。
     let simplified = dunce::simplified(source);
-    let print_name = simplified.to_string_lossy();
+    let print_name = simplified.to_string_lossy().replace('/', "\\");
     let substitute_name = if print_name.starts_with("\\\\") {
         format!(r"\??\UNC\{}", print_name.trim_start_matches('\\'))
     } else {
@@ -2005,20 +2005,21 @@ mod tests {
 
     /// 确定性覆盖 junction 回退路径：无论本机是否启用开发者模式/管理员权限，
     /// 直接构造 junction 并断言其可解析、可删除，且与 ensure_package_link 的
-    /// matches 幂等检查兼容。
+    /// matches 幂等检查兼容。包路径带 scoped 包名的正斜杠（真实安装形态）：
+    /// `\\??\\` 替换名不经过 Win32 分隔符归一化，混用分隔符必须仍可建链。
     #[cfg(windows)]
     #[test]
-    fn create_directory_junction_is_resolvable_and_idempotent() {
+    fn create_directory_junction_accepts_mixed_separators_and_is_idempotent() {
         let root = std::env::temp_dir().join(format!("dsh-junction-direct-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let source = root.join("source-pkg");
+        let source = root.join("@scope/package");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("package.json"), r#"{"name":"dsh-tauri"}"#).unwrap();
         let destination = root.join("node_modules").join("dsh-tauri");
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
 
         let canonical_source = source.canonicalize().unwrap();
-        create_directory_junction(&canonical_source, &destination)
+        create_directory_junction(&source, &destination)
             .unwrap_or_else(|e| panic!("junction must be creatable without privileges: {e}"));
 
         let metadata = std::fs::symlink_metadata(&destination).unwrap();

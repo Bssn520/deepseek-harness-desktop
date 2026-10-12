@@ -241,7 +241,7 @@ pub(super) async fn ensure_plugin_entry_built(
     // 与 verify 修复路径同一套 store 主版本感知 pnpm 选择（捆绑版优先，不匹配
     // 时回落用户 pnpm.exe），不硬编码单一 pnpm，避免「装了用户版却没捆绑版」
     // 或 v10/v11 store 不兼容的假失败。
-    let Some((program, pre_args)) = super::super::verify::pnpm_direct(app_handle) else {
+    let Some((program, pre_args)) = super::super::verify::pnpm_direct(app_handle).await? else {
         return Err(format!(
             "PNPM_NOT_FOUND: no usable pnpm (bundled or user) to rebuild plugin {id}"
         ));
