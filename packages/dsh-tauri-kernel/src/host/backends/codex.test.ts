@@ -915,6 +915,30 @@ describe('codex native app-server contract', () => {
     await submitted
   })
 
+  it('names the proposed files in a file-change approval prompt', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    sink.approval.mockResolvedValue(true)
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    notify(fixture, 'item/started', { item: { id: 'edit-1', type: 'fileChange', status: 'inProgress', changes: [
+      { path: 'src/harness/session.ts', kind: { type: 'update' }, diff: '@@' },
+      { path: 'src/harness/new.ts', kind: { type: 'add' }, diff: '@@' },
+    ] } })
+    const answered = fixture.next(frame => frame.id === 81 && 'result' in frame)
+    fixture.send({ id: 81, method: 'item/fileChange/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'edit-1', reason: 'edit the harness session' } })
+    expect(await answered).toEqual({ id: 81, result: { decision: 'accept' } })
+    expect(sink.approval.mock.calls[0]![1]).toEqual({
+      kind: 'file',
+      title: 'Codex file changes',
+      details: 'edit the harness session\nsrc/harness/session.ts\nsrc/harness/new.ts',
+    })
+    completed(fixture)
+    await submitted
+  })
+
   it('cancels instead of answering accept when the native decision menu offers no one-shot grant', async () => {
     const { fixture } = codexProcess()
     const sink = createSink()

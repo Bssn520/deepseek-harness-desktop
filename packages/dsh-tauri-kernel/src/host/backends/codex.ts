@@ -52,7 +52,7 @@ interface CodexTurn {
  * identify what is being approved. The raw request envelope (ids, timestamps,
  * decision menus) is protocol plumbing and is unreadable in a permission prompt.
  */
-function approvalDetails(fallback: string, params: Record<string, unknown>, fields: readonly string[]): string {
+function approvalDetails(fallback: string, params: Record<string, unknown>, fields: readonly string[], extra: readonly string[] = []): string {
   const lines = [typeof params.reason === 'string' && params.reason.trim() !== '' ? params.reason : fallback]
   for (const field of fields) {
     const value = params[field]
@@ -60,7 +60,23 @@ function approvalDetails(fallback: string, params: Record<string, unknown>, fiel
       continue
     lines.push(`${field}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
   }
-  return lines.join('\n')
+  return [...lines, ...extra].join('\n')
+}
+
+/**
+ * Read the proposed file changes a `fileChange` item carries. The approval
+ * request itself names no files, so the prompt can only list them from the item
+ * the native kernel announced for the same identity.
+ */
+function changedLines(item: Record<string, unknown>): string[] {
+  if (!Array.isArray(item.changes))
+    return []
+  return item.changes.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      return []
+    const path = (value as Record<string, unknown>).path
+    return typeof path === 'string' && path !== '' ? [path] : []
+  })
 }
 
 /**
@@ -113,6 +129,8 @@ class CodexSession implements NativeSession {
   private readonly interruptedTurns = new Set<string>()
   private backgroundBaseline?: Set<string>
   private readonly commandItems = new Set<string>()
+  /** Proposed file changes per announced `fileChange` item, for its approval prompt. */
+  private readonly changedFiles = new Map<string, string[]>()
   private baselineModel?: string
   private baselineProvider?: string
   private baselineEffort?: string | null
@@ -338,6 +356,7 @@ class CodexSession implements NativeSession {
     const runs = nativeRuns(messages, this.attachments)
     if (runs.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Codex native turn requires a user message')
+    this.changedFiles.clear()
     const selection = options ? { ...options } : undefined
     const turn: CodexTurn = {
       result: deferred<void>(),
@@ -615,6 +634,11 @@ class CodexSession implements NativeSession {
       turn.commandItems.add(id)
       this.commandItems.add(id)
     }
+    else if (item.type === 'fileChange') {
+      const lines = changedLines(item)
+      if (lines.length > 0)
+        this.changedFiles.set(id, lines)
+    }
     const tool = nativeTool(item)
     if (tool) {
       if (!turn.tools.has(id)) {
@@ -688,7 +712,7 @@ class CodexSession implements NativeSession {
           ? await this.sink.approval(itemId, {
               kind: command ? 'command' : 'file',
               title: command && typeof params.command === 'string' ? params.command : command ? 'Codex command execution' : 'Codex file changes',
-              details: approvalDetails(command ? 'Codex needs to run a command' : 'Codex needs to change files', params, command ? ['command', 'cwd'] : ['grantRoot']),
+              details: approvalDetails(command ? 'Codex needs to run a command' : 'Codex needs to change files', params, command ? ['command', 'cwd'] : ['grantRoot'], command ? [] : this.changedFiles.get(itemId) ?? []),
             }, signal)
           : false
         const once = acceptsOnce(params)
