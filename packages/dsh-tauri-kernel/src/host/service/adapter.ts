@@ -5,7 +5,7 @@ import type { AdmittedStep, HostContext } from '../types'
 import { Buffer } from 'node:buffer'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
-import { BRIDGE_PROVIDER } from '../config/constants'
+import { BRIDGE_PROVIDER, SESSION_TITLE_PURPOSE } from '../config/constants'
 import { runtime } from '../config/runtime'
 import { server } from '../server'
 import { loadRuntimeModules } from '../utils/runtime-modules'
@@ -130,6 +130,10 @@ export const adapter = defineService({
       yield* next()
       return
     }
+    if (options.purpose === SESSION_TITLE_PURPOSE) {
+      yield* next()
+      return
+    }
     const ctx = getServerContext<HostContext>(server)
     const modules = await loadRuntimeModules(ctx.loader)
     if (options.purpose !== undefined || !modules.isAgentLoopRequest(options) || options.sessionId === undefined || options.signal === undefined)
@@ -152,6 +156,10 @@ export const adapter = defineService({
   },
 
   async* stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.purpose === SESSION_TITLE_PURPOSE) {
+      yield* session.title(options)
+      return
+    }
     const admitted = options.sessionId === undefined ? undefined : runtime.steps.get(options.sessionId)
     if (!admitted || admitted.dispatched || !admitted.request || options.purpose !== undefined || options.signal !== admitted.signal || options.provider !== BRIDGE_PROVIDER || options.model !== admitted.request.model)
       throw new Error('BRIDGE_STEP_UNAVAILABLE: 原生请求未通过官方回合检查。')

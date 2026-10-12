@@ -1,4 +1,5 @@
 import type { Agent, AgentHandle, AgentSetupCommit } from '@deepseek-ai/dsh-agent'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type { KernelBinding } from '../../shared/types'
@@ -14,7 +15,7 @@ import { defineService, resolveUngroupedSessionPath } from 'dsh-tauri'
 import { createClaudeSession } from '../backends/claude'
 import { createCodexSession } from '../backends/codex'
 import { NativeBridgeError } from '../backends/transport'
-import { BRIDGE_PROVIDER, KERNEL_RECORD_TYPE } from '../config/constants'
+import { BRIDGE_PROVIDER, KERNEL_RECORD_TYPE, SESSION_TITLE_PURPOSE } from '../config/constants'
 import { resetRuntime, runtime } from '../config/runtime'
 import { server } from '../server'
 import { waitFor } from '../utils/abort'
@@ -182,6 +183,27 @@ export const session = defineService({
     signal.throwIfAborted()
     if (ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== agent.session)
       throw new Error('BRIDGE_AGENT_REPLACED: 工作树会话已关闭或被替换。')
+  },
+
+  async* title(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const ctx = getServerContext<HostContext>(server)
+    const agent = options.sessionId === undefined ? undefined : ctx.agents.get(options.sessionId as SessionId)
+    if (!runtime.ready || options.provider !== BRIDGE_PROVIDER || options.purpose !== SESSION_TITLE_PURPOSE || !agent || ctx.sessions.get(agent.id) !== agent.session || options.signal === undefined || identity.resolve(agent).backend !== options.model)
+      throw new Error('BRIDGE_TITLE_REQUEST_INVALID: 标题请求缺少对应的原生会话。')
+    const route = ctx.get('agentDefaultModel')?.currentSelection()
+    if (!route || route.provider === BRIDGE_PROVIDER)
+      throw new Error('BRIDGE_TITLE_MODEL_UNAVAILABLE: 标题生成需要可用的 DSH 默认模型。')
+    const signal = AbortSignal.any([options.signal, runtime.lifetime.signal])
+    signal.throwIfAborted()
+    const call = await ctx.llm.prepareCall({
+      provider: route.provider,
+      model: route.model,
+      reasoningEffort: route.reasoningEffort,
+      maxTokens: options.maxTokens,
+      temperature: options.temperature,
+      stop: options.stop,
+    }, signal)
+    yield* call.stream({ ...options, ...call.config, signal })
   },
 
   async connect(agent: Agent, signal: AbortSignal): Promise<NativeSession> {

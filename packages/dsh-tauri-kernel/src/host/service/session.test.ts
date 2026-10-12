@@ -24,7 +24,7 @@ import * as zodModule from 'zod'
 import { apply } from '../apply'
 import { createClaudeSession } from '../backends/claude'
 import { createCodexSession } from '../backends/codex'
-import { BRIDGE_PROVIDER } from '../config/constants'
+import { BRIDGE_PROVIDER, SESSION_TITLE_PURPOSE } from '../config/constants'
 import { resetRuntime, runtime } from '../config/runtime'
 import { detectBackend } from '../utils/detection'
 import { adapter } from './adapter'
@@ -357,6 +357,84 @@ function observe(agent: Agent) {
   })
   return { events, frames, endEvents }
 }
+
+describe('native session title requests', () => {
+  it('still rejects non-title auxiliary requests before opening a native session', async () => {
+    const connection = native('auxiliary-owner')
+    vi.mocked(createCodexSession).mockResolvedValueOnce(connection)
+    await creating()
+    const agent = officialHandle!.agent
+    const signal = new AbortController().signal
+    const call = await context.llm.prepareCall({ provider: BRIDGE_PROVIDER, model: 'codex' }, signal)
+    const request = async () => {
+      for await (const chunk of call.stream({ ...call.config, messages: [], purpose: 'compaction', sessionId: agent.id, signal }))
+        expect.fail(`unexpected auxiliary chunk: ${JSON.stringify(chunk)}`)
+    }
+    await expect(request()).rejects.toThrow('BRIDGE_AUXILIARY_REQUEST')
+    expect(createCodexSession).toHaveBeenCalledOnce()
+    expect(connection.submit).not.toHaveBeenCalled()
+  })
+
+  it.each(['codex', 'claude'] as const)('routes %s titles to the default model without opening another native session', async (id) => {
+    const connection = native(`conversation-${id}`)
+    const factory = vi.mocked(id === 'codex' ? createCodexSession : createClaudeSession)
+    factory.mockResolvedValueOnce(connection)
+    await creating(id)
+    const agent = officialHandle!.agent
+    const before = agent.session.snapshotEvents()
+    const requests: llmModule.GenerateOptions[] = []
+    class TitleAdapter extends llmModule.LlmAdapter {
+      async* stream(options: llmModule.GenerateOptions): AsyncIterable<llmModule.StreamChunk> {
+        requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: '修复会话标题' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: '修复会话标题' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    context.llm.registerAdapter(['title-provider'], new TitleAdapter())
+    context.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'title-provider', model: 'title-model' }) } as HostContext['agentDefaultModel'])
+    const controller = new AbortController()
+    const signal = controller.signal
+    const call = await context.llm.prepareCall({ provider: BRIDGE_PROVIDER, model: id, maxTokens: 64 }, signal)
+    const input: llmModule.GenerateOptions = {
+      ...call.config,
+      messages: [llmModule.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'name this session' }] })],
+      system: 'Return only a short title.',
+      purpose: SESSION_TITLE_PURPOSE,
+      sessionId: agent.id,
+      signal,
+    }
+    const assembler = new llmModule.BlockAssembler()
+    for await (const chunk of call.stream(input))
+      assembler.push(chunk)
+    expect(assembler.blocks()).toEqual([{ type: 'text', text: '修复会话标题' }])
+    expect(assembler.finish).toEqual({ kind: 'stop' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ ...input, provider: 'title-provider', model: 'title-model', signal: expect.any(AbortSignal) })
+    expect(factory).toHaveBeenCalledOnce()
+    expect(connection.submit).not.toHaveBeenCalled()
+    expect(agent.session.snapshotEvents()).toEqual(before)
+    expect(runtime.sessions.get(agent.id)!.session).toBe(connection)
+    controller.abort(new Error('cancel title'))
+    expect(requests[0]!.signal!.aborted).toBe(true)
+    expect(connection.dispose).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, { provider: BRIDGE_PROVIDER, model: 'codex' }])('rejects unavailable or recursive default title routes: %j', async (route) => {
+    vi.mocked(createCodexSession).mockResolvedValueOnce(native('title-owner'))
+    await creating()
+    context.provide('agentDefaultModel', { currentSelection: () => route } as HostContext['agentDefaultModel'])
+    const signal = new AbortController().signal
+    const call = await context.llm.prepareCall({ provider: BRIDGE_PROVIDER, model: 'codex' }, signal)
+    const request = async () => {
+      for await (const chunk of call.stream({ ...call.config, messages: [], purpose: SESSION_TITLE_PURPOSE, sessionId: officialHandle!.agent.id, signal }))
+        expect.fail(`unexpected title chunk: ${JSON.stringify(chunk)}`)
+    }
+    await expect(request()).rejects.toThrow('BRIDGE_TITLE_MODEL_UNAVAILABLE')
+    expect(createCodexSession).toHaveBeenCalledOnce()
+  })
+})
 
 describe('independent native worktree session setup', () => {
   beforeEach(() => {
