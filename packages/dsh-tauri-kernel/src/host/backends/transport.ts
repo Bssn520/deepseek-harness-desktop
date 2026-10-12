@@ -1,6 +1,6 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { NativeCommand } from './types'
+import type { NativeAttachments, NativeCommand, NativeImageRef } from './types'
 import { spawn } from 'node:child_process'
 import { nativeEnvironment } from '../utils/detection'
 
@@ -38,12 +38,26 @@ export function stringField(value: Record<string, unknown>, key: string): string
   return value[key]
 }
 
-export function textMessages(messages: readonly UserMessage[]): string[] {
+/** One ordered piece of an official user message handed to a native kernel. */
+export type NativePart = { type: 'text', text: string } | { type: 'image', ref: NativeImageRef }
+
+/**
+ * Split official user content into ordered native parts. Text passes through;
+ * an image keeps its durable reference so each kernel resolves the host path or
+ * the verified bytes it needs. Content no native kernel accepts fails closed
+ * rather than submitting a partial prompt.
+ * @param messages - the admitted official user messages.
+ * @param attachments - official attachment access, absent without an image provider.
+ * @returns one ordered part list per message.
+ */
+export function nativeParts(messages: readonly UserMessage[], attachments: NativeAttachments | undefined): NativePart[][] {
   return messages.map(message => message.content.map((block) => {
-    if (block.type !== 'text')
-      throw new NativeBridgeError('BRIDGE_UNSUPPORTED_CONTENT', `Native bridge does not yet support user content: ${block.type}`)
-    return block.text
-  }).join(''))
+    if (block.type === 'text')
+      return { type: 'text', text: block.text } as const
+    if (block.type === 'image' && attachments !== undefined)
+      return { type: 'image', ref: block.attachment } as const
+    throw new NativeBridgeError('BRIDGE_UNSUPPORTED_CONTENT', `Native bridge does not yet support user content: ${block.type}`)
+  }))
 }
 
 export interface Deferred<T> {

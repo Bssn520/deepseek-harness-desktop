@@ -1,9 +1,9 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
-import type { NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
+import type { NativeAttachments, NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
 import { randomUUID } from 'node:crypto'
 import { nativeEnvironment } from '../utils/detection'
-import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField, textMessages } from './transport'
+import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeParts, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
 interface ClaudeBlock {
   type: string
@@ -98,7 +98,7 @@ class ClaudeSession implements NativeSession {
   private catalog?: NativeModelCatalog
   private appliedOptions: NativeTurnOptions = { model: null, reasoningEffort: null }
 
-  constructor(command: NativeCommand, cwd: string, storedId: string | null, private readonly sink: NativeSink, private readonly options?: NativeSessionOpenOptions) {
+  constructor(command: NativeCommand, cwd: string, storedId: string | null, private readonly sink: NativeSink, private readonly options?: NativeSessionOpenOptions, private readonly attachments?: NativeAttachments) {
     this.nativeId = options?.forkFrom ? '' : storedId ?? randomUUID()
     this.defaultsPending = storedId !== null || options?.forkFrom !== undefined
     this.transport = new JsonLinesProcess({ ...command, env: { ...(command.env ?? nativeEnvironment()), CLAUDE_CODE_SDK_READS_SESSION_STATE: '1' } }, [
@@ -255,8 +255,8 @@ class ClaudeSession implements NativeSession {
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Claude session was disposed')
     if (this.active)
       throw new NativeBridgeError('BRIDGE_BUSY', 'Claude native session already has an active run')
-    const texts = textMessages(messages)
-    if (texts.length === 0)
+    const parts = nativeParts(messages, this.attachments)
+    if (parts.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Claude native run requires a user message')
     const selection = options ? { ...options } : undefined
     const run: ClaudeRun = {
@@ -286,13 +286,25 @@ class ClaudeSession implements NativeSession {
       if (selection && (this.defaultsPending || selection.model !== this.appliedOptions.model || selection.reasoningEffort !== this.appliedOptions.reasoningEffort))
         await this.applyOptions(selection, signal)
       signal.throwIfAborted()
+      const content: Record<string, unknown>[] = []
+      for (const part of parts) {
+        if (part.length === 0 || part.some(piece => piece.type === 'text'))
+          content.push({ type: 'text', text: part.filter(piece => piece.type === 'text').map(piece => piece.text).join('') })
+        for (const image of part.filter(piece => piece.type === 'image')) {
+          const source = await this.attachments!.read(image.ref, signal)
+          if (source.base64 === undefined)
+            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'The official attachment store returned no readable image bytes')
+          content.push({ type: 'image', source: { type: 'base64', media_type: source.mediaType, data: source.base64 } })
+        }
+      }
+      signal.throwIfAborted()
       run.submitted = true
       this.transport.write({
         type: 'user',
         session_id: this.id,
         uuid: run.inputId,
         parent_tool_use_id: null,
-        message: { role: 'user', content: texts.map(text => ({ type: 'text', text })) },
+        message: { role: 'user', content },
       })
       await run.result.promise
       signal.throwIfAborted()
@@ -692,10 +704,10 @@ class ClaudeSession implements NativeSession {
   }
 }
 
-export async function createClaudeSession(command: NativeCommand, cwd: string, nativeSessionId: string | null, sink: NativeSink, signal: AbortSignal, options?: NativeSessionOpenOptions): Promise<NativeSession> {
+export async function createClaudeSession(command: NativeCommand, cwd: string, nativeSessionId: string | null, sink: NativeSink, signal: AbortSignal, options?: NativeSessionOpenOptions, attachments?: NativeAttachments): Promise<NativeSession> {
   if (options?.forkFrom !== undefined && (nativeSessionId !== null || options.forkFrom === ''))
     throw new NativeBridgeError('BRIDGE_FORK_INVALID', 'Claude fork requires a source session and no existing native binding')
-  const session = new ClaudeSession(command, cwd, nativeSessionId, sink, options)
+  const session = new ClaudeSession(command, cwd, nativeSessionId, sink, options, attachments)
   await session.open(signal)
   return session
 }

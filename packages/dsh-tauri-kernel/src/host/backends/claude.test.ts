@@ -1,5 +1,5 @@
 import type { Frame } from './process.fixture'
-import type { NativeSession, NativeSessionOpenOptions } from './types'
+import type { NativeAttachments, NativeSession, NativeSessionOpenOptions } from './types'
 import { spawn } from 'node:child_process'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -63,11 +63,14 @@ function claudeProcess(options: {
   return fixture
 }
 
-async function open(nativeId: string | null = null, sink = createSink(), options?: NativeSessionOpenOptions) {
-  const session = await createClaudeSession(command, 'C:/fixture/workspace', nativeId, sink, new AbortController().signal, options)
+async function open(nativeId: string | null = null, sink = createSink(), options?: NativeSessionOpenOptions, attachments?: NativeAttachments) {
+  const session = await createClaudeSession(command, 'C:/fixture/workspace', nativeId, sink, new AbortController().signal, options, attachments)
   sessions.push(session)
   return session
 }
+
+/** Official image block; the attachment brand is opaque to this package. */
+const image = (attachment: { id: string, mediaType: string, bytes: number }) => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'image', attachment } as never] })
 
 const modelInfo = (value: string, levels: string[] = ['low', 'high']) => ({ value, displayName: `Native ${value}`, description: `${value} description`, supportsEffort: true, supportedEffortLevels: levels })
 const user = () => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'inspect the workspace' }] })
@@ -955,6 +958,21 @@ describe('claude native stream-json control contract', () => {
     await rejected
     expect(session.id).toBe(storedId)
     expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards an official image as an inline base64 content block', async () => {
+    const fixture = claudeProcess()
+    const attachments: NativeAttachments = { path: () => undefined, read: vi.fn(async () => ({ mediaType: 'image/png', base64: 'Zm FrZQ==' })) }
+    const session = await open(null, createSink(), undefined, attachments)
+    const submitted = session.submit([user(), image({ id: 'image-1', mediaType: 'image/png', bytes: 3 })], new AbortController().signal)
+    result(fixture, session.id)
+    await submitted
+    expect(fixture.frames.filter(frame => frame.type === 'user')).toEqual([
+      { type: 'user', session_id: session.id, uuid: expect.any(String), parent_tool_use_id: null, message: { role: 'user', content: [
+        { type: 'text', text: 'inspect the workspace' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'Zm FrZQ==' } },
+      ] } },
+    ])
   })
 
   it('rejects nontext input instead of sending only its text portion', async () => {

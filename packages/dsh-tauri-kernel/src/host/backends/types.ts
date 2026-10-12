@@ -1,4 +1,4 @@
-import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import type { ImageBlock, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { NativeModelCatalog, NativeTurnOptions } from '../../shared/native-model'
 
 export type { NativeModelCatalog, NativeModelInfo, NativeTurnOptions } from '../../shared/native-model'
@@ -11,6 +11,28 @@ export interface NativeCommand {
   file: string
   args: string[]
   env?: Record<string, string | undefined>
+}
+
+/** One official image resolved for a native kernel prompt. */
+export interface NativeImageSource {
+  mediaType: string
+  /** Absolute host path when the mounted provider is host-file-backed. */
+  path?: string
+  /** Verified base64 bytes, used by kernels that inline the image. */
+  base64?: string
+}
+
+/** Durable official image reference, as carried by one user-message block. */
+export type NativeImageRef = ImageBlock['attachment']
+
+/**
+ * Official attachment access for native prompts. `path` is a non-reading host
+ * lookup; `read` verifies stored bytes for kernels that must inline the image.
+ * Absent when the deployment mounts no image provider.
+ */
+export interface NativeAttachments {
+  path: (ref: NativeImageRef) => string | undefined
+  read: (ref: NativeImageRef, signal: AbortSignal) => Promise<NativeImageSource>
 }
 
 export type NativeContent

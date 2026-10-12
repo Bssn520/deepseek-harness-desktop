@@ -1,7 +1,7 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
-import type { NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
-import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField, textMessages } from './transport'
+import type { NativeAttachments, NativeCommand, NativeContent, NativeImageRef, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
+import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeParts, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
 const INITIALIZATION = {
   clientInfo: { name: 'dsh-tauri-kernel', title: 'DSH native session bridge', version: '1.0.0' },
@@ -122,7 +122,7 @@ class CodexSession implements NativeSession {
   private appliedOptions: NativeTurnOptions = { model: null, reasoningEffort: null }
   private effortOverridden = false
 
-  constructor(private readonly command: NativeCommand, private readonly sink: NativeSink, private readonly cwd: string) {
+  constructor(private readonly command: NativeCommand, private readonly sink: NativeSink, private readonly cwd: string, private readonly attachments?: NativeAttachments) {
     this.transport = new JsonLinesProcess(command, ['app-server', '--listen', 'stdio://'], cwd)
     this.requests = new PendingRequests(value => this.transport.write(value))
     this.transport.onFailure((error) => {
@@ -335,8 +335,8 @@ class CodexSession implements NativeSession {
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Codex session was disposed')
     if (this.active)
       throw new NativeBridgeError('BRIDGE_BUSY', 'Codex native session already has an active turn')
-    const input = textMessages(messages).map(text => ({ type: 'text', text, text_elements: [] }))
-    if (input.length === 0)
+    const parts = nativeParts(messages, this.attachments)
+    if (parts.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Codex native turn requires a user message')
     const selection = options ? { ...options } : undefined
     const turn: CodexTurn = {
@@ -360,6 +360,14 @@ class CodexSession implements NativeSession {
     signal.addEventListener('abort', aborted, { once: true })
     try {
       const overrides = selection ? await this.turnOptions(selection, signal) : {}
+      const input: Record<string, unknown>[] = []
+      for (const part of parts) {
+        if (part.length === 0 || part.some(piece => piece.type === 'text'))
+          input.push({ type: 'text', text: part.filter(piece => piece.type === 'text').map(piece => piece.text).join(''), text_elements: [] })
+        for (const image of part.filter(piece => piece.type === 'image'))
+          input.push(await this.imageInput(image.ref, signal))
+      }
+      signal.throwIfAborted()
       turn.baseline = new Set((await this.listTerminals(signal)).map(terminal => terminal.processId))
       signal.throwIfAborted()
       turn.submitted = true
@@ -653,6 +661,17 @@ class CodexSession implements NativeSession {
     this.sink.assistant(id, content)
   }
 
+  /** Official image as native `UserInput`; a host path avoids re-encoding the bytes. */
+  private async imageInput(ref: NativeImageRef, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const path = this.attachments?.path(ref)
+    if (path !== undefined)
+      return { type: 'localImage', path }
+    const source = await this.attachments!.read(ref, signal)
+    if (source.base64 === undefined)
+      throw new NativeBridgeError('BRIDGE_PROTOCOL', 'The official attachment store returned no readable image bytes')
+    return { type: 'image', url: `data:${source.mediaType};base64,${source.base64}` }
+  }
+
   private async answer(id: string | number, method: string, params: Record<string, unknown>): Promise<void> {
     const controller = new AbortController()
     this.approvals.set(id, controller)
@@ -719,10 +738,10 @@ class CodexSession implements NativeSession {
   }
 }
 
-export async function createCodexSession(command: NativeCommand, cwd: string, nativeSessionId: string | null, sink: NativeSink, signal: AbortSignal, options?: NativeSessionOpenOptions): Promise<NativeSession> {
+export async function createCodexSession(command: NativeCommand, cwd: string, nativeSessionId: string | null, sink: NativeSink, signal: AbortSignal, options?: NativeSessionOpenOptions, attachments?: NativeAttachments): Promise<NativeSession> {
   if (options?.forkFrom !== undefined && (nativeSessionId !== null || options.forkFrom === ''))
     throw new NativeBridgeError('BRIDGE_FORK_INVALID', 'Codex fork requires a source thread and no existing native binding')
-  const session = new CodexSession(command, sink, cwd)
+  const session = new CodexSession(command, sink, cwd, attachments)
   await session.open(cwd, nativeSessionId, signal, options)
   return session
 }

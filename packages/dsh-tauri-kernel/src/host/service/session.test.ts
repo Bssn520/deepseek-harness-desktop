@@ -932,7 +932,6 @@ describe('official cold native route restoration', () => {
   it.each([
     { provider: 'cloud-provider', model: 'global-default' },
     { provider: 'dsh-tauri-kernel', model: 'claude' },
-    { provider: 'dsh-tauri-kernel', model: 'codex', reasoningEffort: llmModule.ReasoningEffortId('high') },
   ])('rejects an explicit cold model selection instead of restoring over it: %j', async (selected) => {
     const original = native('api-cold-selected')
     vi.mocked(createCodexSession).mockResolvedValueOnce(original)
@@ -946,7 +945,7 @@ describe('official cold native route restoration', () => {
       throw found.error
     controller.selectForNextRequest(found.agent, selected)
     await followup(found.agent, 'reject switching the bound native kernel')
-    expect(errors).toEqual([expect.objectContaining({ message: 'BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项。' })])
+    expect(errors).toEqual([expect.objectContaining({ message: expect.stringContaining('BRIDGE_KERNEL_IMMUTABLE') })])
     expect(createCodexSession).toHaveBeenCalledOnce()
     expect(createClaudeSession).not.toHaveBeenCalled()
     expect(original.submit).not.toHaveBeenCalled()
@@ -954,6 +953,30 @@ describe('official cold native route restoration', () => {
     expect(found.agent.session.snapshotEvents().filter((event: SessionEvent) => event.type === 'model/selection').map((event: SessionEvent) => event.data)).toEqual([selected])
     expect(identity.resolve(found.agent)).toEqual({ backend: 'codex', nativeSessionId: original.id, sessionId: previous.agent.id })
     expect(runtime.coldRoutes.has(found.agent)).toBe(false)
+    expect(() => restoreSerialized(found.agent.session)).not.toThrow()
+  }, 10_000)
+
+  it('drops a DSH reasoning effort on the bound native route instead of failing the first turn', async () => {
+    const original = native('api-native-effort')
+    const resumed = native(original.id)
+    vi.mocked(createCodexSession).mockResolvedValueOnce(original).mockResolvedValueOnce(resumed)
+    await creating()
+    const previous = officialHandle!
+    await previous.dispose()
+    await session.remove(previous.agent.id)
+    const found = await controller.resolveAgent(previous.agent.id)
+    expect(found).not.toHaveProperty('error')
+    if ('error' in found)
+      throw found.error
+    const selected = { provider: BRIDGE_PROVIDER, model: 'codex', reasoningEffort: llmModule.ReasoningEffortId('high') }
+    controller.selectForNextRequest(found.agent, selected)
+    await followup(found.agent, 'keep the native kernel while DSH proposes an effort')
+    expect(errors).toEqual([])
+    expect(resumed.submit).toHaveBeenCalledOnce()
+    expect(resumed.submit.mock.calls[0]![2]).toEqual({ model: null, reasoningEffort: null })
+    expect(found.agent.session.requestHeader()?.config).toEqual({ provider: BRIDGE_PROVIDER, model: 'codex' })
+    expect(found.agent.session.snapshotEvents().filter((event: SessionEvent) => event.type === 'model/selection').map((event: SessionEvent) => event.data)).toEqual([selected])
+    expect(identity.resolve(found.agent)).toEqual({ backend: 'codex', nativeSessionId: original.id, sessionId: previous.agent.id })
     expect(() => restoreSerialized(found.agent.session)).not.toThrow()
   }, 10_000)
 
@@ -985,7 +1008,7 @@ describe('official cold native route restoration', () => {
     }, { global: true, prepend: true })
     const turn = followup(found.agent, 'reject overriding native options during cold resume')
     const signal = await started.promise
-    await expect(adapter.request({ agent: found.agent, signal }, async () => override)).rejects.toThrow('BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项。')
+    await expect(adapter.request({ agent: found.agent, signal }, async () => override)).rejects.toThrow(expect.objectContaining({ message: expect.stringContaining(`BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项（请求 ${override.provider}/${override.model}，当前内核 codex）。`) }))
     expect(createCodexSession).toHaveBeenCalledOnce()
     expect(original.submit).not.toHaveBeenCalled()
     expect(found.agent.session.requestHeader()).toBeUndefined()

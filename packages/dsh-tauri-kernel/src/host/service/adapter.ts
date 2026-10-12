@@ -103,7 +103,7 @@ export const adapter = defineService({
   },
 
   async request(payload: { agent: Agent, signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig> {
-    let config = await next()
+    const config = await next()
     const ctx = getServerContext<HostContext>(server)
     const projected = ctx.sessionProjections.stateOf(payload.agent.session, 'bridgeKernel')?.binding
     if (projected === null || projected === undefined) {
@@ -115,13 +115,14 @@ export const adapter = defineService({
     assertLive(payload.agent, payload.signal)
     // Cold API activation supplies the global selection until the loop commits its first legal request header.
     const fallback = ctx.get('agentDefaultModel')?.currentSelection()
-    if (runtime.coldRoutes.has(payload.agent) && payload.agent.session.requestHeader() === undefined && !payload.agent.session.snapshotEvents().some(event => event.type === 'model/selection') && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined) {
-      const { reasoningEffort: _effort, ...native } = config
-      config = { ...native, provider: BRIDGE_PROVIDER, model: binding.backend }
-    }
-    if (config.provider !== BRIDGE_PROVIDER || config.model !== binding.backend || config.reasoningEffort !== undefined || config.maxTokens !== undefined || config.temperature !== undefined || config.stop !== undefined)
-      throw new Error('BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项。')
-    return config
+    const cold = runtime.coldRoutes.has(payload.agent) && payload.agent.session.requestHeader() === undefined && !payload.agent.session.snapshotEvents().some(event => event.type === 'model/selection')
+    const ambient = cold && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined
+    if (!ambient && (config.provider !== BRIDGE_PROVIDER || config.model !== binding.backend))
+      throw new Error(`BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项（请求 ${config.provider}/${config.model}，当前内核 ${binding.backend}）。`)
+    // The native kernel owns model, effort, and generation options; DSH values never reach it, and a
+    // DSH-side effort on the native route is dropped rather than failing the whole turn.
+    const { reasoningEffort: _effort, maxTokens: _maxTokens, temperature: _temperature, stop: _stop, ...native } = config
+    return { ...native, provider: BRIDGE_PROVIDER, model: binding.backend }
   },
 
   async* capture(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {

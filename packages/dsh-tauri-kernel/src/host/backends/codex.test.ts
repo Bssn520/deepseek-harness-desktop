@@ -1,5 +1,5 @@
 import type { Frame } from './process.fixture'
-import type { NativeSession, NativeSessionOpenOptions } from './types'
+import type { NativeAttachments, NativeSession, NativeSessionOpenOptions } from './types'
 import { spawn } from 'node:child_process'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -80,11 +80,14 @@ function codexProcess(options: {
   return { fixture, catalogs, terminals }
 }
 
-async function open(storedId: string | null = null, sink = createSink(), options?: NativeSessionOpenOptions) {
-  const session = await createCodexSession(command, 'C:/fixture/workspace', storedId, sink, new AbortController().signal, options)
+async function open(storedId: string | null = null, sink = createSink(), options?: NativeSessionOpenOptions, attachments?: NativeAttachments) {
+  const session = await createCodexSession(command, 'C:/fixture/workspace', storedId, sink, new AbortController().signal, options, attachments)
   sessions.push(session)
   return session
 }
+
+/** Official image block; the attachment brand is opaque to this package. */
+const image = (attachment: { id: string, mediaType: string, bytes: number }) => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'image', attachment } as never] })
 
 const modelInfo = (id: string, levels: string[] = ['low', 'high'], defaultEffort = 'low') => ({ id: `catalog:${id}`, model: id, displayName: `Native ${id}`, description: `${id} description`, supportedReasoningEfforts: levels.map(reasoningEffort => ({ reasoningEffort, description: `${reasoningEffort} reasoning` })), defaultReasoningEffort: defaultEffort, isDefault: false })
 const user = () => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'inspect the workspace' }] })
@@ -1081,7 +1084,39 @@ describe('codex native app-server contract', () => {
     expect(fixture.frames.some(frame => frame.method === 'turn/interrupt')).toBe(false)
   })
 
-  it('rejects nontext user content rather than submitting a partial native prompt', async () => {
+  it('forwards an official image as native input instead of rejecting the prompt', async () => {
+    const { fixture } = codexProcess()
+    const attachments: NativeAttachments = { path: () => 'C:/fixture/native.png', read: vi.fn() }
+    const session = await open(null, createSink(), undefined, attachments)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user(), image({ id: 'image-1', mediaType: 'image/png', bytes: 3 })], new AbortController().signal)
+    expect((await started).params).toEqual({
+      threadId: 'thread-1',
+      input: [
+        { type: 'text', text: 'inspect the workspace', text_elements: [] },
+        { type: 'localImage', path: 'C:/fixture/native.png' },
+      ],
+    })
+    completed(fixture)
+    await submitted
+    expect(attachments.read).not.toHaveBeenCalled()
+  })
+
+  it('inlines an official image as a data URL when the provider stores no host file', async () => {
+    const { fixture } = codexProcess()
+    const attachments: NativeAttachments = { path: () => undefined, read: vi.fn(async () => ({ mediaType: 'image/png', base64: 'Zm FrZQ==' })) }
+    const session = await open(null, createSink(), undefined, attachments)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([image({ id: 'image-2', mediaType: 'image/png', bytes: 3 })], new AbortController().signal)
+    expect((await started).params).toEqual({
+      threadId: 'thread-1',
+      input: [{ type: 'image', url: 'data:image/png;base64,Zm FrZQ==' }],
+    })
+    completed(fixture)
+    await submitted
+  })
+
+  it('refuses nontext user content rather than submitting a partial native prompt', async () => {
     const { fixture } = codexProcess()
     const session = await open()
     const input = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'reasoning', text: 'not user text' }] })
