@@ -70,7 +70,8 @@ pub(crate) use env::build_plugin_envs;
 pub use inspect::inspect_specs;
 pub(crate) use inspect::packument;
 pub(crate) use pnpm::{
-    bundled_pnpm_major, harness_prefer_bundled_pnpm, pnpm_major_version_at, profile_store_major,
+    bundled_pnpm_major, harness_prefer_bundled_pnpm, pnpm_major_version_at_bounded,
+    profile_store_major,
 };
 pub(crate) use single::uninstall_deprecated_plugins;
 pub use single::{remove_many, update_many};
@@ -653,7 +654,9 @@ pub async fn allow_version_exemptions(
         return Err("HARNESS_NOT_FOUND: dsh CLI missing".to_string());
     }
 
-    let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle));
+    // 豁免分支不进 pnpm（见函数文档），这里不做 pnpm 就绪探测：探测失败不该
+    // 让一条本不需要 pnpm 的授权落不了地。
+    let envs = build_plugin_envs(app_handle, false);
     let cwd = crate::service::core::active_core_dir(app_handle);
     let profile = active_profile(app_handle);
     let owner = new_process_owner();

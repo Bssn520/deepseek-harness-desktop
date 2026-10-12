@@ -961,7 +961,7 @@ async fn verify_update_landed(
     let window = app_handle
         .get_webview_window("main")
         .ok_or("WINDOW_NOT_FOUND: main window missing")?;
-    let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle));
+    let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle).await?);
     let pkg_dir = profile_dir(app_handle).join("node_modules").join(name);
     if let Err(e) = ensure_plugin_entry_built(app_handle, id, &pkg_dir, &envs, &window).await {
         if let Err(err) = errors::record(app_handle, id, "update", &e) {
