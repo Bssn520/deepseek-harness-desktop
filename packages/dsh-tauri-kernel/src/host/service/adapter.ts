@@ -14,6 +14,15 @@ import { model } from './model'
 import { session } from './session'
 import { sink } from './sink'
 
+/**
+ * Sources that carry DSH-side environment state rather than content addressed to
+ * the model: policy switches, cwd notices, plugin run outcomes, and snapshots.
+ * The native kernel owns its own equivalents, so these never become native input
+ * and must not abort a running native turn. Real user instructions stay absent
+ * on purpose — steering a running native turn is still refused.
+ */
+const ENVIRONMENT_SOURCES = new Set(['runtime-context', 'time-context', 'user-approval', 'working-directory', 'cordis-host-runner', 'ptc-mode'])
+
 export const adapter = defineService({
   async register(): Promise<() => void> {
     const ctx = getServerContext<HostContext>(server)
@@ -234,8 +243,7 @@ export const adapter = defineService({
 })
 
 function nativeMessage(message: UserMessage): boolean {
-  const source: string = message.source.kind
-  return source !== 'runtime-context' && source !== 'time-context'
+  return !ENVIRONMENT_SOURCES.has(message.source.kind)
 }
 
 function continuationMessage(message: UserMessage, entered: readonly UserMessage[]): boolean {

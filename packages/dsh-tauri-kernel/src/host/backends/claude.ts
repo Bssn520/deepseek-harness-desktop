@@ -211,6 +211,8 @@ class ClaudeSession implements NativeSession {
   }
 
   private async applyOptions(options: NativeTurnOptions, signal: AbortSignal): Promise<void> {
+    if (options.model === null && options.reasoningEffort === null && this.appliedOptions.model === null && this.appliedOptions.reasoningEffort === null)
+      return
     const modelChanged = this.defaultsPending || options.model !== this.appliedOptions.model
     const effortChanged = this.defaultsPending || options.reasoningEffort !== this.appliedOptions.reasoningEffort
     if (!modelChanged && !effortChanged)

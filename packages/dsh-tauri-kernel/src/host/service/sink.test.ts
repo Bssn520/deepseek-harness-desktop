@@ -291,10 +291,151 @@ describe('real official cross-step native sink', () => {
     expect(runtime.exchanges.size).toBe(0)
   }, 10_000)
 
-  it.each(['block', 'value', 'content', 'context'] as const)('refuses continuation after real post-execute %s rewrites the native result', async (policy) => {
+  it('preserves a native failure when the host loader uses a distinct HarnessError module instance', async () => {
+    const reloaded = await import(`${pathToFileURL(require.resolve('@deepseek-ai/dsh-llm')).href}?native-error-reload`) as typeof llmModule
+    expect(new reloaded.HarnessError('probe', 'PROBE')).not.toBeInstanceOf(llmModule.HarnessError)
+    const originalImport = context.loader.import.bind(context.loader)
+    vi.spyOn(context.loader, 'import').mockImplementation(async id => id === '@deepseek-ai/dsh-llm' ? { ...llmModule, HarnessError: reloaded.HarnessError } : originalImport(id))
+    const stderr = 'Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+    nativeScript = async (native) => {
+      nativeCall(native, 'sandbox-refresh-failure', '{"command":"Get-Content -LiteralPath \'C:/fixture/skills/openai-docs/SKILL.md\'","cwd":"C:/fixture/workspace"}', 'commandExecution')
+      native.toolEnd('sandbox-refresh-failure', stderr, true)
+      native.assistant('final', [{ type: 'text', text: 'native failure acknowledged' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(results.map(({ result }) => result)).toEqual([{ isError: true, error: { message: stderr, info: { name: 'NativeToolError', code: 'BRIDGE_NATIVE_TOOL_ERROR' } }, content: [{ type: 'text', text: stderr }] }])
+    expect(toolResults().map(event => event.data.message)).toMatchObject([{ toolCallId: 'sandbox-refresh-failure', isError: true, content: [{ type: 'text', text: stderr }] }])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('accepts semantically identical content properties at the final-result boundary', async () => {
+    const current = await exchange()
+    nativeCall(current.state.native, 'reordered')
+    current.state.native.toolEnd('reordered', 'canonical native output')
+    const result = await execute('reordered', current.state.signal)
+    expect(result).toEqual({ isError: false, value: 'canonical native output', content: [{ type: 'text', text: 'canonical native output' }] })
+    expect(sink.acceptTool(results[0]!.exec, { ...result, content: [{ text: 'canonical native output', type: 'text' }] })).toBeUndefined()
+    expect(current.state.tools.get('reordered')!.accepted).toBe(true)
+    expect(current.state.signal.aborted).toBe(false)
+  })
+
+  it.each([false, true])('rejects changed native isError=%s content at the final-result boundary', async (isError) => {
+    const current = await exchange()
+    nativeCall(current.state.native, 'rewritten-error')
+    current.state.native.toolEnd('rewritten-error', 'canonical native output', isError)
+    const result = await execute('rewritten-error', current.state.signal)
+    expect(result.isError).toBe(isError)
+    expect(sink.acceptTool(results[0]!.exec, { ...result, content: [{ type: 'text', text: 'rewritten native error' }] })).toBeUndefined()
+    expect(current.state.signal.aborted).toBe(true)
+    expect(current.state.failure).toMatchObject({ message: expect.stringContaining('BRIDGE_TOOL_RESULT_REJECTED') })
+  })
+
+  it('replays native results without duplicate DSH pre, around, or post policies while preserving core guards', async () => {
+    const inherited = inheritedTool()
+    const pre = vi.fn(async () => ({ kind: 'deny' as const, reason: 'DSH policy must not gate native replay' }))
+    const guard = vi.fn(() => undefined)
+    const around = vi.fn(async () => ({ isError: false as const, value: 'DSH replacement', content: [{ type: 'text' as const, text: 'DSH replacement' }] }))
+    const post = vi.fn(async (): Promise<PostToolDecision> => ({ kind: 'block', feedback: [{ type: 'text', text: 'DSH spill or repeat replacement' }] }))
+    context.on('tools/pre-execute', pre, { global: true })
+    context.tools.guard(guard)
+    agent.ctx.on('tools/execute', around)
+    agent.ctx.on('tools/post-execute', post)
+    nativeScript = async (native) => {
+      nativeCall(native, 'native-policy-isolation')
+      native.toolEnd('native-policy-isolation', 'canonical native output')
+      native.assistant('final', [{ type: 'text', text: 'native done' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(pre).not.toHaveBeenCalled()
+    expect(guard).toHaveBeenCalledOnce()
+    expect(around).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+    expect(inherited).not.toHaveBeenCalled()
+    expect(toolResults().map(event => event.data.message)).toMatchObject([{ toolCallId: 'native-policy-isolation', isError: false, content: [{ type: 'text', text: 'canonical native output' }] }])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it.each(['global', 'scoped'] as const)('retains a %s monotonic guard denial rather than silently force-allowing native replay', async (scope) => {
+    const inherited = inheritedTool()
+    const guard = vi.fn(() => 'composition guard denied replay')
+    ;(scope === 'global' ? context.tools : agent.ctx.tools).guard(guard)
+    nativeScript = async (native) => {
+      nativeCall(native, 'native-guard')
+      native.toolEnd('native-guard', 'canonical native output')
+      native.assistant('final', [{ type: 'text', text: 'must not override guard' }])
+    }
+    await runTurn()
+    expect(guard).toHaveBeenCalledOnce()
+    expect(inherited).not.toHaveBeenCalled()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining('BRIDGE_TOOL_RESULT_REJECTED') })
+    expect(results.map(({ result }) => result)).toMatchObject([{ isError: true, error: { message: 'composition guard denied replay' }, content: [{ type: 'text', text: 'Error: composition guard denied replay' }] }])
+    expect(assistants()).toHaveLength(1)
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('leaves ordinary DSH policies active outside a native exchange', async () => {
+    const body = inheritedTool('ordinary_dsh_tool')
+    const pre = vi.fn(async (_exec: ToolExecution, next: () => Promise<import('@deepseek-ai/dsh-tools').PreToolDecision>) => next())
+    const guard = vi.fn(() => undefined)
+    const around = vi.fn(async (_exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => next())
+    const post = vi.fn(async (): Promise<PostToolDecision> => ({ kind: 'accept', content: [{ type: 'text', text: 'ordinary DSH post policy' }] }))
+    agent.ctx.on('tools/pre-execute', pre)
+    agent.ctx.tools.guard(guard)
+    agent.ctx.on('tools/execute', around)
+    agent.ctx.on('tools/post-execute', post)
+    const result = await execute('ordinary', new AbortController().signal, {}, 'ordinary_dsh_tool')
+    expect(pre).toHaveBeenCalledOnce()
+    expect(guard).toHaveBeenCalledOnce()
+    expect(around).toHaveBeenCalledOnce()
+    expect(post).toHaveBeenCalledOnce()
+    expect(body).toHaveBeenCalledOnce()
+    expect(result).toEqual({ isError: false, value: 'inherited DSH body must not run', content: [{ type: 'text', text: 'ordinary DSH post policy' }] })
+  })
+
+  it('keeps a native turn alive when DSH injects a mid-turn approval-policy notice', async () => {
+    context.on('tools/result', (exec) => {
+      if (exec.callId === 'policy-notice')
+        agent.inject(llmModule.createUserMessage({ source: { kind: 'user-approval' }, content: [{ type: 'text', text: 'Approval prompts are disabled in this session.' }] }))
+      return undefined
+    })
+    nativeScript = async (native) => {
+      nativeCall(native, 'policy-notice')
+      native.toolEnd('policy-notice', 'native output')
+      native.assistant('final', [{ type: 'text', text: 'continued after the policy switch' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(connection.submit).toHaveBeenCalledOnce()
+    expect(connection.submit.mock.calls[0]![0]).toMatchObject([{ content: [{ type: 'text', text: 'native task' }] }])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(toolResults().map(event => event.data.message.toolCallId)).toEqual(['policy-notice'])
+    expect(events.filter(event => event.type === 'agent/inbox/spliced' && event.data.target === 'next-step').flatMap(event => event.data.inserted).map(message => message.source.kind)).toEqual(['user-approval'])
+    expect(events.filter(event => event.type === 'user/message').map(event => event.data.source.kind)).toEqual(['user', 'user-approval'])
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('preserves an empty native error without adding fallback text to its content', async () => {
+    nativeScript = async (native) => {
+      nativeCall(native, 'empty-error')
+      native.toolEnd('empty-error', '', true)
+      native.assistant('final', [{ type: 'text', text: 'native done' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(results.map(({ result }) => result)).toEqual([{ isError: true, error: { message: 'Native tool failed', info: { name: 'NativeToolError', code: 'BRIDGE_NATIVE_TOOL_ERROR' } }, content: [{ type: 'text', text: '' }] }])
+    expect(toolResults().map(event => event.data.message.content)).toEqual([[{ type: 'text', text: '' }]])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+  }, 10_000)
+
+  it.each(['block', 'value', 'content', 'context'] as const)('keeps native output unchanged instead of applying duplicate post-execute %s policy', async (policy) => {
     const inherited = inheritedTool()
     const additional = llmModule.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'extra policy context' }] })
-    agent.ctx.on('tools/post-execute', async (): Promise<PostToolDecision> => {
+    const rewrite = vi.fn(async (): Promise<PostToolDecision> => {
       if (policy === 'block')
         return { kind: 'block', feedback: [{ type: 'text', text: 'policy denied native output' }] }
       if (policy === 'value')
@@ -303,20 +444,20 @@ describe('real official cross-step native sink', () => {
         return { kind: 'accept', content: [{ type: 'text', text: 'rewritten native content' }] }
       return { kind: 'accept', additionalContexts: [additional] }
     })
+    agent.ctx.on('tools/post-execute', rewrite)
     nativeScript = async (native) => {
-      nativeCall(native, 'rewritten')
-      native.toolEnd('rewritten', 'canonical native output')
-      native.assistant('final', [{ type: 'text', text: 'must not enter another official step' }])
+      nativeCall(native, 'native-policy')
+      native.toolEnd('native-policy', 'canonical native output')
+      native.assistant('final', [{ type: 'text', text: 'native done' }])
     }
     await runTurn()
     expect(connection.submit).toHaveBeenCalledOnce()
     expect(inherited).not.toHaveBeenCalled()
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toMatchObject({ message: expect.stringContaining('BRIDGE_TOOL_RESULT_REJECTED') })
-    expect(assistants()).toHaveLength(1)
-    expect(toolResults()).toHaveLength(1)
-    expect(assistants()[0]!.data.step).toBe(1)
-    expect(events.filter(event => event.type === 'step/start').map(event => event.data.step)).toEqual([1])
+    expect(rewrite).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(toolResults().map(event => event.data.message)).toMatchObject([{ toolCallId: 'native-policy', isError: false, content: [{ type: 'text', text: 'canonical native output' }] }])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(events.filter(event => event.type === 'user/message').map(event => event.data.id)).not.toContain(additional.id)
     expect(runtime.exchanges.size).toBe(0)
   }, 10_000)
 

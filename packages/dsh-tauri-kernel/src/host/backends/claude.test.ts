@@ -480,20 +480,34 @@ describe('claude native stream-json control contract', () => {
     ])
   })
 
-  it.each(['resume', 'fork'] as const)('clears inherited model and effort flags before the first null selection after %s', async (mode) => {
-    const fixture = claudeProcess({ useSystemInit: true, model: 'persisted-override' })
+  it.each(['resume', 'fork'] as const)('clears model and effort flags on an explicit reset after an override following %s', async (mode) => {
+    const fixture = claudeProcess({ useSystemInit: true, model: 'persisted-override', models: [modelInfo('chosen')] })
     const session = await open(mode === 'resume' ? storedId : null, createSink(), mode === 'fork' ? { forkFrom: storedId } : undefined)
-    const input = fixture.next(frame => frame.type === 'user')
-    const submitted = session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })
-    await input
+    const signal = new AbortController().signal
+    const first = fixture.next(frame => frame.type === 'user')
+    const inherited = session.submit([user()], signal, { model: null, reasoningEffort: null })
+    await first
     result(fixture, session.id)
-    await submitted
+    await inherited
+    expect(fixture.frames.filter(frame => frame.type === 'control_request').map(frame => frame.request)).toEqual([initialization])
+    const changed = fixture.next(frame => frame.type === 'user')
+    const override = session.submit([user()], signal, { model: 'chosen', reasoningEffort: 'high' })
+    await changed
+    result(fixture, session.id)
+    await override
+    const reset = fixture.next(frame => frame.type === 'user')
+    const restored = session.submit([user()], signal, { model: null, reasoningEffort: null })
+    await reset
+    result(fixture, session.id)
+    await restored
     expect(fixture.frames.filter(frame => frame.type === 'control_request').map(frame => frame.request)).toEqual([
       initialization,
+      { subtype: 'set_model', model: 'chosen' },
+      { subtype: 'apply_flag_settings', settings: { effortLevel: 'high' } },
       { subtype: 'set_model', model: null },
       { subtype: 'apply_flag_settings', settings: { effortLevel: null } },
     ])
-    expect(fixture.frames.filter(frame => frame.type === 'user')).toHaveLength(1)
+    expect(fixture.frames.filter(frame => frame.type === 'user')).toHaveLength(3)
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
@@ -621,6 +635,20 @@ describe('claude native stream-json control contract', () => {
     await rejected
     expect(fixture.frames.some(frame => frame.type === 'user' || (frame.type === 'control_request' && (frame.request as Frame).subtype === 'interrupt'))).toBe(false)
     expect(fixture.kill).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it.each(['resume', 'fork'] as const)('preserves inherited native settings on the first null preference after %s without model discovery', async (mode) => {
+    const fixture = claudeProcess({ useSystemInit: true, model: 'inherited-native-model', intercept: (frame, child) => {
+      if (frame.type !== 'user')
+        return false
+      result(child, String(frame.session_id))
+      return true
+    } })
+    const session = await open(mode === 'resume' ? storedId : null, createSink(), mode === 'fork' ? { forkFrom: storedId } : undefined)
+    await session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })
+    expect(fixture.frames.filter(frame => frame.type === 'control_request').map(frame => frame.request)).toEqual([initialization])
+    expect(fixture.frames.filter(frame => frame.type === 'user')).toHaveLength(1)
+    expect(spawn).toHaveBeenCalledOnce()
   })
 
   it('keeps live and authoritative block identities while suppressing a duplicate final frame', async () => {

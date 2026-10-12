@@ -47,6 +47,32 @@ interface CodexTurn {
   interruptTimer?: ReturnType<typeof setTimeout>
 }
 
+/**
+ * Human-readable approval text: the native reason plus only the fields that
+ * identify what is being approved. The raw request envelope (ids, timestamps,
+ * decision menus) is protocol plumbing and is unreadable in a permission prompt.
+ */
+function approvalDetails(fallback: string, params: Record<string, unknown>, fields: readonly string[]): string {
+  const lines = [typeof params.reason === 'string' && params.reason.trim() !== '' ? params.reason : fallback]
+  for (const field of fields) {
+    const value = params[field]
+    if (value === undefined || value === null || value === '')
+      continue
+    lines.push(`${field}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Whether the native request still offers a plain one-shot `accept`. The DSH
+ * approval seam only grants `allowed-once`, so a decision menu without that
+ * entry cannot be answered truthfully; cancelling leaves the choice to the user
+ * instead of silently minting an execpolicy amendment or a session-scoped grant.
+ */
+function acceptsOnce(params: Record<string, unknown>): boolean {
+  return !Array.isArray(params.availableDecisions) || params.availableDecisions.includes('accept')
+}
+
 function nativeTool(item: Record<string, unknown>): { name: string, arguments: string } | undefined {
   switch (item.type) {
     case 'commandExecution':
@@ -282,7 +308,7 @@ class CodexSession implements NativeSession {
   private async turnOptions(options: NativeTurnOptions, signal: AbortSignal): Promise<{ model?: string, effort?: string }> {
     const modelChanged = this.defaultsPending || options.model !== this.appliedOptions.model
     const effortChanged = this.defaultsPending || options.reasoningEffort !== this.appliedOptions.reasoningEffort
-    if (options.model === null && options.reasoningEffort === null && !modelChanged && !effortChanged)
+    if (options.model === null && options.reasoningEffort === null && this.appliedOptions.model === null && this.appliedOptions.reasoningEffort === null)
       return {}
     const catalog = this.catalog ?? await this.models(signal)
     const model = options.model ?? this.baselineModel
@@ -341,7 +367,8 @@ class CodexSession implements NativeSession {
       const response = record(await this.request('turn/start', { threadId: this.id, input, ...overrides }))
       if (selection) {
         this.appliedOptions = selection
-        this.defaultsPending = false
+        if (overrides.model !== undefined || overrides.effort !== undefined)
+          this.defaultsPending = false
       }
       if (overrides.model !== undefined)
         this.effectiveModel = overrides.model
@@ -574,6 +601,7 @@ class CodexSession implements NativeSession {
 
   private item(turn: CodexTurn, item: Record<string, unknown>, completed: boolean): void {
     const id = stringField(item, 'id')
+    const type = stringField(item, 'type')
     if (item.type === 'commandExecution') {
       turn.commandItems.add(id)
       this.commandItems.add(id)
@@ -597,7 +625,7 @@ class CodexSession implements NativeSession {
     if (!completed || turn.assistants.has(id))
       return
     const content: NativeContent[] = []
-    switch (item.type) {
+    switch (type) {
       case 'agentMessage':
       case 'plan':
         content.push({ type: 'text', text: typeof item.text === 'string' ? item.text : turn.text.get(id) ?? '' })
@@ -618,7 +646,8 @@ class CodexSession implements NativeSession {
         content.push({ type: 'text', text: typeof item.review === 'string' ? item.review : '' })
         break
       default:
-        throw new NativeBridgeError('BRIDGE_UNSUPPORTED_EVENT', `Unsupported Codex item type: ${String(item.type)}`)
+        content.push({ type: 'text', text: JSON.stringify(item) })
+        break
     }
     turn.assistants.add(id)
     this.sink.assistant(id, content)
@@ -639,13 +668,14 @@ class CodexSession implements NativeSession {
           ? await this.sink.approval(itemId, {
               kind: command ? 'command' : 'file',
               title: command && typeof params.command === 'string' ? params.command : command ? 'Codex command execution' : 'Codex file changes',
-              details: JSON.stringify(params),
+              details: approvalDetails(command ? 'Codex needs to run a command' : 'Codex needs to change files', params, command ? ['command', 'cwd'] : ['grantRoot']),
             }, signal)
           : false
-        result = { decision: allowed && !signal.aborted ? 'accept' : 'decline' }
+        const once = acceptsOnce(params)
+        result = { decision: once ? (allowed && !signal.aborted ? 'accept' : 'decline') : 'cancel' }
       }
       else if (method === 'item/permissions/requestApproval') {
-        const allowed = belongs ? await this.sink.approval(itemId, { kind: 'tool', title: 'Codex additional permissions', details: JSON.stringify(params) }, signal) : false
+        const allowed = belongs ? await this.sink.approval(itemId, { kind: 'tool', title: 'Codex additional permissions', details: approvalDetails('Codex requests additional permissions', params, ['permissions']) }, signal) : false
         result = { permissions: allowed && !signal.aborted ? record(params.permissions) : {}, scope: 'turn' }
       }
       else if (method === 'item/tool/requestUserInput') {

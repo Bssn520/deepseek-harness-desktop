@@ -561,7 +561,7 @@ describe('codex native app-server contract', () => {
     await restored
   })
 
-  it.each(['resume', 'fork'] as const)('restores thread-agnostic defaults on the first null selection after %s', async (mode) => {
+  it.each(['resume', 'fork'] as const)('restores thread-agnostic defaults after an explicit override and reset following %s', async (mode) => {
     const { fixture } = codexProcess({
       model: 'persisted-override',
       reasoningEffort: 'high',
@@ -569,19 +569,29 @@ describe('codex native app-server contract', () => {
       models: [modelInfo('cli-default'), modelInfo('persisted-override')],
     })
     const session = await open(mode === 'resume' ? 'thread-1' : null, createSink(), mode === 'fork' ? { forkFrom: 'source-thread' } : undefined)
-    const started = fixture.next(frame => frame.method === 'turn/start')
-    const submitted = session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })
-    const frame = await started
+    const signal = new AbortController().signal
+    const first = fixture.next(frame => frame.method === 'turn/start')
+    const inherited = session.submit([user()], signal, { model: null, reasoningEffort: null })
+    expect((await first).params).toEqual({ threadId: 'thread-1', input: [{ type: 'text', text: 'inspect the workspace', text_elements: [] }] })
     completed(fixture)
-    await submitted
-    expect(frame.params).toMatchObject({ threadId: 'thread-1', model: 'cli-default', effort: 'low' })
-    expect((await session.models!(new AbortController().signal)).defaultModel).toBe('cli-default')
-    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
+    await inherited
+    const changed = fixture.next(frame => frame.method === 'turn/start')
+    const override = session.submit([user()], signal, { model: 'persisted-override', reasoningEffort: 'high' })
+    expect((await changed).params).toMatchObject({ model: 'persisted-override', effort: 'high' })
+    completed(fixture)
+    await override
+    const reset = fixture.next(frame => frame.method === 'turn/start')
+    const restored = session.submit([user()], signal, { model: null, reasoningEffort: null })
+    expect((await reset).params).toMatchObject({ threadId: 'thread-1', model: 'cli-default', effort: 'low' })
+    completed(fixture)
+    await restored
+    expect((await session.models!(signal)).defaultModel).toBe('cli-default')
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(3)
     expect(fixture.frames.some(frame => frame.method === 'thread/start')).toBe(false)
     expect(session.id).toBe('thread-1')
   })
 
-  it('refuses an unknown resumed CLI default instead of using the persisted acknowledgement or catalog default', async () => {
+  it('refuses an explicit reset to an unknown resumed CLI default instead of guessing from the catalog', async () => {
     const { fixture } = codexProcess({
       model: 'persisted-override',
       reasoningEffort: 'high',
@@ -595,12 +605,14 @@ describe('codex native app-server contract', () => {
       },
     })
     const session = await open('thread-1')
-    expect((await session.models!(new AbortController().signal)).defaultModel).toBeUndefined()
-    await expect(session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })).rejects.toMatchObject({ code: 'BRIDGE_DEFAULT_UNAVAILABLE' })
-    expect(fixture.frames.some(frame => frame.method === 'turn/start')).toBe(false)
+    const signal = new AbortController().signal
+    expect((await session.models!(signal)).defaultModel).toBeUndefined()
+    await session.submit([user()], signal, { model: 'catalog-default', reasoningEffort: 'high' })
+    await expect(session.submit([user()], signal, { model: null, reasoningEffort: null })).rejects.toMatchObject({ code: 'BRIDGE_DEFAULT_UNAVAILABLE' })
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
   })
 
-  it('refuses a resumed effort reset when only the persisted override is known', async () => {
+  it('refuses an explicit resumed effort reset when only the persisted override is known', async () => {
     const { fixture } = codexProcess({
       model: 'persisted-override',
       reasoningEffort: 'high',
@@ -615,8 +627,10 @@ describe('codex native app-server contract', () => {
       },
     })
     const session = await open('thread-1')
-    await expect(session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })).rejects.toMatchObject({ code: 'BRIDGE_DEFAULT_UNAVAILABLE' })
-    expect(fixture.frames.some(frame => frame.method === 'turn/start')).toBe(false)
+    const signal = new AbortController().signal
+    await session.submit([user()], signal, { model: 'persisted-override', reasoningEffort: 'high' })
+    await expect(session.submit([user()], signal, { model: null, reasoningEffort: null })).rejects.toMatchObject({ code: 'BRIDGE_DEFAULT_UNAVAILABLE' })
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
     expect(session.id).toBe('thread-1')
   })
 
@@ -661,6 +675,79 @@ describe('codex native app-server contract', () => {
     signal.abort(new Error('cancel discovery'))
     await rejected
     expect(fixture.frames.some(frame => frame.method === 'turn/start' || frame.method === 'turn/interrupt')).toBe(false)
+  })
+
+  it('records function-call outputs without inventing another native execution', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'function-output', type: 'functionCallOutput', name: 'read_file', namespace: 'functions', output: [{ type: 'input_text', text: 'native text' }, { type: 'input_image', image_url: 'data:image/png;base64,fixture' }] }
+    notify(fixture, 'item/completed', { item })
+    notify(fixture, 'item/completed', { item })
+    completed(fixture)
+    await submitted
+    expect(sink.assistant.mock.calls).toEqual([['function-output', [{ type: 'text', text: '{"id":"function-output","type":"functionCallOutput","name":"read_file","namespace":"functions","output":[{"type":"input_text","text":"native text"},{"type":"input_image","image_url":"data:image/png;base64,fixture"}]}' }]]])
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+    expect(fixture.frames.some(frame => frame.method === 'turn/interrupt')).toBe(false)
+    expect(fixture.kill).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed completed item instead of treating it as an unknown read-only event', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    const rejected = expect(submitted).rejects.toMatchObject({ code: 'BRIDGE_PROTOCOL', message: 'Missing native protocol field: type' })
+    await started
+    notify(fixture, 'item/completed', { item: { id: 'malformed-native-item', text: 'missing type' } })
+    completed(fixture)
+    await rejected
+    expect(sink.assistant).not.toHaveBeenCalled()
+    expect(sink.toolStart).not.toHaveBeenCalled()
+  })
+
+  it('records unrecognized completed native items without terminating the native turn', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    notify(fixture, 'item/completed', { item: { id: 'future-native-item', type: 'futureNativeItem', details: { text: 'native event', count: 2 } } })
+    completed(fixture)
+    await submitted
+    expect(sink.assistant.mock.calls).toEqual([['future-native-item', [{ type: 'text', text: '{"id":"future-native-item","type":"futureNativeItem","details":{"text":"native event","count":2}}' }]]])
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+    expect(fixture.kill).not.toHaveBeenCalled()
+  })
+
+  it.each(['resume', 'fork'] as const)('preserves inherited native settings on the first null preference after %s without model discovery', async (mode) => {
+    const { fixture } = codexProcess({
+      model: 'inherited-native-model',
+      reasoningEffort: 'high',
+      intercept: (frame, child) => {
+        if (frame.method === 'config/read' || frame.method === 'model/list') {
+          child.send({ id: frame.id, error: { code: -32601, message: 'Native catalog is unavailable' } })
+          return true
+        }
+        if (frame.method !== 'turn/start')
+          return false
+        child.send({ id: frame.id, result: { turn: { id: 'turn-1' } } })
+        completed(child)
+        return true
+      },
+    })
+    const session = await open(mode === 'resume' ? 'thread-1' : null, createSink(), mode === 'fork' ? { forkFrom: 'source-thread' } : undefined)
+    await session.submit([user()], new AbortController().signal, { model: null, reasoningEffort: null })
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start').map(frame => frame.params)).toEqual([{ threadId: 'thread-1', input: [{ type: 'text', text: 'inspect the workspace', text_elements: [] }] }])
+    expect(fixture.frames.some(frame => frame.method === 'config/read' || frame.method === 'model/list')).toBe(false)
+    expect(spawn).toHaveBeenCalledOnce()
   })
 
   it('commits authoritative assistant content once after live text and reasoning deltas', async () => {
@@ -777,6 +864,24 @@ describe('codex native app-server contract', () => {
     expect(fixture.kill).not.toHaveBeenCalled()
   })
 
+  it('rejects unknown native server requests instead of granting or executing them', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const answered = fixture.next(frame => frame.id === 'unknown-control')
+    fixture.send({ id: 'unknown-control', method: 'futureNative/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'future-tool' } })
+    expect(await answered).toEqual({ id: 'unknown-control', error: { code: -32601, message: 'Unsupported native server request: futureNative/requestApproval' } })
+    expect(sink.approval).not.toHaveBeenCalled()
+    expect(sink.questions).not.toHaveBeenCalled()
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    completed(fixture)
+    await submitted
+    expect(fixture.kill).not.toHaveBeenCalled()
+  })
+
   it('routes a parked approval while RPC traffic continues and returns only allow-once', async () => {
     const { fixture } = codexProcess()
     const sink = createSink()
@@ -791,7 +896,7 @@ describe('codex native app-server contract', () => {
     const submitted = session.submit([user()], new AbortController().signal)
     await started
     const answered = fixture.next(frame => frame.id === 77 && 'result' in frame)
-    fixture.send({ id: 77, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'command-approval', command: 'git status' } })
+    fixture.send({ id: 77, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'command-approval', command: 'git status', cwd: 'D:\\work', reason: 'command needs to read the repository', availableDecisions: ['accept', 'cancel'] } })
     await asked.promise
     notify(fixture, 'item/agentMessage/delta', { itemId: 'assistant-1', delta: 'awaiting your answer' })
     expect(sink.text).toHaveBeenCalledWith('assistant-1', 'awaiting your answer')
@@ -800,8 +905,44 @@ describe('codex native app-server contract', () => {
     expect(sink.approval.mock.calls[0]?.slice(0, 2)).toEqual(['command-approval', {
       kind: 'command',
       title: 'git status',
-      details: '{"threadId":"thread-1","turnId":"turn-1","itemId":"command-approval","command":"git status"}',
+      details: 'command needs to read the repository\ncommand: git status\ncwd: D:\\work',
     }])
+    expect(sink.approval.mock.calls[0]![1].details).not.toContain('threadId')
+    completed(fixture)
+    await submitted
+  })
+
+  it('cancels instead of answering accept when the native decision menu offers no one-shot grant', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    sink.approval.mockResolvedValue(true)
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const answered = fixture.next(frame => frame.id === 79 && 'result' in frame)
+    fixture.send({ id: 79, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'command-approval', command: 'rm -rf build', availableDecisions: [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: ['rm', '-rf', 'build'] } }, 'cancel'] } })
+    expect(await answered).toEqual({ id: 79, result: { decision: 'cancel' } })
+    completed(fixture)
+    await submitted
+  })
+
+  it('reports requested permissions without the raw native envelope', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    sink.approval.mockResolvedValue(true)
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const answered = fixture.next(frame => frame.id === 80 && 'result' in frame)
+    fixture.send({ id: 80, method: 'item/permissions/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'permissions-1', reason: 'write access is required', permissions: { network: { enabled: false }, fileSystem: { read: ['D:\\work'] } } } })
+    expect(await answered).toEqual({ id: 80, result: { permissions: { network: { enabled: false }, fileSystem: { read: ['D:\\work'] } }, scope: 'turn' } })
+    expect(sink.approval.mock.calls[0]![1]).toEqual({
+      kind: 'tool',
+      title: 'Codex additional permissions',
+      details: 'write access is required\npermissions: {"network":{"enabled":false},"fileSystem":{"read":["D:\\\\work"]}}',
+    })
     completed(fixture)
     await submitted
   })

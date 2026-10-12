@@ -1,8 +1,9 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import type { ToolDispatchExecution, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { PostToolDecision, PreToolDecision, ToolDispatchExecution, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { HostContext, NativeExecution } from '../types'
 import type { NativeToolResult, OfficialSink, SinkState, StreamTrack, ToolTrack } from './sink.types'
 import { Buffer } from 'node:buffer'
+import { isDeepStrictEqual } from 'node:util'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
 import { runtime } from '../config/runtime'
@@ -220,35 +221,8 @@ export const sink = defineService({
         parameters: { type: 'object', additionalProperties: true },
         output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
         isConcurrencySafe: () => true,
-        async execute(_args, exec): Promise<string> {
-          const tool = expectedTool(state, exec)
-          if (!tool.dispatched)
-            throw new Error('BRIDGE_TOOL_ROUTE_UNAVAILABLE: 原生调用未经过官方工具检查。')
-          const abort = (): void => controller.abort(exec.signal.reason)
-          exec.signal.addEventListener('abort', abort, { once: true })
-          if (exec.signal.aborted)
-            abort()
-          try {
-            const result = await tool.wait
-            exec.signal.throwIfAborted()
-            if (result.isError) {
-              const error = new modules.HarnessError(result.output || 'Native tool failed', 'BRIDGE_NATIVE_TOOL_ERROR')
-              error.name = 'NativeToolError'
-              throw error
-            }
-            return result.output
-          }
-          finally {
-            exec.signal.removeEventListener('abort', abort)
-            if (state.signal.aborted)
-              await state.task
-          }
-        },
-        projectContent(exec, result) {
-          const tool = state.tools.get(exec.callId)
-          if (tool?.result?.isError && result.isError && result.error.info?.code === 'BRIDGE_NATIVE_TOOL_ERROR')
-            return [{ type: 'text', text: tool.result.output }]
-          return undefined
+        async execute(): Promise<never> {
+          throw new Error('BRIDGE_TOOL_ROUTE_UNAVAILABLE: 原生调用未经过官方工具检查。')
         },
       })
       state.registrations.set(name, dispose)
@@ -308,22 +282,63 @@ export const sink = defineService({
     return official
   },
 
-  async executeTool(exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult> {
+  async admitTool(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
     if (!official)
       return next()
     try {
-      const tool = expectedTool(official.state, exec)
-      if (tool.dispatched)
-        throw new Error('BRIDGE_TOOL_ALREADY_DISPATCHED: 不能重复派发原生工具调用。')
-      tool.dispatched = true
-      return await next()
+      expectedTool(official.state, exec)
+      official.state.signal.throwIfAborted()
+      exec.signal.throwIfAborted()
+      // ponytail: 核心单调 guard 仍生效；上游公开原生结果回放接口后再消除这层差异。
+      return { kind: 'allow' }
     }
     catch (error) {
       official.state.controller.abort(error)
       await official.state.task
       throw error
     }
+  },
+
+  async executeTool(exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult> {
+    const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
+    if (!official)
+      return next()
+    const state = official.state
+    const abort = (): void => state.controller.abort(exec.signal.reason)
+    try {
+      const tool = expectedTool(state, exec)
+      if (tool.dispatched)
+        throw new Error('BRIDGE_TOOL_ALREADY_DISPATCHED: 不能重复派发原生工具调用。')
+      tool.dispatched = true
+      exec.signal.addEventListener('abort', abort, { once: true })
+      if (exec.signal.aborted)
+        abort()
+      state.signal.throwIfAborted()
+      const result = await tool.wait
+      exec.signal.throwIfAborted()
+      state.signal.throwIfAborted()
+      const content = [{ type: 'text' as const, text: result.output }]
+      return result.isError
+        ? { isError: true, error: { message: result.output || 'Native tool failed', info: { name: 'NativeToolError', code: 'BRIDGE_NATIVE_TOOL_ERROR' } }, content }
+        : { isError: false, value: result.output, content }
+    }
+    catch (error) {
+      state.controller.abort(error)
+      await state.task
+      throw error
+    }
+    finally {
+      exec.signal.removeEventListener('abort', abort)
+    }
+  },
+
+  async finishTool(exec: ToolExecution, _result: Readonly<ToolExecutionResult>, next: () => Promise<PostToolDecision>): Promise<PostToolDecision> {
+    const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
+    if (!official)
+      return next()
+    expectedTool(official.state, exec)
+    return { kind: 'accept' }
   },
 
   commitTool(value: Session, event: SessionEvent): void {
@@ -334,7 +349,7 @@ export const sink = defineService({
       return
     const state = official.state
     const tool = state.tools.get(event.data.message.toolCallId)
-    if (!tool || tool.step !== event.data.step || !tool.accepted || tool.committed || !tool.result || tool.result.isError !== (event.data.message.isError === true) || JSON.stringify(event.data.message.content) !== JSON.stringify([{ type: 'text', text: tool.result.output }]) || (tool.result.isError && event.data.error?.code !== 'BRIDGE_NATIVE_TOOL_ERROR') || event.data.meta !== undefined) {
+    if (!tool || tool.step !== event.data.step || !tool.accepted || tool.committed || !tool.result || tool.result.isError !== (event.data.message.isError === true) || !isDeepStrictEqual(event.data.message.content, [{ type: 'text', text: tool.result.output }]) || (tool.result.isError && event.data.error?.code !== 'BRIDGE_NATIVE_TOOL_ERROR') || event.data.meta !== undefined) {
       state.failure = new Error('BRIDGE_TOOL_RESULT_REJECTED: 官方日志没有完整保留原生工具结果。')
       state.controller.abort(state.failure)
       return
@@ -348,7 +363,7 @@ export const sink = defineService({
       return undefined
     try {
       const tool = expectedTool(official.state, exec)
-      if (!tool.dispatched || !tool.result || result.isError !== tool.result.isError || result.additionalContexts?.length || result.concludesTurn || JSON.stringify(result.content) !== JSON.stringify([{ type: 'text', text: tool.result.output }]) || (!result.isError && result.value !== tool.result.output) || (result.isError && result.error.info?.code !== 'BRIDGE_NATIVE_TOOL_ERROR'))
+      if (!tool.dispatched || !tool.result || result.isError !== tool.result.isError || result.additionalContexts?.length || result.concludesTurn || !isDeepStrictEqual(result.content, [{ type: 'text', text: tool.result.output }]) || (!result.isError && result.value !== tool.result.output) || (result.isError && result.error.info?.code !== 'BRIDGE_NATIVE_TOOL_ERROR'))
         throw new Error('BRIDGE_TOOL_RESULT_REJECTED: 官方工具结果与原生结果不一致，不能继续原生回合。')
       tool.accepted = true
     }
@@ -380,7 +395,7 @@ function expectedTool(state: SinkState, exec: Readonly<ToolExecution> | ToolRunC
 
 function sameArguments(raw: string, value: unknown): boolean {
   try {
-    return JSON.stringify(raw === '' ? {} : JSON.parse(raw)) === JSON.stringify(value)
+    return isDeepStrictEqual(raw === '' ? {} : JSON.parse(raw), value)
   }
   catch {
     return raw === value

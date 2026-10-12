@@ -1195,7 +1195,6 @@ describe('official native session lifecycle', () => {
     }
     context.tools.register(tool)
     const delivered = deferred<void>()
-    const dispatched = deferred<void>()
     const connection = native('wait-only-native')
     releases.push(() => delivered.resolve())
     vi.mocked(createCodexSession).mockImplementation(async (_command, _cwd, _storedId, output) => {
@@ -1211,17 +1210,12 @@ describe('official native session lifecycle', () => {
     await creating()
     const agent = officialHandle!.agent
     const { events } = observe(agent)
-    agent.ctx.on('tools/execute', async (exec, next) => {
-      if (exec.callId === 'native-wait')
-        dispatched.resolve()
-      return next()
-    })
     let idle = false
     const turn = followup(agent, 'read through the native kernel').then(() => {
       idle = true
     })
     background.push(turn)
-    await dispatched.promise
+    await vi.waitFor(() => expect(events.filter(event => event.type === 'tool/call').map(event => event.data.callId)).toEqual(['native-wait']))
     expect(idle).toBe(false)
     expect(body).not.toHaveBeenCalled()
     expect(connection.submit).toHaveBeenCalledOnce()
