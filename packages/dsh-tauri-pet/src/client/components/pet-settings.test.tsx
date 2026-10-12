@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react'
 import type { PetActionResult } from '../service/pet.types'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -22,6 +22,16 @@ vi.mock('dsh-tauri-ui/client', () => ({
   Globe: () => null,
   Plus: () => null,
   Icon: () => null,
+  Input: (props: InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
+  Modal: ({ open, title, children, footer, onClose, closeLabel }: { open: boolean, title: string, children: ReactNode, footer: ReactNode, onClose: () => void, closeLabel: string }) => open
+    ? (
+        <div role="dialog" aria-label={title}>
+          <button onClick={onClose}>{closeLabel}</button>
+          {children}
+          {footer}
+        </div>
+      )
+    : null,
   Button: ({ variant: _variant, size: _size, icon: _icon, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: string, size?: string, icon?: ReactNode }) => <button {...props} />,
   SegmentedControl: ({ value, onChange }: { value: string, onChange: (value: string) => void }) => (
     <div>
@@ -38,6 +48,7 @@ vi.mock('../service/pet', () => ({
   clearPetSelection: vi.fn(),
   enablePet: vi.fn(),
   importPetArchive: vi.fn(),
+  importPetRepository: vi.fn(),
   loadForceXwayland: vi.fn(),
   loadPetCatalog: vi.fn(),
   loadPetOverlaySupported: vi.fn(),
@@ -99,7 +110,7 @@ beforeEach(() => {
     overlaySupported: false,
     forceXwayland: false,
   })
-  for (const action of [petService.loadPetCatalog, petService.choosePet, petService.clearPetSelection, petService.enablePet, petService.togglePet, petService.toggleForceXwayland, petService.resizePet, petService.togglePetThrow, petService.importPetArchive, petService.openCommunityShare])
+  for (const action of [petService.loadPetCatalog, petService.choosePet, petService.clearPetSelection, petService.enablePet, petService.togglePet, petService.toggleForceXwayland, petService.resizePet, petService.togglePetThrow, petService.importPetArchive, petService.importPetRepository, petService.openCommunityShare])
     vi.mocked(action).mockResolvedValue({ ok: true })
   container = document.createElement('div')
   document.body.append(container)
@@ -116,6 +127,19 @@ afterEach(async () => {
 })
 
 describe('pet settings action boundaries', () => {
+  it('renders local dsh GIF thumbnails without spritesheet cropping', async () => {
+    store.pet.setCatalog({
+      presets: [],
+      chat: [{ id: 'chat:video', name: 'Video', source: 'chat', kind: 'dsh', thumbnail_type: 'gif', thumbnail: 'data:image/gif;base64,R0lGODlh' }],
+      codex: [],
+    })
+    await mount()
+    const image = card('Video').querySelector('img')!
+    expect(image.getAttribute('src')).toBe('data:image/gif;base64,R0lGODlh')
+    expect(image.parentElement).toBe(card('Video'))
+    expect(image.className).not.toContain('800%')
+  })
+
   it('renders preset images separately from identical Chat/Codex spritesheet cards and keeps active clear actions', async () => {
     await mount()
     expect(card('Preset').querySelector('img')?.parentElement).toBe(card('Preset'))
@@ -273,6 +297,71 @@ describe('pet settings action boundaries', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(locale.text('importFailed'))
     expect(input.disabled).toBe(false)
     expect(input.value).toBe('')
+  })
+
+  it('repository import opens an input directly and blocks duplicate submits until success without selecting', async () => {
+    const pending = deferred()
+    vi.mocked(petService.importPetRepository).mockReturnValueOnce(pending.promise)
+    await mount()
+    const create = button(locale.text('create'))
+    const trigger = button(locale.text('importRepository'))
+    expect(create.nextElementSibling).toBe(trigger)
+    await click(trigger)
+    const dialog = container.querySelector('[role="dialog"]')!
+    const input = dialog.querySelector<HTMLInputElement>('input')!
+    expect(input.id).toBe(dialog.querySelector('label')?.htmlFor)
+    expect(input.hasAttribute('data-modal-autofocus')).toBe(true)
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'https://github.com/owner/repo')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const form = dialog.querySelector('form')!
+    const confirm = dialog.querySelector<HTMLButtonElement>('button[type="submit"]')!
+    expect(confirm.form).toBe(form)
+    await act(async () => {
+      confirm.click()
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(petService.importPetRepository).toHaveBeenCalledExactlyOnceWith({ repository: 'https://github.com/owner/repo' })
+    expect(input.disabled).toBe(true)
+    expect(dialog.textContent).toContain(locale.text('repositoryImporting'))
+    await click(button(locale.text('close')))
+    expect(container.querySelector('[role="dialog"]')).toBe(dialog)
+    await act(async () => {
+      pending.resolve({ ok: true })
+    })
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(trigger.disabled).toBe(false)
+    expect(petService.choosePet).not.toHaveBeenCalled()
+    await click(button(locale.text('importRepository')))
+    expect(container.querySelector<HTMLInputElement>('[role="dialog"] input')?.value).toBe('')
+    await click(button(locale.text('cancel')))
+    await click(button('codex'))
+    expect(container.textContent).not.toContain(locale.text('importRepository'))
+  })
+
+  it.each([
+    { error: 'PET_REPOSITORY_INVALID', key: 'repositoryInvalid' },
+    { error: 'NETWORK_ERROR: secret filesystem path', key: 'repositoryImportFailed' },
+  ] as const)('repository error $error stays local and permits retry without displaying technical details', async ({ error, key }) => {
+    vi.mocked(petService.importPetRepository).mockResolvedValueOnce({ ok: false, error })
+    await mount()
+    await click(button(locale.text('importRepository')))
+    const dialog = container.querySelector('[role="dialog"]')!
+    const form = dialog.querySelector('form')!
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toBe(locale.text(key))
+    expect(container.textContent).not.toContain(error)
+    const input = dialog.querySelector<HTMLInputElement>('input')!
+    expect(input.disabled).toBe(false)
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(petService.importPetRepository).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it('community share sits in the Codex tab, opens the site and reports its own failure', async () => {

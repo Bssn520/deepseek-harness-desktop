@@ -1,6 +1,6 @@
 import type { ChangeEvent, ReactElement } from 'react'
 import type { PetActionResult, PetListItem } from '../service/pet.types'
-import { ArrowRightFromSquare, Button, Globe, Icon, Plus, SegmentedControl, Switch } from 'dsh-tauri-ui/client'
+import { ArrowRightFromSquare, Button, Globe, Icon, Input, Modal, Plus, SegmentedControl, Switch } from 'dsh-tauri-ui/client'
 import { useStore, useWatchImmediate } from 'dsh-tauri/client'
 import { useEffect, useId, useRef, useState } from 'react'
 import { PET_DEFAULT_SIZE, PET_SIZE_MAX, PET_SIZE_MIN, PET_SIZE_STEP } from '../constants'
@@ -10,6 +10,7 @@ import {
   clearPetSelection,
   enablePet,
   importPetArchive,
+  importPetRepository,
   loadForceXwayland,
   loadPetCatalog,
   loadPetOverlaySupported,
@@ -54,6 +55,11 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
   const [tab, setTab] = useState<'pets' | 'codex'>('pets')
   const [busy, setBusy] = useState(() => !catalogLoaded)
   const [error, setError] = useState<string | null>(null)
+  const [repositoryOpen, setRepositoryOpen] = useState(false)
+  const [repository, setRepository] = useState('')
+  const [repositoryError, setRepositoryError] = useState<string | null>(null)
+  const repositoryPendingRef = useRef(false)
+  const repositoryId = useId()
   const [size, setSize] = useState(status?.pet_size ?? PET_DEFAULT_SIZE)
   // 切换只落盘，本次进程不会有任何变化，提示重启是用户唯一能看到的反馈。
   const [xwaylandRestart, setXwaylandRestart] = useState(false)
@@ -168,6 +174,32 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
     }
   }
 
+  async function importRepository(): Promise<void> {
+    if (busy || repositoryPendingRef.current)
+      return
+    repositoryPendingRef.current = true
+    setBusy(true)
+    setRepositoryError(null)
+    setError(null)
+    try {
+      const result = await importPetRepository({ repository })
+      if (result.ok) {
+        setRepositoryOpen(false)
+        setRepository('')
+      }
+      else {
+        setRepositoryError(locale.text(result.error === 'PET_REPOSITORY_INVALID' ? 'repositoryInvalid' : 'repositoryImportFailed'))
+      }
+    }
+    catch {
+      setRepositoryError(locale.text('repositoryImportFailed'))
+    }
+    finally {
+      repositoryPendingRef.current = false
+      setBusy(false)
+    }
+  }
+
   async function onImport(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -193,7 +225,7 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
     <PetCard
       key={item.id}
       thumbnail={item.thumbnail}
-      thumbnailType={item.thumbnail ? 'spritesheet' : undefined}
+      thumbnailType={item.thumbnail_type ?? 'spritesheet'}
       name={item.name}
       desc={item.description ?? ''}
       active={active === item.id}
@@ -290,6 +322,18 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
                     variant="outline"
                     size="sm"
                     disabled={busy}
+                    onClick={() => {
+                      setRepositoryError(null)
+                      setRepositoryOpen(true)
+                    }}
+                  >
+                    {locale.text('importRepository')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
                     onClick={() => { void toggleEnabled() }}
                   >
                     {enabled ? locale.text('closePet') : locale.text('enablePet')}
@@ -336,6 +380,50 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
       <div id={`${tabsId}-${tab}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${tab}`}>
         {tab === 'pets' ? petsPanel : codexPanel}
       </div>
+      <Modal
+        open={repositoryOpen}
+        title={locale.text('importRepository')}
+        description={locale.text('repositoryHint')}
+        closeLabel={locale.text('close')}
+        onClose={() => {
+          if (!repositoryPendingRef.current)
+            setRepositoryOpen(false)
+        }}
+        footer={(
+          <>
+            <Button variant="outline" disabled={busy} onClick={() => setRepositoryOpen(false)}>{locale.text('cancel')}</Button>
+            <Button type="submit" form={repositoryId} variant="primary" disabled={busy}>
+              {locale.text(busy ? 'repositoryImporting' : 'importRepository')}
+            </Button>
+          </>
+        )}
+      >
+        <form
+          id={repositoryId}
+          className="flex flex-col gap-[12px]"
+          aria-busy={busy}
+          onSubmit={(event) => {
+            event.preventDefault()
+            void importRepository()
+          }}
+        >
+          <label htmlFor={`${repositoryId}-input`}>{locale.text('repositoryLabel')}</label>
+          <Input
+            id={`${repositoryId}-input`}
+            data-modal-autofocus
+            value={repository}
+            placeholder="owner/repo"
+            disabled={busy}
+            aria-invalid={Boolean(repositoryError)}
+            aria-describedby={repositoryError ? `${repositoryId}-error` : undefined}
+            onChange={(event) => {
+              setRepository(event.target.value)
+              setRepositoryError(null)
+            }}
+          />
+          {repositoryError ? <div id={`${repositoryId}-error`} className="text-[12px] leading-[18px] text-error" role="alert">{repositoryError}</div> : null}
+        </form>
+      </Modal>
       {error ? <div className="text-[12px] leading-[18px] text-error" role="alert">{error}</div> : null}
       <div className="flex items-center gap-[12px]">
         <span className="flex-none font-medium">{locale.text('sizeLabel')}</span>

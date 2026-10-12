@@ -31,7 +31,8 @@ tauri = { version = "2", features = [
   "tray-icon",
   "image-png",
   "devtools",
-  "macos-private-api"
+  "macos-private-api",
+  "protocol-asset"
 ] }
 # E2E：应用内嵌 WebDriver server（Tauri 官方推荐的 WebdriverIO 驱动方式）。
 # 仅当进程环境带 TAURI_WEBDRIVER_PORT 时监听，正常运行不开放端口。

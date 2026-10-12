@@ -6,6 +6,7 @@ import {
   CMD_GET_PET_OVERLAY_SUPPORTED,
   CMD_GET_PET_STATUS,
   CMD_IMPORT_PET,
+  CMD_IMPORT_PET_REPOSITORY,
   CMD_LIST_PETS,
   CMD_LIST_PRESET_PETS,
   CMD_OPEN_EXTERNAL_URL,
@@ -180,6 +181,17 @@ export async function resizePet(input: { size: number }): Promise<PetActionResul
 export async function togglePetThrow(input: { enabled: boolean }): Promise<PetActionResult> {
   return guard('toggle pet throw', async () => {
     store.pet.setStatus(await invoke<PetStatus>(CMD_SET_PET_THROW_ENABLED, { enabled: input.enabled }))
+    return { ok: true }
+  })
+}
+
+export async function importPetRepository(input: { repository: string }): Promise<PetActionResult> {
+  const match = /^(?:https:\/\/github\.com\/)?([a-z\d](?:[a-z\d-]{0,37}[a-z\d])?)\/([\w.-]{1,100})\/?$/i.exec(input.repository.trim())
+  if (!match || match[2] === '.' || match[2] === '..')
+    return { ok: false, error: 'PET_REPOSITORY_INVALID' }
+  return guard('import pet repository', async () => {
+    await invoke<PetListItem>(CMD_IMPORT_PET_REPOSITORY, { repository: `${match[1]}/${match[2]}` }, { timeoutMs: 360_000 })
+    store.pet.setChatPets(await invoke<PetListItem[]>(CMD_LIST_PETS, { source: 'chat' }))
     return { ok: true }
   })
 }

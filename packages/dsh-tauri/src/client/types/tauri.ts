@@ -2,7 +2,8 @@ export type InvokeArgs = Record<string, unknown> | number[] | ArrayBuffer | Uint
 export type UnlistenFn = () => void
 
 export interface InvokeOptions {
-  headers: HeadersInit
+  headers?: HeadersInit
+  timeoutMs?: number
 }
 
 export interface TauriEvent<T> {

@@ -53,6 +53,7 @@ const ALLOWED_INVOKE_CMDS = new Set([
   'push_pet_session',
   'list_pets',
   'import_pet',
+  'import_pet_repository',
   'get_pet_asset',
   'list_preset_pets',
   'remote_bridge_ping',

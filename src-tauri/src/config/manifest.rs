@@ -572,7 +572,7 @@ fn join_token(root: &Path, rest: &str) -> PathBuf {
     root.join(rest.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
-fn strip_jsonc(raw: &str) -> String {
+pub(crate) fn strip_jsonc(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;

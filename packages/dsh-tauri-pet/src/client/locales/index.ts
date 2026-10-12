@@ -3,6 +3,14 @@ import { PLUGIN_ID } from '../../shared/constants'
 
 /** 桌宠设置分区的双语文案（`zh` 键集合为权威，`en` 缺键即编译错误）。 */
 const zh = {
+  cancel: '取消',
+  close: '关闭',
+  importRepository: '导入仓库',
+  repositoryLabel: 'GitHub 仓库',
+  repositoryHint: '输入 owner/repo 或 https://github.com/owner/repo，导入后可在宠物列表中选择。',
+  repositoryInvalid: '请输入有效的 GitHub 仓库：owner/repo 或 https://github.com/owner/repo。',
+  repositoryImporting: '导入中…',
+  repositoryImportFailed: '仓库导入失败，请检查仓库是否公开、包含有效宠物资源，以及网络连接后重试。',
   clear: '取消选择',
   clearFailed: '取消选择失败',
   closePet: '关闭宠物',
@@ -38,6 +46,14 @@ const zh = {
 }
 
 const en: Record<keyof typeof zh, string> = {
+  cancel: 'Cancel',
+  close: 'Close',
+  importRepository: 'Import repository',
+  repositoryLabel: 'GitHub repository',
+  repositoryHint: 'Enter owner/repo or https://github.com/owner/repo. Choose the pet from the list after importing.',
+  repositoryInvalid: 'Enter a valid GitHub repository: owner/repo or https://github.com/owner/repo.',
+  repositoryImporting: 'Importing…',
+  repositoryImportFailed: 'Could not import the repository. Check that it is public, contains valid pet assets, and your connection is working, then retry.',
   clear: 'Clear selection',
   clearFailed: 'Failed to clear pet selection',
   closePet: 'Close pet',

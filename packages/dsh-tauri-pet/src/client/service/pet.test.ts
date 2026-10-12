@@ -9,6 +9,7 @@ import {
   createPetSession,
   enablePet,
   importPetArchive,
+  importPetRepository,
   loadForceXwayland,
   loadPetCatalog,
   loadPetOverlaySupported,
@@ -166,6 +167,44 @@ describe('pet service native command contracts', () => {
     expect(invoke.mock.calls).toEqual([['import_pet', { name: 'pet.zip', data: 'base64' }], ['list_pets', { source: 'codex' }]])
     expect(store.pet.codexPets).toEqual(codex)
     expect(store.pet.catalogLoaded).toBe(false)
+  })
+
+  it.each(['owner/pet-repo', ' https://github.com/owner/pet-repo/ '])('repository import normalizes %s and refreshes only Chat without selecting', async (repository) => {
+    const chat = [{ id: 'chat:imported', name: 'Imported', source: 'chat' }]
+    store.pet.setStatus(status)
+    store.pet.setCodexPets([{ id: 'codex', name: 'Codex', source: 'codex' }])
+    invoke.mockResolvedValueOnce(chat[0]).mockResolvedValueOnce(chat)
+    expect(await importPetRepository({ repository })).toEqual({ ok: true })
+    expect(invoke.mock.calls).toEqual([
+      ['import_pet_repository', { repository: 'owner/pet-repo' }, { timeoutMs: 360_000 }],
+      ['list_pets', { source: 'chat' }],
+    ])
+    expect(store.pet.chatPets).toEqual(chat)
+    expect(store.pet.status).toEqual(status)
+    expect(store.pet.codexPets).toEqual([{ id: 'codex', name: 'Codex', source: 'codex' }])
+  })
+
+  it.each(['', 'owner', 'owner/repo/tree/main', 'https://github.com.evil/owner/repo', 'http://github.com/owner/repo', 'owner/..', 'owner/repo?x=1', '-owner/repo'])('invalid repository %s fails before invoke', async (repository) => {
+    expect(await importPetRepository({ repository })).toEqual({ ok: false, error: 'PET_REPOSITORY_INVALID' })
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it.each(['import_pet_repository', 'list_pets'])('repository failure at %s preserves Chat cache and selection', async (failingCommand) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const chat = [{ id: 'chat:old', name: 'Old', source: 'chat' as const }]
+    store.pet.setChatPets(chat)
+    store.pet.setStatus(status)
+    invoke.mockImplementation(async (command) => {
+      if (command === failingCommand)
+        throw new Error('repository unavailable')
+      return { id: 'chat:new', name: 'New', source: 'chat' }
+    })
+    expect(await importPetRepository({ repository: 'owner/repo' })).toEqual({ ok: false, error: 'repository unavailable' })
+    expect(invoke.mock.calls).toEqual(failingCommand === 'import_pet_repository'
+      ? [['import_pet_repository', { repository: 'owner/repo' }, { timeoutMs: 360_000 }]]
+      : [['import_pet_repository', { repository: 'owner/repo' }, { timeoutMs: 360_000 }], ['list_pets', { source: 'chat' }]])
+    expect(store.pet.chatPets).toEqual(chat)
+    expect(store.pet.status).toEqual(status)
   })
 
   it('community share opens the Codex pets site through the external URL command', async () => {

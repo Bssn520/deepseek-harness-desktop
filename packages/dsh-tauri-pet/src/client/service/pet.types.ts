@@ -19,7 +19,9 @@ export interface PetListItem {
   id: string
   name: string
   source: PetSource
+  kind?: 'dsh' | 'codex'
   thumbnail?: string
+  thumbnail_type?: 'gif' | 'spritesheet'
 }
 
 /**

@@ -35,9 +35,15 @@ const PET_PACKAGE_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// 防止 zip 炸弹的条目数与解压后总大小上限。
 const PET_PACKAGE_MAX_ENTRIES: usize = 512;
 const PET_PACKAGE_MAX_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024;
+const PET_REPOSITORY_MAX_BYTES: usize = 128 * 1024 * 1024;
+const PET_REPOSITORY_MAX_ENTRIES: usize = 4096;
+const PET_REPOSITORY_MAX_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 /// 清单和单张精灵图的读取上限。
 const PET_MANIFEST_MAX_BYTES: u64 = 64 * 1024;
 const PET_SPRITESHEET_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const PET_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
+const PET_VIDEO_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const PET_PREVIEW_MAX_DIMENSION: u16 = 4096;
 const PET_SPRITESHEET_MAX_DIMENSION: u32 = 16_384;
 const PET_SPRITESHEET_MAX_PIXELS: u64 = 64 * 1024 * 1024;
 /// Codex 图集协议：列恒为 8，行数由 `spriteVersionNumber` 决定（v1=8x9 / v2=8x11）。
@@ -108,7 +114,22 @@ struct PetManifest {
     description: Option<String>,
     #[serde(default)]
     sprite_version_number: Option<u8>,
+    #[serde(default)]
     spritesheet_path: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    config_path: Option<String>,
+    #[serde(default)]
+    uri_path: Option<String>,
+    #[serde(default)]
+    mac_uri_path: Option<String>,
+    #[serde(default)]
+    preview_path: Option<String>,
+    #[serde(default)]
+    ext: Option<config::manifest::PresetPetExt>,
+    #[serde(default)]
+    size: Option<f64>,
 }
 
 /// 列表项使用来源限定 id，避免 chat 与 codex 同名时互相覆盖。
@@ -119,16 +140,28 @@ pub struct PetListItem {
     pub description: Option<String>,
     pub thumbnail: Option<String>,
     pub source: String,
+    pub kind: String,
+    pub thumbnail_type: String,
 }
 
-/// 实际渲染精灵图；字段保持 snake_case，与其他桌宠命令一致。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PetAsset {
-    pub id: String,
-    pub spritesheet: String,
-    pub sprite_version_number: u8,
-    pub columns: u8,
-    pub rows: u8,
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PetAsset {
+    Codex {
+        id: String,
+        spritesheet: String,
+        sprite_version_number: u8,
+        columns: u8,
+        rows: u8,
+    },
+    Dsh {
+        id: String,
+        config: Value,
+        uri: config::manifest::PresetPetUri,
+        ext: config::manifest::PresetPetExt,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<f64>,
+    },
 }
 
 /// 全新安装（从未写过 `active_pet`）或旧版非法值默认选中的宠物：清单里的第一个预设
@@ -710,7 +743,22 @@ fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     let mut result = PathBuf::new();
     for component in Path::new(value).components() {
         match component {
-            Component::Normal(part) if !part.is_empty() => result.push(part),
+            Component::Normal(part) if !part.is_empty() => {
+                let name = part.to_string_lossy();
+                let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+                if name.ends_with(['.', ' '])
+                    || name.chars().any(|c| c < ' ' || "<>\"|?*".contains(c))
+                    || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || (stem.len() == 4
+                        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+                {
+                    return Err(
+                        "PET_PATH_INVALID: path contains a nonportable filename".to_string()
+                    );
+                }
+                result.push(part);
+            }
             _ => {
                 return Err(
                     "PET_PATH_INVALID: path must not be absolute or contain traversal".to_string(),
@@ -764,13 +812,55 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<PetManifest, String> {
             ));
         }
     }
-    safe_relative_path(&manifest.spritesheet_path)?;
+    match manifest.kind.as_deref() {
+        None | Some("codex") => {
+            safe_relative_path(&manifest.spritesheet_path)?;
+        }
+        Some("dsh") => {
+            for path in [
+                manifest.config_path.as_deref(),
+                manifest.uri_path.as_deref(),
+                manifest.preview_path.as_deref(),
+            ] {
+                safe_relative_path(path.ok_or_else(|| {
+                    "PET_MANIFEST_INVALID: dsh requires configPath, uriPath and previewPath"
+                        .to_string()
+                })?)?;
+            }
+            if let Some(path) = &manifest.mac_uri_path {
+                safe_relative_path(path)?;
+            }
+            let ext = manifest
+                .ext
+                .as_ref()
+                .ok_or_else(|| "PET_MANIFEST_INVALID: dsh requires ext".to_string())?;
+            if ext.default != "webm"
+                || ext
+                    .mac
+                    .as_deref()
+                    .is_some_and(|ext| ext != "mov" && ext != "webm")
+                || (manifest.mac_uri_path.is_some() && ext.mac.as_deref() != Some("mov"))
+                || (ext.mac.as_deref() == Some("mov") && manifest.mac_uri_path.is_none())
+            {
+                return Err(
+                    "PET_MANIFEST_INVALID: dsh ext must be webm (default) / mov (mac)".to_string(),
+                );
+            }
+            if manifest
+                .size
+                .is_some_and(|size| !size.is_finite() || size <= 0.0 || size > 4096.0)
+            {
+                return Err("PET_MANIFEST_INVALID: size must be within 0..=4096".to_string());
+            }
+        }
+        _ => return Err("PET_MANIFEST_INVALID: kind must be dsh or codex".to_string()),
+    }
     Ok(manifest)
 }
 
 fn read_manifest(directory: &Path) -> Result<PetManifest, String> {
     let bytes = read_bounded_file(
-        &directory.join("pet.json"),
+        &contained_file(directory, "pet.json")?,
         PET_MANIFEST_MAX_BYTES,
         "PET_MANIFEST_READ_FAILED",
     )?;
@@ -791,7 +881,7 @@ fn contained_file(directory: &Path, relative: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| format!("PET_ASSET_READ_FAILED: failed to resolve asset: {error}"))?;
     if !candidate.starts_with(&root) {
-        return Err("PET_PATH_INVALID: spritesheetPath escapes the pet directory".to_string());
+        return Err("PET_PATH_INVALID: path escapes the pet directory".to_string());
     }
     Ok(candidate)
 }
@@ -919,6 +1009,201 @@ fn image_data_url(
     read_spritesheet(directory, relative, declared).map(|(url, _)| url)
 }
 
+fn validate_pet_source(source: PetSource, manifest: &PetManifest) -> Result<(), String> {
+    if source == PetSource::Codex && manifest.kind.as_deref() == Some("dsh") {
+        return Err("PET_KIND_FORBIDDEN: Codex pets must use spritesheets".to_string());
+    }
+    Ok(())
+}
+
+fn gif_data_url(directory: &Path, relative: &str) -> Result<String, String> {
+    let path = contained_file(directory, relative)?;
+    let bytes = read_bounded_file(&path, PET_SPRITESHEET_MAX_BYTES, "PET_PREVIEW_READ_FAILED")?;
+    if bytes.len() < 13 || (!bytes.starts_with(b"GIF87a") && !bytes.starts_with(b"GIF89a")) {
+        return Err("PET_PREVIEW_INVALID: preview must have a GIF header".to_string());
+    }
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]);
+    if width == 0 || width != height || width > PET_PREVIEW_MAX_DIMENSION {
+        return Err("PET_PREVIEW_INVALID: GIF must be square and within 1..=4096px".to_string());
+    }
+    Ok(format!("data:image/gif;base64,{}", STANDARD.encode(bytes)))
+}
+
+fn animation_names(config: &Value) -> Result<HashSet<String>, String> {
+    fn collect(value: &Value, names: &mut HashSet<String>) -> Result<(), String> {
+        let values = match value {
+            Value::String(_) => std::slice::from_ref(value),
+            Value::Array(values) => values.as_slice(),
+            _ => {
+                return Err(
+                    "PET_CONFIG_INVALID: animation slot must be a string or string array"
+                        .to_string(),
+                )
+            }
+        };
+        for value in values {
+            let name = value.as_str().ok_or_else(|| {
+                "PET_CONFIG_INVALID: animation pool must contain strings".to_string()
+            })?;
+            safe_relative_path(name)?;
+            names.insert(name.to_string());
+        }
+        Ok(())
+    }
+    fn collect_map(value: &Value, names: &mut HashSet<String>, events: bool) -> Result<(), String> {
+        let values = value
+            .as_object()
+            .ok_or_else(|| "PET_CONFIG_INVALID: motions/events must be objects".to_string())?;
+        for value in values.values() {
+            if events {
+                for slot in value.as_array().ok_or_else(|| {
+                    "PET_CONFIG_INVALID: event must contain an array of animation slots".to_string()
+                })? {
+                    collect(slot, names)?;
+                }
+            } else {
+                collect(value, names)?;
+            }
+        }
+        Ok(())
+    }
+    let mut names = HashSet::new();
+    if let Some(motions) = config.get("motions") {
+        collect_map(motions, &mut names, false)?;
+    }
+    if let Some(animations) = config.get("animations") {
+        if !animations.is_object() {
+            return Err("PET_CONFIG_INVALID: animations must be an object".to_string());
+        }
+        for key in ["idle", "turn", "drag", "clicks"] {
+            if let Some(pool) = animations.get(key) {
+                if !pool.is_array() {
+                    return Err(format!(
+                        "PET_CONFIG_INVALID: animations.{key} must be an array"
+                    ));
+                }
+                collect(pool, &mut names)?;
+            }
+        }
+        for (key, events) in [("motions", false), ("events", true)] {
+            if let Some(pool) = animations.get(key) {
+                collect_map(pool, &mut names, events)?;
+            }
+        }
+        if let Some(moves) = animations.get("moves") {
+            if !moves.is_object() || !moves.get("actions").is_some_and(Value::is_array) {
+                return Err("PET_CONFIG_INVALID: moves requires an actions array".to_string());
+            }
+        }
+        if let Some(actions) = animations.pointer("/moves/actions") {
+            let actions = actions
+                .as_array()
+                .ok_or_else(|| "PET_CONFIG_INVALID: moves.actions must be an array".to_string())?;
+            for action in actions {
+                if !action.get("name").is_some_and(Value::is_string) {
+                    return Err("PET_CONFIG_INVALID: move requires a string name".to_string());
+                }
+                collect(
+                    action
+                        .get("name")
+                        .ok_or_else(|| "PET_CONFIG_INVALID: move requires name".to_string())?,
+                    &mut names,
+                )?;
+            }
+        }
+        if let Some(categories) = animations.get("categories") {
+            let categories = categories
+                .as_array()
+                .ok_or_else(|| "PET_CONFIG_INVALID: categories must be an array".to_string())?;
+            for category in categories {
+                let actions = category
+                    .get("actions")
+                    .filter(|value| value.is_array())
+                    .ok_or_else(|| {
+                        "PET_CONFIG_INVALID: category requires an actions array".to_string()
+                    })?;
+                collect(actions, &mut names)?;
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err("PET_CONFIG_INVALID: config must reference at least one animation".to_string());
+    }
+    Ok(names)
+}
+
+fn read_dsh_asset(
+    directory: &Path,
+    manifest: &PetManifest,
+    id: String,
+) -> Result<(PetAsset, Vec<PathBuf>), String> {
+    let path = contained_file(directory, manifest.config_path.as_deref().unwrap())?;
+    let bytes = read_bounded_file(&path, PET_CONFIG_MAX_BYTES, "PET_CONFIG_READ_FAILED")?;
+    let raw =
+        std::str::from_utf8(&bytes).map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
+    let config: Value = serde_json::from_str(&config::manifest::strip_jsonc(raw))
+        .map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
+    if !config.is_object() {
+        return Err("PET_CONFIG_INVALID: config must be an object".to_string());
+    }
+    let names = animation_names(&config)?;
+    let ext = manifest.ext.as_ref().unwrap();
+    let mut files = Vec::new();
+    let mut uri = config::manifest::PresetPetUri {
+        default: String::new(),
+        mac: None,
+    };
+    for (relative, extension, mac) in [
+        (
+            manifest.uri_path.as_deref(),
+            Some(ext.default.as_str()),
+            false,
+        ),
+        (manifest.mac_uri_path.as_deref(), ext.mac.as_deref(), true),
+    ] {
+        let Some(relative) = relative else { continue };
+        let extension = extension.unwrap();
+        let base = contained_file(directory, relative)?;
+        if !base.is_dir() {
+            return Err("PET_PATH_INVALID: uriPath must be a directory".to_string());
+        }
+        for name in &names {
+            let path = contained_file(directory, &format!("{relative}/{name}.{extension}"))?;
+            let metadata =
+                fs::metadata(&path).map_err(|error| format!("PET_ASSET_READ_FAILED: {error}"))?;
+            if !metadata.is_file() || metadata.len() == 0 || metadata.len() > PET_VIDEO_MAX_BYTES {
+                return Err(
+                    "PET_ASSET_INVALID: video must be a nonempty file within 512MiB".to_string(),
+                );
+            }
+            files.push(path);
+        }
+        let path = dunce::simplified(&base)
+            .to_str()
+            .ok_or_else(|| "PET_PATH_INVALID: asset directory must be UTF-8".to_string())?
+            .to_string();
+        if mac {
+            uri.mac = Some(path);
+        } else {
+            uri.default = path;
+        }
+    }
+    gif_data_url(directory, manifest.preview_path.as_deref().unwrap())?;
+    files.sort();
+    files.dedup();
+    Ok((
+        PetAsset::Dsh {
+            id,
+            config,
+            uri,
+            ext: ext.clone(),
+            size: manifest.size,
+        },
+        files,
+    ))
+}
+
 fn manifest_to_list_item(
     source: PetSource,
     directory: &Path,
@@ -935,18 +1220,25 @@ fn manifest_to_list_item(
         .description
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let thumbnail = image_data_url(
-        directory,
-        &manifest.spritesheet_path,
-        manifest.sprite_version_number,
-    )
-    .ok();
+    let is_dsh = manifest.kind.as_deref() == Some("dsh");
+    let thumbnail = if is_dsh {
+        gif_data_url(directory, manifest.preview_path.as_deref().unwrap()).ok()
+    } else {
+        image_data_url(
+            directory,
+            &manifest.spritesheet_path,
+            manifest.sprite_version_number,
+        )
+        .ok()
+    };
     PetListItem {
         id: qualified_id(source, &manifest.id),
         name,
         description,
         thumbnail,
         source: source.as_str().to_string(),
+        kind: if is_dsh { "dsh" } else { "codex" }.to_string(),
+        thumbnail_type: if is_dsh { "gif" } else { "spritesheet" }.to_string(),
     }
 }
 
@@ -985,6 +1277,9 @@ pub fn list_pets(app: AppHandle, source: String) -> Result<Vec<PetListItem>, Str
         let Ok(manifest) = read_manifest(&directory) else {
             continue;
         };
+        if validate_pet_source(source, &manifest).is_err() {
+            continue;
+        }
         let id = qualified_id(source, &manifest.id);
         if ids.insert(id) {
             items.push(manifest_to_list_item(source, &directory, manifest));
@@ -1021,12 +1316,23 @@ pub fn get_pet_asset(app: AppHandle, id: String) -> Result<PetAsset, String> {
             qualified_id(source, manifest_id)
         )
     })?;
+    validate_pet_source(source, &manifest)?;
+    if manifest.kind.as_deref() == Some("dsh") {
+        let (asset, files) = read_dsh_asset(&directory, &manifest, id.to_string())?;
+        let scope = app.asset_protocol_scope();
+        for file in files {
+            scope
+                .allow_file(file)
+                .map_err(|error| format!("PET_ASSET_SCOPE_FAILED: {error}"))?;
+        }
+        return Ok(asset);
+    }
     let (spritesheet, grid) = read_spritesheet(
         &directory,
         &manifest.spritesheet_path,
         manifest.sprite_version_number,
     )?;
-    Ok(PetAsset {
+    Ok(PetAsset::Codex {
         id: qualified_id(source, &manifest.id),
         spritesheet,
         sprite_version_number: grid.version,
@@ -1074,19 +1380,27 @@ fn ignored_archive_entry(path: &Path) -> bool {
 /// 只要除元数据外所有条目都位于同一个 `pet.json` 所在目录下（或本身就是该目录的
 /// 上级包装目录），就是一个有效包。
 fn archive_root_prefix(paths: &[(PathBuf, bool)]) -> Result<Option<PathBuf>, String> {
+    archive_root_prefix_for(paths, "pet.json")
+}
+
+fn archive_root_prefix_for(
+    paths: &[(PathBuf, bool)],
+    marker: &str,
+) -> Result<Option<PathBuf>, String> {
     let manifests = paths
         .iter()
         .filter(|(path, is_dir)| {
             !is_dir
                 && !ignored_archive_entry(path)
-                && path.file_name().and_then(|value| value.to_str()) == Some("pet.json")
+                && path.file_name().and_then(|value| value.to_str()) == Some(marker)
+                && (marker != "config.jsonc" || path.components().count() == 2)
         })
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
     if manifests.len() != 1 {
-        return Err(
-            "PET_ARCHIVE_LAYOUT_INVALID: archive must contain exactly one pet.json".to_string(),
-        );
+        return Err(format!(
+            "PET_ARCHIVE_LAYOUT_INVALID: archive must contain exactly one root {marker}"
+        ));
     }
     let prefix = match manifests[0].parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -1146,11 +1460,35 @@ fn copy_archive_entry<R: Read, W: Write>(
 
 /// 两遍处理 zip：先完整验证路径、类型和声明大小，再向 staging 写入。
 fn extract_pet_archive(bytes: &[u8], staging: &Path) -> Result<PetManifest, String> {
+    extract_pet_archive_files(
+        bytes,
+        staging,
+        "pet.json",
+        PET_PACKAGE_MAX_ENTRIES,
+        PET_PACKAGE_MAX_UNCOMPRESSED_BYTES,
+    )?;
+    let manifest = read_manifest(staging)?;
+    validate_pet_source(PetSource::Codex, &manifest)?;
+    image_data_url(
+        staging,
+        &manifest.spritesheet_path,
+        manifest.sprite_version_number,
+    )?;
+    Ok(manifest)
+}
+
+fn extract_pet_archive_files(
+    bytes: &[u8],
+    staging: &Path,
+    marker: &str,
+    max_entries: usize,
+    max_uncompressed_bytes: u64,
+) -> Result<(), String> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| format!("PET_ARCHIVE_INVALID: failed to open zip: {error}"))?;
-    if archive.is_empty() || archive.len() > PET_PACKAGE_MAX_ENTRIES {
+    if archive.is_empty() || archive.len() > max_entries {
         return Err(format!(
-            "PET_ARCHIVE_ENTRY_LIMIT: archive must contain 1..={PET_PACKAGE_MAX_ENTRIES} entries"
+            "PET_ARCHIVE_ENTRY_LIMIT: archive must contain 1..={max_entries} entries"
         ));
     }
 
@@ -1169,15 +1507,19 @@ fn extract_pet_archive(bytes: &[u8], staging: &Path) -> Result<PetManifest, Stri
             declared_total = declared_total
                 .checked_add(file.size())
                 .ok_or_else(|| "PET_ARCHIVE_TOO_LARGE: uncompressed size overflow".to_string())?;
-            if declared_total > PET_PACKAGE_MAX_UNCOMPRESSED_BYTES {
+            if declared_total > max_uncompressed_bytes {
                 return Err(format!(
-                    "PET_ARCHIVE_TOO_LARGE: uncompressed files must not exceed {PET_PACKAGE_MAX_UNCOMPRESSED_BYTES} bytes"
+                    "PET_ARCHIVE_TOO_LARGE: uncompressed files must not exceed {max_uncompressed_bytes} bytes"
                 ));
             }
         }
         paths.push((path, is_dir));
     }
-    let prefix = archive_root_prefix(&paths)?;
+    let prefix = if marker == "pet.json" {
+        archive_root_prefix(&paths)?
+    } else {
+        archive_root_prefix_for(&paths, marker)?
+    };
 
     fs::create_dir(staging).map_err(|error| {
         format!("PET_IMPORT_STAGING_FAILED: failed to create staging directory: {error}")
@@ -1230,17 +1572,10 @@ fn extract_pet_archive(bytes: &[u8], staging: &Path) -> Result<PetManifest, Stri
             &mut file,
             &mut output,
             &mut actual_total,
-            PET_PACKAGE_MAX_UNCOMPRESSED_BYTES,
+            max_uncompressed_bytes,
         )?;
     }
-
-    let manifest = read_manifest(staging)?;
-    image_data_url(
-        staging,
-        &manifest.spritesheet_path,
-        manifest.sprite_version_number,
-    )?;
-    Ok(manifest)
+    Ok(())
 }
 
 fn unique_staging_path(staging_root: &Path) -> PathBuf {
@@ -1252,9 +1587,8 @@ fn unique_staging_path(staging_root: &Path) -> PathBuf {
 }
 
 fn prepare_staging_root(root: &Path) -> Result<PathBuf, String> {
-    fs::create_dir_all(root).map_err(|error| {
-        format!("PET_DIR_FAILED: failed to create Codex pets directory: {error}")
-    })?;
+    fs::create_dir_all(root)
+        .map_err(|error| format!("PET_DIR_FAILED: failed to create pets directory: {error}"))?;
     let staging_root = root.join(".staging");
     match fs::symlink_metadata(&staging_root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -1304,36 +1638,198 @@ pub fn import_pet(app: AppHandle, name: String, data: String) -> Result<PetListI
     }
 
     let root = pets_dir(&app, PetSource::Codex)?;
+    install_pet_archive(&root, &bytes, None)
+}
+
+fn install_pet_archive(
+    root: &Path,
+    bytes: &[u8],
+    repository_name: Option<&str>,
+) -> Result<PetListItem, String> {
+    let source = if repository_name.is_some() {
+        PetSource::Chat
+    } else {
+        PetSource::Codex
+    };
     let _guard = pet_import_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let staging_root = prepare_staging_root(&root)?;
     let staging = unique_staging_path(&staging_root);
     let result = (|| {
-        let manifest = extract_pet_archive(&bytes, &staging)?;
+        let manifest = if let Some(name) = repository_name {
+            extract_pet_archive_files(
+                bytes,
+                &staging,
+                "config.jsonc",
+                PET_REPOSITORY_MAX_ENTRIES,
+                PET_REPOSITORY_MAX_UNCOMPRESSED_BYTES,
+            )?;
+            repository_manifest(&staging, name)?
+        } else {
+            extract_pet_archive(bytes, &staging)?
+        };
         let target = root.join(&manifest.id);
         if path_exists_including_symlink(&target)? {
             return Err(format!(
-                "PET_ALREADY_IMPORTED: Codex pet target {} already exists",
+                "PET_ALREADY_IMPORTED: {} pet target {} already exists",
+                source.as_str(),
                 manifest.id
             ));
         }
         if let Some((existing, _)) = find_pet_directory(&root, &manifest.id)? {
             return Err(format!(
-                "PET_ALREADY_IMPORTED: Codex pet id {} already exists at {}",
+                "PET_ALREADY_IMPORTED: {} pet id {} already exists at {}",
+                source.as_str(),
                 manifest.id,
                 existing.display()
             ));
         }
-        fs::rename(&staging, &target).map_err(|error| {
-            format!("PET_IMPORT_COMMIT_FAILED: failed to install Codex pet: {error}")
-        })?;
-        Ok(manifest_to_list_item(PetSource::Codex, &target, manifest))
+        fs::rename(&staging, &target)
+            .map_err(|error| format!("PET_IMPORT_COMMIT_FAILED: failed to install pet: {error}"))?;
+        Ok(manifest_to_list_item(source, &target, manifest))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+    if let Err(error) = &result {
+        if let Err(cleanup) = fs::remove_dir_all(&staging) {
+            if cleanup.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "PET_IMPORT_CLEANUP_FAILED: {error}; failed to remove staging: {cleanup}"
+                ));
+            }
+        }
     }
     result
+}
+
+fn parse_pet_repository(repository: &str) -> Result<(String, String), String> {
+    let invalid =
+        || "PET_REPOSITORY_INVALID: use owner/repo or https://github.com/owner/repo".to_string();
+    let input = repository.trim();
+    let path = if input.contains("://") {
+        let url = reqwest::Url::parse(input).map_err(|_| invalid())?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("github.com")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        url.path()
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        input.to_string()
+    };
+    let (owner, repo) = path.split_once('/').ok_or_else(invalid)?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    if owner.is_empty()
+        || owner.len() > 39
+        || owner.starts_with('-')
+        || owner.ends_with('-')
+        || !owner
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        || repo.is_empty()
+        || repo.len() > 100
+        || matches!(repo, "." | "..")
+        || !repo
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err(invalid());
+    }
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+fn repository_manifest(directory: &Path, name: &str) -> Result<PetManifest, String> {
+    let root_config = read_bounded_file(
+        &contained_file(directory, "config.jsonc")?,
+        PET_CONFIG_MAX_BYTES,
+        "PET_CONFIG_READ_FAILED",
+    )?;
+    let raw = std::str::from_utf8(&root_config)
+        .map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
+    let value: Value = serde_json::from_str(&config::manifest::strip_jsonc(raw))
+        .map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
+    animation_names(&value)?;
+    let manifest = if path_exists_including_symlink(&directory.join("pet.json"))? {
+        read_manifest(directory)?
+    } else {
+        validate_manifest_id(name)?;
+        if !directory.join("webm").is_dir() || !directory.join("preview/preview.gif").is_file() {
+            return Err("PET_REPOSITORY_LAYOUT_INVALID: without pet.json, expected webm/ and preview/preview.gif".to_string());
+        }
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": name, "displayName": name, "kind": "dsh", "configPath": "config.jsonc",
+            "uriPath": "webm", "previewPath": "preview/preview.gif",
+            "ext": {"default": "webm", "mac": "webm"}
+        }))
+        .map_err(|error| format!("PET_MANIFEST_INVALID: {error}"))?;
+        let manifest = parse_manifest_bytes(&bytes)?;
+        fs::write(directory.join("pet.json"), bytes)
+            .map_err(|error| format!("PET_MANIFEST_WRITE_FAILED: {error}"))?;
+        manifest
+    };
+    if manifest.kind.as_deref() != Some("dsh") {
+        return Err("PET_KIND_FORBIDDEN: repository pets must use kind dsh".to_string());
+    }
+    read_dsh_asset(
+        directory,
+        &manifest,
+        qualified_id(PetSource::Chat, &manifest.id),
+    )?;
+    Ok(manifest)
+}
+
+#[tauri::command]
+pub async fn import_pet_repository(
+    app: AppHandle,
+    repository: String,
+) -> Result<PetListItem, String> {
+    let (owner, name) = parse_pet_repository(&repository)?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))?;
+    let response = client
+        .get(format!(
+            "https://codeload.github.com/{owner}/{name}/zip/HEAD"
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "PET_REPOSITORY_DOWNLOAD_FAILED: GitHub returned HTTP {} (public repository required)",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > PET_REPOSITORY_MAX_BYTES as u64)
+    {
+        return Err("PET_REPOSITORY_TOO_LARGE: download exceeds 128MiB".to_string());
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))?;
+        if chunk.len() > PET_REPOSITORY_MAX_BYTES.saturating_sub(bytes.len()) {
+            return Err("PET_REPOSITORY_TOO_LARGE: download exceeds 128MiB".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let root = pets_dir(&app, PetSource::Chat)?;
+    tauri::async_runtime::spawn_blocking(move || install_pet_archive(&root, &bytes, Some(&name)))
+        .await
+        .map_err(|error| format!("PET_IMPORT_FAILED: {error}"))?
 }
 
 #[cfg(test)]
@@ -1343,6 +1839,148 @@ mod tests {
     use zip::CompressionMethod;
 
     struct TestDirectory(PathBuf);
+
+    #[test]
+    fn repository_input_accepts_only_github_repository_names() {
+        for input in ["owner/pet-name", " https://github.com/owner/pet-name.git/ "] {
+            assert_eq!(
+                parse_pet_repository(input).unwrap(),
+                ("owner".to_string(), "pet-name".to_string())
+            );
+        }
+        for input in [
+            "",
+            "http://github.com/a/b",
+            "https://github.com.evil/a/b",
+            "https://127.0.0.1/a/b",
+            "https://user@github.com/a/b",
+            "https://github.com:8080/a/b",
+            "https://github.com/a/b?x=1",
+            "https://github.com/a/b#main",
+            "a/b/tree/main",
+            "a/../b",
+            "a/b%2fc",
+            "a\\b",
+            "a/..",
+        ] {
+            assert!(
+                parse_pet_repository(input)
+                    .unwrap_err()
+                    .starts_with("PET_REPOSITORY_INVALID:"),
+                "{input}"
+            );
+        }
+    }
+
+    fn repository_archive(config: &[u8], manifest: Option<&[u8]>) -> Vec<u8> {
+        let mut entries = vec![
+            ("pet-HEAD/config.jsonc", config),
+            ("pet-HEAD/webm/idle.webm", b"video".as_slice()),
+            (
+                "pet-HEAD/preview/preview.gif",
+                b"GIF89a\x10\x00\x10\x00\x00\x00\x00".as_slice(),
+            ),
+            ("pet-HEAD/README.md", b"readme".as_slice()),
+        ];
+        if let Some(manifest) = manifest {
+            entries.push(("pet-HEAD/pet.json", manifest));
+        }
+        build_archive(&entries)
+    }
+
+    #[test]
+    fn repository_import_generates_manifest_and_rejects_existing_id_without_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = repository_archive(br#"{"animations":{"idle":["idle"]}}"#, None);
+        let item = install_pet_archive(root.path(), &archive, Some("my-pet")).unwrap();
+        assert_eq!(
+            (item.id.as_str(), item.source.as_str(), item.kind.as_str()),
+            ("chat:my-pet", "chat", "dsh")
+        );
+        assert_eq!(item.thumbnail_type, "gif");
+        let manifest = read_manifest(&root.path().join("my-pet")).unwrap();
+        assert_eq!(manifest.ext.unwrap().mac.as_deref(), Some("webm"));
+        assert_eq!(
+            fs::read(root.path().join("my-pet/webm/idle.webm")).unwrap(),
+            b"video"
+        );
+        assert!(install_pet_archive(root.path(), &archive, Some("my-pet"))
+            .unwrap_err()
+            .starts_with("PET_ALREADY_IMPORTED:"));
+        assert_eq!(
+            fs::read(root.path().join("my-pet/webm/idle.webm")).unwrap(),
+            b"video"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join(".staging")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn repository_import_respects_manifest_and_cleans_up_invalid_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = br#"{"id":"declared","kind":"dsh","configPath":"config.jsonc","uriPath":"webm","previewPath":"preview/preview.gif","ext":{"default":"webm","mac":"webm"},"size":200}"#;
+        let archive = repository_archive(br#"{"motions":{"idle":"idle"}}"#, Some(manifest));
+        let item = install_pet_archive(root.path(), &archive, Some("ignored-repo-name")).unwrap();
+        assert_eq!(item.id, "chat:declared");
+        assert_eq!(
+            read_manifest(&root.path().join("declared")).unwrap().size,
+            Some(200.0)
+        );
+        for config in [
+            br#"{}"#.as_slice(),
+            br#"{"animations":{"idle":{"wrong":"idle"}}}"#,
+            br#"{"motions":{"idle":"missing"}}"#,
+            br#"{"motions":{"idle":"../outside"}}"#,
+        ] {
+            let archive = repository_archive(config, None);
+            assert!(install_pet_archive(root.path(), &archive, Some("invalid")).is_err());
+            assert!(!root.path().join("invalid").exists());
+            assert_eq!(
+                fs::read_dir(root.path().join(".staging")).unwrap().count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn repository_archive_rejects_missing_root_config_traversal_and_resource_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        for entries in [
+            vec![("pet-HEAD/assets/config.jsonc", b"{}".as_slice())],
+            vec![
+                ("pet-HEAD/config.jsonc", b"{}".as_slice()),
+                ("../escape", b"bad".as_slice()),
+            ],
+        ] {
+            assert!(extract_pet_archive_files(
+                &build_archive(&entries),
+                &staging,
+                "config.jsonc",
+                10,
+                100
+            )
+            .is_err());
+            assert!(!staging.exists());
+        }
+        let archive = repository_archive(br#"{"motions":{"idle":"idle"}}"#, None);
+        assert!(
+            extract_pet_archive_files(&archive, &staging, "config.jsonc", 1, 100)
+                .unwrap_err()
+                .starts_with("PET_ARCHIVE_ENTRY_LIMIT:")
+        );
+        assert!(
+            extract_pet_archive_files(&archive, &staging, "config.jsonc", 10, 1)
+                .unwrap_err()
+                .starts_with("PET_ARCHIVE_TOO_LARGE:")
+        );
+        assert!(!staging.exists());
+        assert!(safe_archive_entry("pet-HEAD/webm/link", Some(0o120777))
+            .unwrap_err()
+            .starts_with("PET_ARCHIVE_LINK_FORBIDDEN:"));
+    }
 
     // ---- 重连日志节流（宿主不可用期间每 2s 一次失败不能刷满日志）----
 
@@ -1898,7 +2536,10 @@ mod tests {
             vec![empty.clone(), pet.clone()],
             "只枚举直接子目录，普通文件不进列表"
         );
-        assert!(read_manifest(&empty).is_err(), "缺少 pet.json 的目录应被跳过");
+        assert!(
+            read_manifest(&empty).is_err(),
+            "缺少 pet.json 的目录应被跳过"
+        );
 
         let item = manifest_to_list_item(PetSource::Chat, &pet, read_manifest(&pet).unwrap());
         assert_eq!(item.id, "chat:my-pet");
@@ -1906,6 +2547,341 @@ mod tests {
         assert_eq!(item.source, "chat");
         assert!(item.thumbnail.is_some(), "图集合规时应生成缩略图");
         assert!(validate_active_pet_id(&item.id).is_ok());
+    }
+
+    fn dsh_fixture(directory: &Path) -> PetManifest {
+        fs::create_dir_all(directory.join("webm")).unwrap();
+        fs::create_dir_all(directory.join("preview")).unwrap();
+        fs::write(directory.join("pet.json"), br#"{"id":"video-pet","kind":"dsh","configPath":"config.jsonc","uriPath":"webm","previewPath":"preview/preview.gif","ext":{"default":"webm","mac":"webm"},"size":220}"#).unwrap();
+        fs::write(
+            directory.join("config.jsonc"),
+            br#"{
+            // JSONC must retain comment markers inside strings
+            "motions": {"idle": "idle", "working": ["work"],},
+            "whisperPrompt": "https://example.test/*not a comment*/",
+        }"#,
+        )
+        .unwrap();
+        fs::write(directory.join("webm/idle.webm"), b"video-idle").unwrap();
+        fs::write(directory.join("webm/work.webm"), b"video-work").unwrap();
+        fs::write(directory.join("webm/unreferenced.webm"), b"private-video").unwrap();
+        fs::write(directory.join("webm/private.txt"), b"private").unwrap();
+        fs::write(
+            directory.join("preview/preview.gif"),
+            b"GIF89a\x10\x00\x10\x00\x00\x00\x00",
+        )
+        .unwrap();
+        read_manifest(directory).unwrap()
+    }
+
+    #[test]
+    fn dsh_asset_preserves_jsonc_object_and_only_authorizes_referenced_videos() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = dsh_fixture(root.path());
+        let (asset, files) =
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string()).unwrap();
+        let value = serde_json::to_value(asset).unwrap();
+        assert_eq!(value["kind"], "dsh");
+        assert_eq!(value["id"], "chat:video-pet");
+        assert_eq!(
+            value["config"]["motions"]["working"],
+            serde_json::json!(["work"])
+        );
+        assert_eq!(
+            value["config"]["whisperPrompt"],
+            "https://example.test/*not a comment*/"
+        );
+        assert_eq!(
+            value["ext"],
+            serde_json::json!({"default":"webm","mac":"webm"})
+        );
+        assert_eq!(value["size"], 220.0);
+        assert!(Path::new(value["uri"]["default"].as_str().unwrap()).is_absolute());
+        assert_eq!(
+            Path::new(value["uri"]["default"].as_str().unwrap()),
+            dunce::simplified(&root.path().join("webm").canonicalize().unwrap())
+        );
+        assert!(value["uri"].get("mac").is_none());
+        assert!(value.get("spritesheet").is_none());
+        assert_eq!(
+            files,
+            vec![
+                root.path().join("webm/idle.webm").canonicalize().unwrap(),
+                root.path().join("webm/work.webm").canonicalize().unwrap()
+            ]
+        );
+        let app = tauri::test::mock_app();
+        let scope = tauri::scope::fs::Scope::new(
+            &app,
+            &tauri::utils::config::FsScope::AllowedPaths(Vec::new()),
+        )
+        .unwrap();
+        for file in files {
+            scope.allow_file(file).unwrap();
+        }
+        assert!(scope.is_allowed(root.path().join("webm/idle.webm")));
+        for file in [
+            "pet.json",
+            "config.jsonc",
+            "preview/preview.gif",
+            "webm/private.txt",
+            "webm/unreferenced.webm",
+        ] {
+            assert!(
+                !scope.is_allowed(root.path().join(file)),
+                "must not authorize {file}"
+            );
+        }
+        assert!(!scope.is_allowed(root.path()));
+        let item = manifest_to_list_item(PetSource::Chat, root.path(), manifest);
+        assert_eq!(item.kind, "dsh");
+        assert_eq!(item.thumbnail_type, "gif");
+        assert_eq!(
+            item.thumbnail.unwrap(),
+            "data:image/gif;base64,R0lGODlhEAAQAAAAAA=="
+        );
+    }
+
+    #[test]
+    fn dsh_reference_enumeration_covers_component_pools_without_metadata() {
+        let config = serde_json::json!({
+            "motions": {"idle": "idle"},
+            "animations": {
+                "idle": ["breathe"], "turn": ["turn"], "drag": ["drag"], "clicks": ["click"],
+                "motions": {"working": ["work"]},
+                "moves": {"default": {"speed": 2}, "actions": [{"name": "walk", "params": {"speed": 2}}]},
+                "categories": [{"id": "not-a-video", "weight": 1, "actions": ["jump"]}],
+                "events": {"workStatus": ["think", ["code", "write"]]}
+            }
+        });
+        let mut names: Vec<_> = animation_names(&config).unwrap().into_iter().collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "breathe", "click", "code", "drag", "idle", "jump", "think", "turn", "walk",
+                "work", "write"
+            ]
+        );
+    }
+
+    #[test]
+    fn dsh_assets_reject_missing_traversing_or_oversized_files() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = dsh_fixture(root.path());
+        for raw in [
+            r#"[]"#,
+            r#"{}"#,
+            r#"{"motions":{"idle":"../private"}}"#,
+            r#"{"motions":{"idle":"C:/private"}}"#,
+            r#"{"motions":{"idle":"missing"}}"#,
+        ] {
+            fs::write(root.path().join("config.jsonc"), raw).unwrap();
+            assert!(
+                read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string()).is_err(),
+                "must reject {raw}"
+            );
+        }
+        fs::write(
+            root.path().join("config.jsonc"),
+            r#"{"motions":{"idle":"idle"}}"#,
+        )
+        .unwrap();
+        let video = fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join("webm/idle.webm"))
+            .unwrap();
+        video.set_len(PET_VIDEO_MAX_BYTES + 1).unwrap();
+        assert!(
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                .unwrap_err()
+                .starts_with("PET_ASSET_INVALID:")
+        );
+        video.set_len(0).unwrap();
+        assert!(
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                .unwrap_err()
+                .starts_with("PET_ASSET_INVALID:")
+        );
+        let config = fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join("config.jsonc"))
+            .unwrap();
+        config.set_len(PET_CONFIG_MAX_BYTES + 1).unwrap();
+        assert!(
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                .unwrap_err()
+                .starts_with("PET_CONFIG_READ_FAILED:")
+        );
+    }
+
+    #[test]
+    fn dsh_preview_rejects_nonsquare_bad_header_and_oversized_gif() {
+        let root = tempfile::tempdir().unwrap();
+        dsh_fixture(root.path());
+        for bytes in [
+            b"not-a-gif-header".as_slice(),
+            b"GIF89a\x10\x00\x11\x00\x00\x00\x00",
+            b"GIF89a\x00\x00\x00\x00\x00\x00\x00",
+            b"GIF89a\x01\x10\x01\x10\x00\x00\x00",
+        ] {
+            fs::write(root.path().join("preview/preview.gif"), bytes).unwrap();
+            assert!(gif_data_url(root.path(), "preview/preview.gif")
+                .unwrap_err()
+                .starts_with("PET_PREVIEW_INVALID:"));
+        }
+        let gif = fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join("preview/preview.gif"))
+            .unwrap();
+        gif.set_len(PET_SPRITESHEET_MAX_BYTES + 1).unwrap();
+        assert!(gif_data_url(root.path(), "preview/preview.gif")
+            .unwrap_err()
+            .starts_with("PET_PREVIEW_READ_FAILED:"));
+    }
+
+    #[test]
+    fn dsh_mac_directory_requires_mov_and_checks_every_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manifest = dsh_fixture(root.path());
+        manifest.mac_uri_path = Some("mov".to_string());
+        manifest.ext.as_mut().unwrap().mac = Some("mov".to_string());
+        fs::create_dir(root.path().join("mov")).unwrap();
+        fs::write(root.path().join("mov/idle.mov"), b"idle-mov").unwrap();
+        assert!(
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                .unwrap_err()
+                .starts_with("PET_ASSET_READ_FAILED:")
+        );
+        fs::write(root.path().join("mov/work.mov"), b"work-mov").unwrap();
+        let (asset, files) =
+            read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string()).unwrap();
+        let value = serde_json::to_value(asset).unwrap();
+        assert!(Path::new(value["uri"]["mac"].as_str().unwrap()).is_absolute());
+        assert_eq!(value["ext"]["mac"], "mov");
+        assert_eq!(files.len(), 4);
+        assert!(parse_manifest_bytes(br#"{"id":"x","kind":"dsh","configPath":"c.jsonc","uriPath":"webm","macUriPath":"mov","previewPath":"p.gif","ext":{"default":"webm","mac":"webm"}}"#).unwrap_err().starts_with("PET_MANIFEST_INVALID:"));
+    }
+
+    #[test]
+    fn dsh_manifest_rejects_mac_mov_without_mac_directory() {
+        assert!(parse_manifest_bytes(br#"{"id":"x","kind":"dsh","configPath":"config.jsonc","uriPath":"webm","previewPath":"preview/preview.gif","ext":{"default":"webm","mac":"mov"}}"#)
+            .unwrap_err().starts_with("PET_MANIFEST_INVALID:"));
+    }
+
+    #[test]
+    fn dsh_is_forbidden_in_codex_source_and_zip_import() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = dsh_fixture(root.path());
+        assert!(validate_pet_source(PetSource::Chat, &manifest).is_ok());
+        assert!(validate_pet_source(PetSource::Codex, &manifest)
+            .unwrap_err()
+            .starts_with("PET_KIND_FORBIDDEN:"));
+        let bytes = fs::read(root.path().join("pet.json")).unwrap();
+        let archive = build_archive(&[("pet.json", &bytes)]);
+        let staging = root.path().join("staging");
+        assert!(extract_pet_archive(&archive, &staging)
+            .unwrap_err()
+            .starts_with("PET_KIND_FORBIDDEN:"));
+        let legacy =
+            parse_manifest_bytes(br#"{"id":"old","spritesheetPath":"sprite.webp"}"#).unwrap();
+        assert!(validate_pet_source(PetSource::Codex, &legacy).is_ok());
+        let value = serde_json::to_value(PetAsset::Codex {
+            id: "codex:old".to_string(),
+            spritesheet: "data:image/webp;base64,eA==".to_string(),
+            sprite_version_number: 1,
+            columns: 8,
+            rows: 9,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"kind":"codex","id":"codex:old","spritesheet":"data:image/webp;base64,eA==","sprite_version_number":1,"columns":8,"rows":9})
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dsh_junctioned_config_preview_and_video_cannot_escape_root() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut manifest = dsh_fixture(root.path());
+        dsh_fixture(outside.path());
+        let junction = root.path().join("external");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap();
+        assert!(status.success(), "must create isolated junction");
+        for relative in [
+            "external/pet.json",
+            "external/config.jsonc",
+            "external/preview/preview.gif",
+            "external/webm/idle.webm",
+        ] {
+            assert!(contained_file(root.path(), relative)
+                .unwrap_err()
+                .starts_with("PET_PATH_INVALID:"));
+        }
+        for field in ["config", "preview", "video"] {
+            match field {
+                "config" => manifest.config_path = Some("external/config.jsonc".to_string()),
+                "preview" => {
+                    manifest.preview_path = Some("external/preview/preview.gif".to_string())
+                }
+                "video" => manifest.uri_path = Some("external/webm".to_string()),
+                _ => unreachable!(),
+            }
+            assert!(
+                read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                    .unwrap_err()
+                    .starts_with("PET_PATH_INVALID:")
+            );
+            manifest = read_manifest(root.path()).unwrap();
+        }
+        fs::remove_dir(&junction).unwrap();
+        assert!(outside.path().join("pet.json").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dsh_symlinked_manifest_config_preview_and_video_cannot_escape_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let manifest = dsh_fixture(root.path());
+        for relative in [
+            "pet.json",
+            "config.jsonc",
+            "preview/preview.gif",
+            "webm/idle.webm",
+        ] {
+            let path = root.path().join(relative);
+            let original = fs::read(&path).unwrap();
+            let target = outside.path().join("external");
+            fs::write(&target, &original).unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(contained_file(root.path(), relative)
+                .unwrap_err()
+                .starts_with("PET_PATH_INVALID:"));
+            if relative == "pet.json" {
+                assert!(read_manifest(root.path())
+                    .unwrap_err()
+                    .starts_with("PET_PATH_INVALID:"));
+            } else {
+                assert!(
+                    read_dsh_asset(root.path(), &manifest, "chat:video-pet".to_string())
+                        .unwrap_err()
+                        .starts_with("PET_PATH_INVALID:")
+                );
+            }
+            fs::remove_file(&path).unwrap();
+            fs::write(path, original).unwrap();
+        }
     }
 
     #[test]
