@@ -14,6 +14,15 @@ import { model } from './model'
 import { session } from './session'
 import { sink } from './sink'
 
+/**
+ * Sources that carry DSH-side environment state rather than content addressed to
+ * the model: policy switches, cwd notices, plugin run outcomes, and snapshots.
+ * The native kernel owns its own equivalents, so these never become native input
+ * and must not abort a running native turn. Real user instructions stay absent
+ * on purpose — steering a running native turn is still refused.
+ */
+const ENVIRONMENT_SOURCES = new Set(['runtime-context', 'time-context', 'user-approval', 'working-directory', 'cordis-host-runner', 'ptc-mode', 'skill-catalog'])
+
 export const adapter = defineService({
   async register(): Promise<() => void> {
     const ctx = getServerContext<HostContext>(server)
@@ -94,7 +103,7 @@ export const adapter = defineService({
   },
 
   async request(payload: { agent: Agent, signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig> {
-    let config = await next()
+    const config = await next()
     const ctx = getServerContext<HostContext>(server)
     const projected = ctx.sessionProjections.stateOf(payload.agent.session, 'bridgeKernel')?.binding
     if (projected === null || projected === undefined) {
@@ -104,15 +113,16 @@ export const adapter = defineService({
     }
     const binding = identity.resolve(payload.agent)
     assertLive(payload.agent, payload.signal)
-    // Cold API activation supplies the global selection until the loop commits its first legal request header.
+    // The API controller answers every headerless session with the deployment default route, so an
+    // unstarted bound session keeps its kernel instead of failing its first message on that default.
     const fallback = ctx.get('agentDefaultModel')?.currentSelection()
-    if (runtime.coldRoutes.has(payload.agent) && payload.agent.session.requestHeader() === undefined && !payload.agent.session.snapshotEvents().some(event => event.type === 'model/selection') && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined) {
-      const { reasoningEffort: _effort, ...native } = config
-      config = { ...native, provider: BRIDGE_PROVIDER, model: binding.backend }
-    }
-    if (config.provider !== BRIDGE_PROVIDER || config.model !== binding.backend || config.reasoningEffort !== undefined || config.maxTokens !== undefined || config.temperature !== undefined || config.stop !== undefined)
-      throw new Error('BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项。')
-    return config
+    const bound = config.provider === BRIDGE_PROVIDER && config.model === binding.backend
+    const ambient = payload.agent.session.requestHeader() === undefined && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined
+    if (!bound && !ambient)
+      throw new Error(`BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项（请求 ${config.provider}/${config.model}，当前内核 ${binding.backend}）。`)
+    // The native kernel owns model, effort, and generation options: DSH values never reach it.
+    const { reasoningEffort: _effort, maxTokens: _maxTokens, temperature: _temperature, stop: _stop, ...native } = config
+    return { ...native, provider: BRIDGE_PROVIDER, model: binding.backend }
   },
 
   async* capture(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
@@ -205,7 +215,6 @@ export const adapter = defineService({
   },
 
   async remove(agent: Agent): Promise<void> {
-    runtime.coldRoutes.delete(agent)
     const current = runtime.exchanges.get(agent.id)
     if (current?.state.input.agent === agent)
       await session.finish(agent, current.state.input.turn)
@@ -216,11 +225,6 @@ export const adapter = defineService({
   },
 
   end(value: Session, event: SessionEvent): void {
-    if (event.type === 'request/header' || event.type === 'model/selection') {
-      const agent = getServerContext<HostContext>(server).agents.get(value.id)
-      if (agent?.session === value)
-        runtime.coldRoutes.delete(agent)
-    }
     sink.commitTool(value, event)
     if (event.type === 'step/end' || event.type === 'turn/end') {
       runtime.steps.delete(value.id)
@@ -234,8 +238,7 @@ export const adapter = defineService({
 })
 
 function nativeMessage(message: UserMessage): boolean {
-  const source: string = message.source.kind
-  return source !== 'runtime-context' && source !== 'time-context'
+  return !ENVIRONMENT_SOURCES.has(message.source.kind)
 }
 
 function continuationMessage(message: UserMessage, entered: readonly UserMessage[]): boolean {
