@@ -34,6 +34,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn patch_read_failure_is_reported_before_launch() {
+        let core = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(core.path().join(MCP_INDEX_JS)).unwrap();
+        let error = apply_at(core.path()).expect_err("unreadable MCP file must fail");
+        assert!(error.starts_with("DSH_PATCH_READ:"));
+    }
+
+    #[test]
     fn readiness_patch_is_idempotent_and_preserves_surrounding_lifecycle() {
         let source = format!("ctx.effect(() => dispose, \"mcp-client.connection\");\n{READY_ANCHOR}\nif (outcome.error !== void 0 && config.failOnStartupError) throw outcome.error;");
         let PatchOutcome::Patched(patched) = patch_source(&source) else {
