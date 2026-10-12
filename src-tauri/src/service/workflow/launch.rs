@@ -471,6 +471,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = crate::service::patch::plugin_visibility::apply(&app_handle) {
         log::warn!("plugin visibility patch failed: {e}");
     }
+    crate::service::patch::mcp_startup::apply(&app_handle)?;
     mark_phase("core_patches", &mut phase_started);
     // 预防性处理：pnpm 在无 TTY 环境（dsh-market 等子进程）下重装/更新插件时，
     // 清理/重建 node_modules 会触发交互确认并因无 TTY 直接中止
