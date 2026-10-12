@@ -3,7 +3,7 @@ import type { Deferred } from './transport'
 import type { NativeAttachments, NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
 import { randomUUID } from 'node:crypto'
 import { nativeEnvironment } from '../utils/detection'
-import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeParts, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
+import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeRuns, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
 interface ClaudeBlock {
   type: string
@@ -255,8 +255,8 @@ class ClaudeSession implements NativeSession {
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Claude session was disposed')
     if (this.active)
       throw new NativeBridgeError('BRIDGE_BUSY', 'Claude native session already has an active run')
-    const parts = nativeParts(messages, this.attachments)
-    if (parts.length === 0)
+    const runs = nativeRuns(messages, this.attachments)
+    if (runs.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Claude native run requires a user message')
     const selection = options ? { ...options } : undefined
     const run: ClaudeRun = {
@@ -287,15 +287,15 @@ class ClaudeSession implements NativeSession {
         await this.applyOptions(selection, signal)
       signal.throwIfAborted()
       const content: Record<string, unknown>[] = []
-      for (const part of parts) {
-        if (part.length === 0 || part.some(piece => piece.type === 'text'))
-          content.push({ type: 'text', text: part.filter(piece => piece.type === 'text').map(piece => piece.text).join('') })
-        for (const image of part.filter(piece => piece.type === 'image')) {
-          const source = await this.attachments!.read(image.ref, signal)
-          if (source.base64 === undefined)
-            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'The official attachment store returned no readable image bytes')
-          content.push({ type: 'image', source: { type: 'base64', media_type: source.mediaType, data: source.base64 } })
+      for (const run of runs.flat()) {
+        if (run.type === 'text') {
+          content.push({ type: 'text', text: run.text })
+          continue
         }
+        const source = await this.attachments!.read(run.ref, signal)
+        if (source.base64 === undefined)
+          throw new NativeBridgeError('BRIDGE_PROTOCOL', 'The official attachment store returned no readable image bytes')
+        content.push({ type: 'image', source: { type: 'base64', media_type: source.mediaType, data: source.base64 } })
       }
       signal.throwIfAborted()
       run.submitted = true

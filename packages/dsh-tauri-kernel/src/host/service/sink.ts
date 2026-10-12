@@ -337,8 +337,15 @@ export const sink = defineService({
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
     if (!official)
       return next()
-    expectedTool(official.state, exec)
-    return { kind: 'accept' }
+    try {
+      expectedTool(official.state, exec)
+      return { kind: 'accept' }
+    }
+    catch (error) {
+      official.state.controller.abort(error)
+      await official.state.task
+      throw error
+    }
   },
 
   commitTool(value: Session, event: SessionEvent): void {

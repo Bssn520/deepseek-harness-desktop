@@ -1,7 +1,7 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
 import type { NativeAttachments, NativeCommand, NativeContent, NativeImageRef, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
-import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeParts, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
+import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeRuns, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
 const INITIALIZATION = {
   clientInfo: { name: 'dsh-tauri-kernel', title: 'DSH native session bridge', version: '1.0.0' },
@@ -335,8 +335,8 @@ class CodexSession implements NativeSession {
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Codex session was disposed')
     if (this.active)
       throw new NativeBridgeError('BRIDGE_BUSY', 'Codex native session already has an active turn')
-    const parts = nativeParts(messages, this.attachments)
-    if (parts.length === 0)
+    const runs = nativeRuns(messages, this.attachments)
+    if (runs.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Codex native turn requires a user message')
     const selection = options ? { ...options } : undefined
     const turn: CodexTurn = {
@@ -361,11 +361,12 @@ class CodexSession implements NativeSession {
     try {
       const overrides = selection ? await this.turnOptions(selection, signal) : {}
       const input: Record<string, unknown>[] = []
-      for (const part of parts) {
-        if (part.length === 0 || part.some(piece => piece.type === 'text'))
-          input.push({ type: 'text', text: part.filter(piece => piece.type === 'text').map(piece => piece.text).join(''), text_elements: [] })
-        for (const image of part.filter(piece => piece.type === 'image'))
-          input.push(await this.imageInput(image.ref, signal))
+      for (const run of runs.flat()) {
+        if (run.type === 'text') {
+          input.push({ type: 'text', text: run.text, text_elements: [] })
+          continue
+        }
+        input.push(await this.imageInput(run.ref, signal))
       }
       signal.throwIfAborted()
       turn.baseline = new Set((await this.listTerminals(signal)).map(terminal => terminal.processId))

@@ -960,6 +960,25 @@ describe('claude native stream-json control contract', () => {
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the official text and image order in one mixed native prompt', async () => {
+    const fixture = claudeProcess()
+    const attachments: NativeAttachments = { path: () => undefined, read: vi.fn(async () => ({ mediaType: 'image/png', base64: 'Zm FrZQ==' })) }
+    const session = await open(null, createSink(), undefined, attachments)
+    const mixed = createUserMessage({ source: { kind: 'user' }, content: [
+      { type: 'text', text: 'before ' },
+      { type: 'image', attachment: { id: 'image-1', mediaType: 'image/png', bytes: 3 } as never },
+      { type: 'text', text: ' after' },
+    ] })
+    const submitted = session.submit([mixed], new AbortController().signal)
+    result(fixture, session.id)
+    await submitted
+    expect(fixture.frames.filter(frame => frame.type === 'user').flatMap(frame => (frame.message as Frame).content as Frame[])).toEqual([
+      { type: 'text', text: 'before ' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'Zm FrZQ==' } },
+      { type: 'text', text: ' after' },
+    ])
+  })
+
   it('forwards an official image as an inline base64 content block', async () => {
     const fixture = claudeProcess()
     const attachments: NativeAttachments = { path: () => undefined, read: vi.fn(async () => ({ mediaType: 'image/png', base64: 'Zm FrZQ==' })) }

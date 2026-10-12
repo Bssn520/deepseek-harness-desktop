@@ -1084,6 +1084,29 @@ describe('codex native app-server contract', () => {
     expect(fixture.frames.some(frame => frame.method === 'turn/interrupt')).toBe(false)
   })
 
+  it('keeps the official text and image order in one mixed native prompt', async () => {
+    const { fixture } = codexProcess()
+    const attachments: NativeAttachments = { path: () => 'C:/fixture/native.png', read: vi.fn() }
+    const session = await open(null, createSink(), undefined, attachments)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const mixed = createUserMessage({ source: { kind: 'user' }, content: [
+      { type: 'text', text: 'before ' },
+      { type: 'image', attachment: { id: 'image-1', mediaType: 'image/png', bytes: 3 } as never },
+      { type: 'text', text: ' after' },
+    ] })
+    const submitted = session.submit([mixed], new AbortController().signal)
+    expect((await started).params).toEqual({
+      threadId: 'thread-1',
+      input: [
+        { type: 'text', text: 'before ', text_elements: [] },
+        { type: 'localImage', path: 'C:/fixture/native.png' },
+        { type: 'text', text: ' after', text_elements: [] },
+      ],
+    })
+    completed(fixture)
+    await submitted
+  })
+
   it('forwards an official image as native input instead of rejecting the prompt', async () => {
     const { fixture } = codexProcess()
     const attachments: NativeAttachments = { path: () => 'C:/fixture/native.png', read: vi.fn() }

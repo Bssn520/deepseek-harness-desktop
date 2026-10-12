@@ -39,25 +39,39 @@ export function stringField(value: Record<string, unknown>, key: string): string
 }
 
 /** One ordered piece of an official user message handed to a native kernel. */
-export type NativePart = { type: 'text', text: string } | { type: 'image', ref: NativeImageRef }
+export type NativeRun = { type: 'text', text: string } | { type: 'image', ref: NativeImageRef }
 
 /**
- * Split official user content into ordered native parts. Text passes through;
- * an image keeps its durable reference so each kernel resolves the host path or
- * the verified bytes it needs. Content no native kernel accepts fails closed
- * rather than submitting a partial prompt.
+ * Split official user content into ordered native runs, preserving the model's
+ * original text/image interleaving. Adjacent text merges into one run, an image
+ * keeps its durable reference so each kernel resolves the host path or the
+ * verified bytes it needs, and a message with no blocks keeps one empty text
+ * run. Content no native kernel accepts fails closed rather than submitting a
+ * partial prompt.
  * @param messages - the admitted official user messages.
  * @param attachments - official attachment access, absent without an image provider.
- * @returns one ordered part list per message.
+ * @returns one ordered run list per message.
  */
-export function nativeParts(messages: readonly UserMessage[], attachments: NativeAttachments | undefined): NativePart[][] {
-  return messages.map(message => message.content.map((block) => {
-    if (block.type === 'text')
-      return { type: 'text', text: block.text } as const
-    if (block.type === 'image' && attachments !== undefined)
-      return { type: 'image', ref: block.attachment } as const
-    throw new NativeBridgeError('BRIDGE_UNSUPPORTED_CONTENT', `Native bridge does not yet support user content: ${block.type}`)
-  }))
+export function nativeRuns(messages: readonly UserMessage[], attachments: NativeAttachments | undefined): NativeRun[][] {
+  return messages.map((message) => {
+    const runs: NativeRun[] = []
+    for (const block of message.content) {
+      if (block.type === 'text') {
+        const last = runs.at(-1)
+        if (last?.type === 'text')
+          runs[runs.length - 1] = { type: 'text', text: last.text + block.text }
+        else
+          runs.push({ type: 'text', text: block.text })
+        continue
+      }
+      if (block.type === 'image' && attachments !== undefined) {
+        runs.push({ type: 'image', ref: block.attachment })
+        continue
+      }
+      throw new NativeBridgeError('BRIDGE_UNSUPPORTED_CONTENT', `Native bridge does not yet support user content: ${block.type}`)
+    }
+    return runs.length === 0 ? [{ type: 'text', text: '' }] : runs
+  })
 }
 
 export interface Deferred<T> {
