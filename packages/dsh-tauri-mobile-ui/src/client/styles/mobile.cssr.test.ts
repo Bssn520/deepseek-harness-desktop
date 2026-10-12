@@ -191,6 +191,18 @@ describe('mobile conversation layout', () => {
     expect(rules).toHaveLength(1)
   })
 
+  it('hides the foreign blank-session dock fallback that lands on the topbar toggle', () => {
+    expect(declarations('[data-dsh-dock-fallback]')).toMatchObject({ display: 'none !important' })
+    const rules: unknown[] = []
+    root.walkRules('[data-dsh-dock-fallback]', (rule) => {
+      rules.push(rule)
+      expect(rule.parent?.type).toBe('atrule')
+      if (rule.parent?.type === 'atrule')
+        expect(rule.parent.params).toBe('(hover: none) and (any-pointer: coarse) and (any-hover: none)')
+    })
+    expect(rules).toHaveLength(1)
+  })
+
   it('overrides conversation scroll bottom padding to zero inside the mobile media query', () => {
     const declarations: unknown[] = []
     root.walkRules('[data-slot="main"] [data-conversation-scroll]', (rule) => {

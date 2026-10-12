@@ -39,6 +39,13 @@ export default c(`@media ${MOBILE_MEDIA_QUERIES.join(' and ')}`, [
   c('[data-slot="conversation.header"] [class$="_header"]', {
     display: 'none !important',
   }),
+  // 第三方插件（dsh-better-sidebar）的空白会话兜底入口 `[data-dsh-dock-fallback]` 是
+  // `position: fixed` 的：它按宿主会话头里「右侧栏角落控件」的 rect 对齐，而手机版顶栏已经
+  // 把那个会话头一并隐藏，锚点 rect 退化成 0×0 之后它会一路退到视口左上角（top/left 各 4px），
+  // 正好压在本顶栏的抽屉开关上；它另一处兜底位是右上角，也压着新建会话按钮。手机上没有容身处。
+  c('[data-dsh-dock-fallback]', {
+    display: 'none !important',
+  }),
   // 扩展面板内嵌的官方页头由 dsh-tauri-extension 自己排版（同一行左侧还有它叠放的闪光图标），
   // 这里叠加顶距会把标题压低、与图标错轴，因此只给主槽里独立成页的页头让位。
   c('[data-slot="main"] header[class*="_pageHead"]:not([data-dsh-extension-plugins] *)', {
