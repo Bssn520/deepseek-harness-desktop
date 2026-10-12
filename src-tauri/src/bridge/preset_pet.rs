@@ -5,12 +5,14 @@
 //! 当前激活 id 取到条目后直连远端素材播放（macOS 用 `uri.mac` / `ext.mac`
 //! 指向 HEVC-with-Alpha 的 `.mov` 素材：WKWebView 不认 VP9-alpha WebM）。
 //!
-//! 于是本模块只剩两件事，全部与「下载/解压/安装」无关：
-//! 1. 从资源清单取 `pets.built-in`；
-//! 2. 校验形状（id 安全 + 唯一、地址非空、kind 合法）后原样交给前端。
+//! 内置清单与用户登记的远端条目合并返回；store 只持久化资源地址与元信息。
 
 use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use tauri::AppHandle;
+use tauri_plugin_store::StoreExt;
+
+const REMOTE_PET_CATALOG_KEY: &str = "remote_pet_catalog";
 
 use crate::config::manifest::{self, PresetPetSpec};
 
@@ -27,9 +29,70 @@ pub(crate) fn safe_preset_id(id: &str) -> bool {
 pub fn read_preset_catalog(app: &AppHandle) -> Result<Vec<PresetPetSpec>, String> {
     let manifest = manifest::read(app)
         .ok_or_else(|| "PET_PRESET_CATALOG_MISSING: manifest.jsonc was not found".to_string())?;
-    let catalog = manifest.pets.built_in;
+    let store = app
+        .store(crate::config::store_dat_file_name())
+        .map_err(|error| format!("PET_REMOTE_STORE_FAILED: {error}"))?;
+    let mut catalog = manifest.pets.built_in;
+    catalog.extend(remote_catalog(store.get(REMOTE_PET_CATALOG_KEY))?);
     validate_catalog(&catalog)?;
     Ok(catalog)
+}
+
+fn remote_catalog(value: Option<serde_json::Value>) -> Result<Vec<PresetPetSpec>, String> {
+    let catalog: Vec<PresetPetSpec> = match value {
+        Some(value) => serde_json::from_value(value)
+            .map_err(|error| format!("PET_REMOTE_CATALOG_INVALID: {error}"))?,
+        None => Vec::new(),
+    };
+    validate_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+pub(super) fn register_remote_pet(
+    app: &AppHandle,
+    spec: PresetPetSpec,
+) -> Result<PresetPetSpec, String> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let catalog = read_preset_catalog(app)?;
+    ensure_new_pet(&catalog, &spec)?;
+    let store = app
+        .store(crate::config::store_dat_file_name())
+        .map_err(|error| format!("PET_REMOTE_STORE_FAILED: {error}"))?;
+    let previous = store.get(REMOTE_PET_CATALOG_KEY);
+    let mut registered = remote_catalog(previous.clone())?;
+    registered.push(spec.clone());
+    store.set(
+        REMOTE_PET_CATALOG_KEY,
+        serde_json::to_value(registered)
+            .map_err(|error| format!("PET_REMOTE_CATALOG_INVALID: {error}"))?,
+    );
+    if let Err(error) = store.save() {
+        if let Some(previous) = previous {
+            store.set(REMOTE_PET_CATALOG_KEY, previous);
+        } else {
+            store.delete(REMOTE_PET_CATALOG_KEY);
+        }
+        return Err(format!("PET_REMOTE_STORE_FAILED: {error}"));
+    }
+    Ok(spec)
+}
+
+fn ensure_new_pet(catalog: &[PresetPetSpec], spec: &PresetPetSpec) -> Result<(), String> {
+    validate_catalog(std::slice::from_ref(spec))?;
+    if catalog
+        .iter()
+        .any(|item| item.id == spec.id || item.config == spec.config)
+    {
+        return Err(format!(
+            "PET_ALREADY_IMPORTED: pet {} or repository is already registered",
+            spec.id
+        ));
+    }
+    Ok(())
 }
 
 fn validate_catalog(catalog: &[PresetPetSpec]) -> Result<(), String> {
@@ -80,6 +143,64 @@ pub fn list_preset_pets(app: AppHandle) -> Result<Vec<PresetPetSpec>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_catalog_roundtrip_preserves_urls_and_rejects_duplicate_id_or_repository() {
+        let spec: PresetPetSpec = serde_json::from_value(serde_json::json!({
+            "id": "remote", "name": "Remote", "kind": "dsh",
+            "config": "https://raw.githubusercontent.com/o/r/HEAD/config.jsonc",
+            "image": "https://raw.githubusercontent.com/o/r/HEAD/preview/preview.gif",
+            "uri": {"default": "https://raw.githubusercontent.com/o/r/HEAD/webm"},
+            "ext": {"default": "webm", "mac": "webm"}
+        }))
+        .unwrap();
+        let value = serde_json::to_value(vec![spec.clone()]).unwrap();
+        let catalog = remote_catalog(Some(value.clone())).unwrap();
+        assert_eq!(serde_json::to_value(&catalog).unwrap(), value);
+        assert_eq!(remote_catalog(None).unwrap().len(), 0);
+        assert!(ensure_new_pet(&catalog, &spec)
+            .unwrap_err()
+            .starts_with("PET_ALREADY_IMPORTED:"));
+        let mut renamed = spec.clone();
+        renamed.id = "renamed".into();
+        assert!(ensure_new_pet(&catalog, &renamed)
+            .unwrap_err()
+            .starts_with("PET_ALREADY_IMPORTED:"));
+        renamed.config = "https://raw.githubusercontent.com/o/other/HEAD/config.jsonc".into();
+        assert_eq!(ensure_new_pet(&catalog, &renamed), Ok(()));
+        assert!(remote_catalog(Some(serde_json::json!({})))
+            .unwrap_err()
+            .starts_with("PET_REMOTE_CATALOG_INVALID:"));
+    }
+
+    #[test]
+    fn remote_catalog_persists_in_an_isolated_store_without_config_content() {
+        let root = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let path = root.path().join("pets.json");
+        let store = app.store(&path).unwrap();
+        let catalog = serde_json::json!([{
+            "id": "remote", "name": "Remote", "kind": "dsh",
+            "config": "https://raw.githubusercontent.com/o/r/HEAD/config.jsonc",
+            "uri": {"default": "https://raw.githubusercontent.com/o/r/HEAD/webm"}
+        }]);
+        store.set(REMOTE_PET_CATALOG_KEY, catalog.clone());
+        store.save().unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(persisted[REMOTE_PET_CATALOG_KEY], catalog);
+        assert_eq!(
+            remote_catalog(Some(persisted[REMOTE_PET_CATALOG_KEY].clone())).unwrap()[0].id,
+            "remote"
+        );
+        assert!(persisted[REMOTE_PET_CATALOG_KEY][0]
+            .get("motions")
+            .is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     fn shipped_catalog() -> Vec<PresetPetSpec> {
         manifest::read_at(

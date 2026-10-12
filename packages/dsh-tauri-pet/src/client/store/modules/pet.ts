@@ -56,8 +56,8 @@ export const pet = defineStore({
     setForceXwayland(enabled: boolean): void {
       this.forceXwayland = enabled
     },
-    setChatPets(list: PetListItem[]): void {
-      this.chatPets = list
+    setPresetPets(list: PresetPetItem[]): void {
+      this.presetPets = list
     },
     setCodexPets(list: PetListItem[]): void {
       this.codexPets = list

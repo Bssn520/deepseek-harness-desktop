@@ -23,10 +23,11 @@ vi.mock('dsh-tauri-ui/client', () => ({
   Plus: () => null,
   Icon: () => null,
   Input: (props: InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
-  Modal: ({ open, title, children, footer, onClose, closeLabel }: { open: boolean, title: string, children: ReactNode, footer: ReactNode, onClose: () => void, closeLabel: string }) => open
+  Modal: ({ open, title, description, children, footer, onClose, closeLabel }: { open: boolean, title: string, description?: string, children: ReactNode, footer: ReactNode, onClose: () => void, closeLabel: string }) => open
     ? (
         <div role="dialog" aria-label={title}>
           <button onClick={onClose}>{closeLabel}</button>
+          <p>{description}</p>
           {children}
           {footer}
         </div>
@@ -311,6 +312,7 @@ describe('pet settings action boundaries', () => {
     const input = dialog.querySelector<HTMLInputElement>('input')!
     expect(input.id).toBe(dialog.querySelector('label')?.htmlFor)
     expect(input.hasAttribute('data-modal-autofocus')).toBe(true)
+    expect(dialog.textContent).toContain(locale.text('repositoryHint'))
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'https://github.com/owner/repo')
       input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -328,9 +330,17 @@ describe('pet settings action boundaries', () => {
     await click(button(locale.text('close')))
     expect(container.querySelector('[role="dialog"]')).toBe(dialog)
     await act(async () => {
+      store.pet.setPresetPets([
+        ...store.pet.$state.presetPets,
+        { id: 'owner/repo', name: 'Remote', image: 'https://raw.githubusercontent.com/owner/repo/main/cover.gif' },
+      ])
       pending.resolve({ ok: true })
     })
     expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(card('Remote').querySelector('img')?.getAttribute('src')).toBe('https://raw.githubusercontent.com/owner/repo/main/cover.gif')
+    expect(card('Remote').querySelector('button')?.textContent).toBe(locale.text('enable'))
+    expect(store.pet.status?.active_pet).toBe('chat')
+    expect(petService.enablePet).not.toHaveBeenCalled()
     expect(trigger.disabled).toBe(false)
     expect(petService.choosePet).not.toHaveBeenCalled()
     await click(button(locale.text('importRepository')))

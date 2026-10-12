@@ -190,8 +190,8 @@ export async function importPetRepository(input: { repository: string }): Promis
   if (!match || match[2] === '.' || match[2] === '..')
     return { ok: false, error: 'PET_REPOSITORY_INVALID' }
   return guard('import pet repository', async () => {
-    await invoke<PetListItem>(CMD_IMPORT_PET_REPOSITORY, { repository: `${match[1]}/${match[2]}` }, { timeoutMs: 360_000 })
-    store.pet.setChatPets(await invoke<PetListItem[]>(CMD_LIST_PETS, { source: 'chat' }))
+    await invoke<PresetPetItem>(CMD_IMPORT_PET_REPOSITORY, { repository: `${match[1]}/${match[2]}` })
+    store.pet.setPresetPets(await invoke<PresetPetItem[]>(CMD_LIST_PRESET_PETS))
     return { ok: true }
   })
 }

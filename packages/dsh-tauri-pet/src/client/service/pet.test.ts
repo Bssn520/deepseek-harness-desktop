@@ -169,16 +169,19 @@ describe('pet service native command contracts', () => {
     expect(store.pet.catalogLoaded).toBe(false)
   })
 
-  it.each(['owner/pet-repo', ' https://github.com/owner/pet-repo/ '])('repository import normalizes %s and refreshes only Chat without selecting', async (repository) => {
-    const chat = [{ id: 'chat:imported', name: 'Imported', source: 'chat' }]
+  it.each(['owner/pet-repo', ' https://github.com/owner/pet-repo/ '])('repository registration normalizes %s and refreshes remote presets without selecting or reloading Chat', async (repository) => {
+    const remote = { id: 'owner/pet-repo', name: 'Remote', image: 'https://raw.githubusercontent.com/owner/pet-repo/main/cover.gif', kind: 'dsh' as const }
+    const presets = [{ id: 'builtin', name: 'Built in' }, remote]
+    const chat = [{ id: 'chat:existing', name: 'Existing', source: 'chat' as const }]
+    store.pet.setCatalog({ presets: [presets[0]], chat, codex: [{ id: 'codex', name: 'Codex', source: 'codex' }] })
     store.pet.setStatus(status)
-    store.pet.setCodexPets([{ id: 'codex', name: 'Codex', source: 'codex' }])
-    invoke.mockResolvedValueOnce(chat[0]).mockResolvedValueOnce(chat)
+    invoke.mockResolvedValueOnce(remote).mockResolvedValueOnce(presets)
     expect(await importPetRepository({ repository })).toEqual({ ok: true })
     expect(invoke.mock.calls).toEqual([
-      ['import_pet_repository', { repository: 'owner/pet-repo' }, { timeoutMs: 360_000 }],
-      ['list_pets', { source: 'chat' }],
+      ['import_pet_repository', { repository: 'owner/pet-repo' }],
+      ['list_preset_pets'],
     ])
+    expect(store.pet.presetPets).toEqual(presets)
     expect(store.pet.chatPets).toEqual(chat)
     expect(store.pet.status).toEqual(status)
     expect(store.pet.codexPets).toEqual([{ id: 'codex', name: 'Codex', source: 'codex' }])
@@ -189,21 +192,21 @@ describe('pet service native command contracts', () => {
     expect(invoke).not.toHaveBeenCalled()
   })
 
-  it.each(['import_pet_repository', 'list_pets'])('repository failure at %s preserves Chat cache and selection', async (failingCommand) => {
+  it.each(['import_pet_repository', 'list_preset_pets'])('repository failure at %s preserves preset cache and selection', async (failingCommand) => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const chat = [{ id: 'chat:old', name: 'Old', source: 'chat' as const }]
-    store.pet.setChatPets(chat)
+    const presets = [{ id: 'builtin', name: 'Built in', image: 'https://example.com/cover.gif' }]
+    store.pet.setPresetPets(presets)
     store.pet.setStatus(status)
     invoke.mockImplementation(async (command) => {
       if (command === failingCommand)
         throw new Error('repository unavailable')
-      return { id: 'chat:new', name: 'New', source: 'chat' }
+      return { id: 'owner/repo', name: 'Remote' }
     })
     expect(await importPetRepository({ repository: 'owner/repo' })).toEqual({ ok: false, error: 'repository unavailable' })
     expect(invoke.mock.calls).toEqual(failingCommand === 'import_pet_repository'
-      ? [['import_pet_repository', { repository: 'owner/repo' }, { timeoutMs: 360_000 }]]
-      : [['import_pet_repository', { repository: 'owner/repo' }, { timeoutMs: 360_000 }], ['list_pets', { source: 'chat' }]])
-    expect(store.pet.chatPets).toEqual(chat)
+      ? [['import_pet_repository', { repository: 'owner/repo' }]]
+      : [['import_pet_repository', { repository: 'owner/repo' }], ['list_preset_pets']])
+    expect(store.pet.presetPets).toEqual(presets)
     expect(store.pet.status).toEqual(status)
   })
 

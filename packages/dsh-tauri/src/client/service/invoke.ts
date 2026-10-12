@@ -14,7 +14,7 @@ export const INVOKE_TIMEOUT_MS = 15000
 export function invoke<T>(
   cmd: string,
   args?: InvokeArgs,
-  options?: InvokeOptions,
+  _options?: InvokeOptions,
 ): Promise<T> {
   const nonce = getNonce()
   return new Promise<T>((resolve, reject) => {
@@ -47,7 +47,7 @@ export function invoke<T>(
       unlisten()
       settled = true
       reject(new Error(`NODE_NOT_ANSWERED: invoke ${cmd} timed out`))
-    }, options?.timeoutMs ?? INVOKE_TIMEOUT_MS)
+    }, INVOKE_TIMEOUT_MS)
 
     const request: InvokeBridgeRequest = {
       type: TYPE_INVOKE,
