@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "DSH Bridge",
+    "name": "DSH Mobile",
     "slug": "dsh-bridge",
     "version": "0.23.1",
     "scheme": "dshbridge",
@@ -29,7 +29,7 @@
         "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "DSH Bridge 使用本地网络发现并连接您电脑上的 DSH 服务。",
+        "NSLocalNetworkUsageDescription": "DSH Mobile 使用本地网络发现并连接您电脑上的 DSH 服务。",
         "UISupportedInterfaceOrientations~ipad": [
           "UIInterfaceOrientationPortrait",
           "UIInterfaceOrientationPortraitUpsideDown",
@@ -64,7 +64,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "允许 DSH Bridge 使用相机扫描连接二维码。",
+          "cameraPermission": "允许 DSH Mobile 使用相机扫描连接二维码。",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }

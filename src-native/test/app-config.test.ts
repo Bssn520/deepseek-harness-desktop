@@ -14,6 +14,9 @@ describe('public Expo configuration packaged by expo-constants', () => {
 
     expect(notice).toBe(readFileSync(resolve(projectRoot, 'THIRD_PARTY_NOTICES.md'), 'utf8'))
     expect(String(notice)).not.toBe('')
+    expect(exp.name).toBe('DSH Mobile')
+    expect(exp.slug).toBe('dsh-bridge')
+    expect(exp.scheme).toBe('dshbridge')
     expect(exp.version).toBe(packageVersion)
     expect(exp.android?.package).toBe('com.dshtauri.dshbridge')
     expect(Number.isInteger(exp.android?.versionCode)).toBe(true)
@@ -33,9 +36,9 @@ describe('public Expo configuration packaged by expo-constants', () => {
       'UIInterfaceOrientationLandscapeRight',
     ])
     expect(getConfig(projectRoot, { skipSDKVersionRequirement: true }).exp.ios?.config?.usesNonExemptEncryption).toBe(false)
-    expect(exp.ios?.infoPlist?.NSLocalNetworkUsageDescription).toBe('DSH Bridge 使用本地网络发现并连接您电脑上的 DSH 服务。')
+    expect(exp.ios?.infoPlist?.NSLocalNetworkUsageDescription).toBe('DSH Mobile 使用本地网络发现并连接您电脑上的 DSH 服务。')
     expect(exp.plugins).toContainEqual(['expo-camera', {
-      cameraPermission: '允许 DSH Bridge 使用相机扫描连接二维码。',
+      cameraPermission: '允许 DSH Mobile 使用相机扫描连接二维码。',
       microphonePermission: false,
       recordAudioAndroid: false,
     }])

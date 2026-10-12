@@ -1,5 +1,5 @@
 {
-  "app.name": "DSH Bridge",
+  "app.name": "DSH Mobile",
   "common.cancel": "Cancel",
   "connection.scanning": "Scanning LAN ports…",
   "connection.checkingHistory": "Looking for an available connection",
@@ -39,8 +39,8 @@
   "connection.storageFailed": "Cannot read or save connection records. Check the device storage permission and free space.",
   "scan.scanQr": "Scan QR code",
   "scan.closeScanner": "Close scanner",
-  "scan.cameraTitle": "Scan to connect to DSH Bridge",
-  "scan.cameraHint": "Scan the connection QR code shown by the desktop app or DSH Bridge",
+  "scan.cameraTitle": "Scan to connect to DSH Mobile",
+  "scan.cameraHint": "Scan the connection QR code shown by the desktop app or DSH Mobile",
   "scan.cameraPermission": "Camera permission is required to scan a connection QR code.",
   "scan.allowCamera": "Allow camera",
   "scan.openSettings": "Open system settings",

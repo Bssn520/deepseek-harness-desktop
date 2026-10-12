@@ -376,7 +376,7 @@ describe('rendered Home scanning and idle actions', () => {
     await mount()
 
     const logos = root().findAll(node => String(node.type) === 'Svg')
-    expect(logos.map(node => node.props.accessibilityLabel)).toEqual(['DSH Bridge', 'DeepSeek', 'Harness'])
+    expect(logos.map(node => node.props.accessibilityLabel)).toEqual(['DSH Mobile', 'DeepSeek', 'Harness'])
     expect(logos.map(node => node.props.viewBox)).toEqual(['0 0 23.16 17.04', '26 4.5 96 17.5', '129.348 5.5 52 14'])
     const brand = root().find(node => String(node.type) === 'View' && node.props.className === 'items-center gap-3')
     expect(brand.findAll(node => String(node.type) === 'Svg')).toEqual(logos)
@@ -397,7 +397,7 @@ describe('rendered Home scanning and idle actions', () => {
     })
 
     const idleLogos = root().findAll(node => String(node.type) === 'Svg')
-    expect(idleLogos.map(node => node.props.accessibilityLabel)).toEqual(['DSH Bridge', 'DeepSeek', 'Harness'])
+    expect(idleLogos.map(node => node.props.accessibilityLabel)).toEqual(['DSH Mobile', 'DeepSeek', 'Harness'])
     expect(idleLogos[0]!.find(node => String(node.type) === 'SvgPath').props.fill).toBe('#f9fafb')
     expect(idleLogos[1]!.findAll(node => String(node.type) === 'SvgPath').every(node => node.props.fill === '#f9fafb')).toBe(true)
     expect(idleLogos[2]!.findAll(node => String(node.type) === 'SvgPath').every(node => node.props.fill === '#151517')).toBe(true)
@@ -406,7 +406,7 @@ describe('rendered Home scanning and idle actions', () => {
       runtime.connectAddress(alpha)
     })
 
-    expect(root().findAll(node => String(node.type) === 'Svg').map(node => node.props.accessibilityLabel)).toEqual(['DSH Bridge', 'DeepSeek', 'Harness'])
+    expect(root().findAll(node => String(node.type) === 'Svg').map(node => node.props.accessibilityLabel)).toEqual(['DSH Mobile', 'DeepSeek', 'Harness'])
     expect(texts()).toContain('连接中…')
     expect(texts()).not.toContain('寻找可用连接')
     expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })

@@ -267,7 +267,7 @@ describe('rendered scanner camera permissions', () => {
     await changeAppState('active')
     expect(native.refreshPermission).toHaveBeenCalledTimes(2)
     expect(camera().props.onBarcodeScanned).toBeTypeOf('function')
-    expect(texts()).toContain('扫描桌面端或 DSH Bridge 中的连接二维码')
+    expect(texts()).toContain('扫描桌面端或 DSH Mobile 中的连接二维码')
     expect(texts()).not.toContain('需要相机权限才能扫描连接二维码。')
   })
 

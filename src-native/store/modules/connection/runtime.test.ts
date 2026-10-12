@@ -1041,7 +1041,7 @@ function describeHealthRefresh() {
     expect(connection.current).toEqual(alpha)
     expect(boundary.notify).toHaveBeenCalledExactlyOnceWith({
       type: 'dsh://native-notification',
-      title: 'DSH Bridge',
+      title: 'DSH Mobile',
       body: hostOffline,
       tag: 'connection:http://10.0.0.20:4444',
       sessionId: '',

@@ -600,7 +600,7 @@ describe('rendered root entry selection', () => {
     expect(connection.stage).toBe('idle')
     expect(connection.notice).toBeNull()
     await press('扫码连接')
-    expect(texts()).toContain('扫码连接 DSH Bridge')
+    expect(texts()).toContain('扫码连接 DSH Mobile')
     expect(connection.current).toBeNull()
     expect(connection.history).toEqual(snapshot.history)
     expect(native.getIpAddressAsync).not.toHaveBeenCalled()
@@ -616,7 +616,7 @@ describe('rendered root notification focus', () => {
     native.getLastNotificationResponseAsync.mockResolvedValue(response('http://bridge.local:3080', 'cold-session'))
     native.path = '/scan'
     await mount()
-    expect(texts()).toContain('扫码连接 DSH Bridge')
+    expect(texts()).toContain('扫码连接 DSH Mobile')
     expect(connection.pendingFocus).toEqual({ origin: 'http://bridge.local:3080', sessionId: 'cold-session', title: 'Answer complete', tag: 'tag-cold-session' })
     expect(native.dismissTo).not.toHaveBeenCalled()
     expect(native.fetch).not.toHaveBeenCalled()
@@ -634,7 +634,7 @@ describe('rendered root notification focus', () => {
     })
 
     expect(native.dismissTo).toHaveBeenCalledWith('/')
-    expect(texts()).not.toContain('扫码连接 DSH Bridge')
+    expect(texts()).not.toContain('扫码连接 DSH Mobile')
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(0)
     expect(drawer().props.open).toBe(false)
     expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/tasks?auth=cold-secret' })
@@ -659,14 +659,14 @@ describe('rendered root notification focus', () => {
       drawer().props.onOpen()
     })
     await press('扫码连接')
-    expect(texts()).toContain('扫码连接 DSH Bridge')
+    expect(texts()).toContain('扫码连接 DSH Mobile')
     const oldInstance = await webViewInstance()
 
     await emitResponse(response('http://bridge.local:3080', 'warm-session'))
 
     expect(native.dismissTo).toHaveBeenCalledExactlyOnceWith('/')
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(0)
-    expect(texts()).not.toContain('扫码连接 DSH Bridge')
+    expect(texts()).not.toContain('扫码连接 DSH Mobile')
     expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/tasks?auth=saved-secret' })
     expect(await webViewInstance()).not.toBe(oldInstance)
     expect(texts()).toContain('连接中…')
@@ -698,7 +698,7 @@ describe('rendered root notification focus', () => {
 
     expect(native.dismissTo).toHaveBeenCalledExactlyOnceWith('/')
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(0)
-    expect(texts()).not.toContain('扫码连接 DSH Bridge')
+    expect(texts()).not.toContain('扫码连接 DSH Mobile')
     expect(texts()).not.toContain('连接中…')
     expect(drawer().props.open).toBe(false)
     expect(await webViewInstance()).toBe(instance)
@@ -745,7 +745,7 @@ describe('rendered root notification focus', () => {
 
     expect(connection.pendingFocus).toBeNull()
     expect(native.dismissTo).not.toHaveBeenCalled()
-    expect(texts()).toContain('扫码连接 DSH Bridge')
+    expect(texts()).toContain('扫码连接 DSH Mobile')
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(1)
     expect(webView().props.source).toEqual({ uri: 'https://second.local/workspaces' })
     expect(await webViewInstance()).toBe(instance)
