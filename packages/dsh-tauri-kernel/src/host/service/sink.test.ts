@@ -273,6 +273,86 @@ describe('real official cross-step native sink', () => {
     expect(runtime.exchanges.size).toBe(0)
   }, 10_000)
 
+  it('keeps a native command turn alive when DSH replaces a committed long result in model history', async () => {
+    const full = `${'H'.repeat(4_096)}${'M'.repeat(4_096)}${'T'.repeat(1_024)}`
+    const pruned = `${'H'.repeat(4_096)}\n\n[... tool result middle pruned ...]\n\n${'T'.repeat(1_024)}`
+    let current!: OfficialSink
+    context.on('agent/pre-step', async (payload, next) => {
+      if (payload.agent === agent && payload.step === 2) {
+        current = runtime.exchanges.get(agent.id)!
+        const original = toolResults()[0]!
+        agent.session.append('tool/result', {
+          ...original.data,
+          message: { ...original.data.message, content: [{ type: 'text', text: pruned }] },
+        }, {
+          surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
+          sourceEventSeqs: [original.seq],
+        })
+      }
+      return next()
+    })
+    nativeScript = async (native) => {
+      nativeCall(native, 'long-command', '{}', 'commandExecution')
+      native.toolEnd('long-command', full)
+      native.assistant('final', [{ type: 'text', text: 'continued after history pruning' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(current.state.failure).toBeUndefined()
+    expect(current.state.tools.get('long-command')!.committed).toBe(true)
+    const [original, replacement] = toolResults()
+    expect(original!.surfaceOp).toBe('append')
+    expect(original!.data.message.content).toEqual([{ type: 'text', text: full }])
+    expect(replacement).toMatchObject({ surfaceOp: { op: 'replace', startSeq: original!.seq, endSeq: original!.seq }, sourceEventSeqs: [original!.seq], data: { turn: 1, step: 1, message: { toolCallId: 'long-command', content: [{ type: 'text', text: pruned }] } } })
+    expect(agent.session.deriveMessages().filter(message => message.role === 'tool').map(message => message.content)).toEqual([[{ type: 'text', text: pruned }]])
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(assistants()[1]!.data.message.content).toEqual([{ type: 'text', text: 'continued after history pruning' }])
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it.each(['content', 'isError', 'meta'] as const)('rejects a first official native result append with changed %s', async (field) => {
+    const current = await exchange()
+    nativeCall(current.state.native, 'first-append')
+    current.state.native.toolEnd('first-append', 'complete native output')
+    await execute('first-append', current.state.signal)
+    current.state.tools.get('first-append')!.step = 1
+    const message = llmModule.createToolResultMessage({ callId: llmModule.ToolCallId('first-append'), isError: field === 'isError', content: [{ type: 'text', text: field === 'content' ? 'pruned output' : 'complete native output' }] })
+    agent.session.append('tool/result', { turn: 1, step: 1, message, ...(field === 'meta' ? { meta: { rewritten: true } } : {}) }, { surfaceOp: 'append' })
+    expect(current.state.tools.get('first-append')!.committed).toBe(false)
+    expect(current.state.signal.aborted).toBe(true)
+    expect(current.state.failure).toMatchObject({ message: 'BRIDGE_TOOL_RESULT_REJECTED: 官方日志没有完整保留原生工具结果。' })
+  })
+
+  it.each(['identical', 'changed'] as const)('rejects a genuinely duplicated official native result append with %s content', async (duplicate) => {
+    const current = await exchange()
+    nativeCall(current.state.native, 'duplicate-append')
+    current.state.native.toolEnd('duplicate-append', 'complete native output')
+    await execute('duplicate-append', current.state.signal)
+    current.state.tools.get('duplicate-append')!.step = 1
+    const message = llmModule.createToolResultMessage({ callId: llmModule.ToolCallId('duplicate-append'), isError: false, content: [{ type: 'text', text: 'complete native output' }] })
+    agent.session.append('tool/result', { turn: 1, step: 1, message }, { surfaceOp: 'append' })
+    expect(current.state.tools.get('duplicate-append')!.committed).toBe(true)
+    expect(current.state.signal.aborted).toBe(false)
+    agent.session.append('tool/result', { turn: 1, step: 1, message: { ...message, content: [{ type: 'text', text: duplicate === 'identical' ? 'complete native output' : 'changed output' }] } }, { surfaceOp: 'append' })
+    expect(current.state.signal.aborted).toBe(true)
+    expect(current.state.failure).toMatchObject({ message: 'BRIDGE_TOOL_RESULT_REJECTED: 官方日志没有完整保留原生工具结果。' })
+  })
+
+  it('identifies only unsettled native tools without exposing their arguments or inventing results', async () => {
+    nativeScript = async (native) => {
+      nativeCall(native, 'finished-native', '{}', 'commandExecution')
+      native.toolEnd('finished-native', 'native result')
+      nativeCall(native, 'missing-native', '{"code":"private user input"}', 'mcp::node_repl/js')
+      native.assistant('final', [{ type: 'text', text: 'native done' }])
+    }
+    await runTurn()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({ message: 'BRIDGE_TOOL_UNSETTLED: 原生内核没有确认全部工具结果。未确认工具：[{"id":"missing-native","name":"mcp::node_repl/js"}]' })
+    expect(toolResults().some(event => event.data.message.toolCallId === 'missing-native')).toBe(false)
+    expect(agent.status).toBe('idle')
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
   it('preserves native error text through the real tool pipeline and official result log', async () => {
     const inherited = inheritedTool()
     nativeScript = async (native) => {

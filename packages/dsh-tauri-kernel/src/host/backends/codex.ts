@@ -1,6 +1,6 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
-import type { NativeAttachments, NativeCommand, NativeContent, NativeImageRef, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
+import type { NativeAttachments, NativeCommand, NativeContent, NativeImageRef, NativeModelCatalog, NativeModelInfo, NativePermission, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
 import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeRuns, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
 const INITIALIZATION = {
@@ -166,9 +166,12 @@ class CodexSession implements NativeSession {
       await this.request('initialize', INITIALIZATION, signal)
       this.transport.write({ method: 'initialized', params: {} })
       const forkFrom = options?.forkFrom
+      const permission = options?.permission
       const response = record(await this.request(forkFrom ? 'thread/fork' : storedId === null ? 'thread/start' : 'thread/resume', {
         ...forkFrom ? { threadId: forkFrom } : storedId === null ? {} : { threadId: storedId },
         cwd,
+        ...permission?.approval === undefined ? {} : { approvalPolicy: permission.approval === 'never' ? 'never' : 'on-request' },
+        ...permission?.sandbox === undefined ? {} : { sandbox: permission.sandbox },
       }, signal))
       const id = stringField(record(response.thread), 'id')
       if (storedId !== null && id !== storedId)
@@ -347,7 +350,7 @@ class CodexSession implements NativeSession {
     return { ...options.model !== null || modelChanged ? { model } : {}, ...effort === null ? {} : { effort } }
   }
 
-  async submit(messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions): Promise<void> {
+  async submit(messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions, permission?: NativePermission): Promise<void> {
     signal.throwIfAborted()
     if (this.disposed || this.failure)
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Codex session was disposed')
@@ -358,6 +361,16 @@ class CodexSession implements NativeSession {
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Codex native turn requires a user message')
     this.changedFiles.clear()
     const selection = options ? { ...options } : undefined
+    const policy = {
+      ...permission?.approval === undefined ? {} : { approvalPolicy: permission.approval === 'never' ? 'never' : 'on-request' },
+      ...permission?.sandbox === undefined
+        ? {}
+        : { sandboxPolicy: {
+            'read-only': { type: 'readOnly', networkAccess: false },
+            'workspace-write': { type: 'workspaceWrite', writableRoots: [this.cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+            'danger-full-access': { type: 'dangerFullAccess' },
+          }[permission.sandbox] },
+    }
     const turn: CodexTurn = {
       result: deferred<void>(),
       signal,
@@ -392,7 +405,7 @@ class CodexSession implements NativeSession {
       signal.throwIfAborted()
       turn.submitted = true
       // turn/started may precede the response; retain its id even during cancel.
-      const response = record(await this.request('turn/start', { threadId: this.id, input, ...overrides }))
+      const response = record(await this.request('turn/start', { threadId: this.id, input, ...overrides, ...policy }))
       if (selection) {
         this.appliedOptions = selection
         if (overrides.model !== undefined || overrides.effort !== undefined)
@@ -582,6 +595,14 @@ class CodexSession implements NativeSession {
       case 'turn/started':
         return
       case 'turn/completed': {
+        if (Array.isArray(nativeTurn!.items)) {
+          for (const value of nativeTurn!.items) {
+            const item = record(value)
+            const tool = turn.tools.get(stringField(item, 'id'))
+            if (tool && !tool.ended && (item.status === 'completed' || item.status === 'failed' || item.status === 'declined'))
+              this.item(turn, item, true)
+          }
+        }
         const status = stringField(nativeTurn!, 'status')
         if (status === 'interrupted' && !turn.signal.aborted)
           turn.terminalError = new NativeBridgeError('BRIDGE_NATIVE_INTERRUPTED', 'Codex interrupted the native turn')
@@ -615,7 +636,8 @@ class CodexSession implements NativeSession {
           this.sink.thinking(id, delta)
         return
       }
-      case 'item/commandExecution/outputDelta': {
+      case 'item/commandExecution/outputDelta':
+      case 'item/fileChange/outputDelta': {
         const tool = turn.tools.get(stringField(params, 'itemId'))
         if (tool)
           tool.output += typeof params.delta === 'string' ? params.delta : ''

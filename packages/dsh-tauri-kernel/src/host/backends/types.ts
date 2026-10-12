@@ -3,8 +3,14 @@ import type { NativeModelCatalog, NativeTurnOptions } from '../../shared/native-
 
 export type { NativeModelCatalog, NativeModelInfo, NativeTurnOptions } from '../../shared/native-model'
 
+export interface NativePermission {
+  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  approval?: 'ask' | 'never'
+}
+
 export interface NativeSessionOpenOptions {
   forkFrom?: string
+  permission?: NativePermission
 }
 
 export interface NativeCommand {
@@ -64,6 +70,6 @@ export interface NativeSink {
 export interface NativeSession {
   readonly id: string
   models?: (signal: AbortSignal) => Promise<NativeModelCatalog>
-  submit: (messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions) => Promise<void>
+  submit: (messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions, permission?: NativePermission) => Promise<void>
   dispose: () => Promise<void>
 }

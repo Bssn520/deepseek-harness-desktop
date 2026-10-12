@@ -1,7 +1,8 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
-import type { NativeAttachments, NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
+import type { NativeAttachments, NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativePermission, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
 import { randomUUID } from 'node:crypto'
+import { stripVTControlCharacters } from 'node:util'
 import { nativeEnvironment } from '../utils/detection'
 import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeRuns, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
@@ -97,10 +98,12 @@ class ClaudeSession implements NativeSession {
   private defaultsPending: boolean
   private catalog?: NativeModelCatalog
   private appliedOptions: NativeTurnOptions = { model: null, reasoningEffort: null }
+  private permission?: NativePermission
 
   constructor(command: NativeCommand, cwd: string, storedId: string | null, private readonly sink: NativeSink, private readonly options?: NativeSessionOpenOptions, private readonly attachments?: NativeAttachments) {
     this.nativeId = options?.forkFrom ? '' : storedId ?? randomUUID()
     this.defaultsPending = storedId !== null || options?.forkFrom !== undefined
+    this.permission = options?.permission ? { ...options.permission } : undefined
     this.transport = new JsonLinesProcess({ ...command, env: { ...(command.env ?? nativeEnvironment()), CLAUDE_CODE_SDK_READS_SESSION_STATE: '1' } }, [
       '--print',
       '--verbose',
@@ -111,6 +114,10 @@ class ClaudeSession implements NativeSession {
       '--include-partial-messages',
       '--permission-prompt-tool',
       'stdio',
+      '--allow-dangerously-skip-permissions',
+      '--settings',
+      '{"useAutoModeDuringPlan":false}',
+      ...options?.permission ? ['--permission-mode', 'default'] : [],
       ...options?.forkFrom ? [`--resume=${options.forkFrom}`, '--fork-session'] : [storedId === null ? `--session-id=${this.id}` : `--resume=${this.id}`],
     ], cwd)
     this.requests = new PendingRequests(value => this.transport.write(value))
@@ -249,7 +256,25 @@ class ClaudeSession implements NativeSession {
     }
   }
 
-  async submit(messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions): Promise<void> {
+  private async applyPermission(permission: NativePermission, signal: AbortSignal): Promise<void> {
+    // ponytail: native modes do not isolate preapproved tools or existing tasks; use an OS sandbox for hard boundaries.
+    const mode = permission.sandbox === 'read-only'
+      ? 'plan'
+      : permission.sandbox === 'workspace-write'
+        ? 'acceptEdits'
+        : permission.approval === 'never' ? permission.sandbox === 'danger-full-access' ? 'bypassPermissions' : 'dontAsk' : 'default'
+    try {
+      const response = record(await this.control({ subtype: 'set_permission_mode', mode }, signal))
+      if (response.mode !== undefined && response.mode !== mode)
+        throw new NativeBridgeError('BRIDGE_PERMISSION_MISMATCH', 'Claude 未确认请求的权限模式，已阻止本轮运行。')
+    }
+    catch (error) {
+      this.transport.fail(errorFrom(error))
+      throw error
+    }
+  }
+
+  async submit(messages: readonly UserMessage[], signal: AbortSignal, options?: NativeTurnOptions, permission?: NativePermission): Promise<void> {
     signal.throwIfAborted()
     if (this.disposed || this.failure)
       throw this.failure ?? new NativeBridgeError('BRIDGE_PROCESS_CLOSED', 'Claude session was disposed')
@@ -259,6 +284,7 @@ class ClaudeSession implements NativeSession {
     if (runs.length === 0)
       throw new NativeBridgeError('BRIDGE_EMPTY_INPUT', 'Claude native run requires a user message')
     const selection = options ? { ...options } : undefined
+    const policy = permission ? { ...permission } : this.permission
     const run: ClaudeRun = {
       result: deferred<void>(),
       signal,
@@ -283,6 +309,10 @@ class ClaudeSession implements NativeSession {
     }
     signal.addEventListener('abort', aborted, { once: true })
     try {
+      if (policy) {
+        await this.applyPermission(policy, signal)
+        this.permission = policy
+      }
       if (selection && (this.defaultsPending || selection.model !== this.appliedOptions.model || selection.reasoningEffort !== this.appliedOptions.reasoningEffort))
         await this.applyOptions(selection, signal)
       signal.throwIfAborted()
@@ -675,11 +705,18 @@ class ClaudeSession implements NativeSession {
           if (!signal.aborted)
             response = { behavior: 'allow', updatedInput: { ...input, answers } }
         }
-        else {
+        else if (this.permission?.sandbox === 'read-only') {
+          response = { behavior: 'deny', message: '当前会话为只读；请先在权限菜单切换模式。' }
+        }
+        else if (this.permission?.approval !== 'never') {
           const allowed = await this.sink.approval(callId, {
             kind: tool === 'Bash' ? 'command' : ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool) ? 'file' : 'tool',
             title: typeof request.title === 'string' ? request.title : tool,
-            details: JSON.stringify({ tool, input, ...typeof request.description === 'string' ? { description: request.description } : {} }),
+            details: stripVTControlCharacters([
+              ...new Set([request.decision_reason, request.description, input.description].filter((value): value is string => typeof value === 'string' && value !== '')),
+              ...typeof request.blocked_path === 'string' ? [`blocked_path: ${request.blocked_path}`] : [],
+              ...Object.entries(input).filter(([key, value]) => key !== 'description' || typeof value !== 'string').map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}`),
+            ].join('\n\n')),
           }, signal)
           if (allowed && !signal.aborted)
             response = { behavior: 'allow', updatedInput: input }

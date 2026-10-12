@@ -21,7 +21,7 @@ import { sink } from './sink'
  * and must not abort a running native turn. Real user instructions stay absent
  * on purpose — steering a running native turn is still refused.
  */
-const ENVIRONMENT_SOURCES = new Set(['runtime-context', 'time-context', 'user-approval', 'working-directory', 'cordis-host-runner', 'ptc-mode'])
+const ENVIRONMENT_SOURCES = new Set(['runtime-context', 'time-context', 'user-approval', 'working-directory', 'cordis-host-runner', 'ptc-mode', 'skill-catalog'])
 
 export const adapter = defineService({
   async register(): Promise<() => void> {

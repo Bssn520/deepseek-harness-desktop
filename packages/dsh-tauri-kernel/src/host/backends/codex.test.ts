@@ -1,5 +1,5 @@
 import type { Frame } from './process.fixture'
-import type { NativeAttachments, NativeSession, NativeSessionOpenOptions } from './types'
+import type { NativeAttachments, NativePermission, NativeSession, NativeSessionOpenOptions } from './types'
 import { spawn } from 'node:child_process'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -116,6 +116,90 @@ describe('codex native app-server contract', () => {
     })
     expect(fixture.frames.map(frame => frame.method)).toEqual(['initialize', 'initialized', 'thread/start', 'thread/backgroundTerminals/list'])
     expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/start', params: { cwd: 'C:/fixture/workspace' } })
+  })
+
+  describe.each(['start', 'resume', 'fork'] as const)('thread/%s permissions', (mode) => {
+    it.each((['read-only', 'workspace-write', 'danger-full-access'] as const).flatMap(sandbox => (['ask', 'never'] as const).map(approval => ({ sandbox, approval }))))('sends SandboxMode $sandbox and approval $approval on the native wire', async (permission) => {
+      const { fixture } = codexProcess()
+      await open(mode === 'resume' ? 'thread-1' : null, createSink(), { ...mode === 'fork' ? { forkFrom: 'source-thread' } : {}, permission })
+      expect(fixture.frames[2]).toEqual({ id: 2, method: `thread/${mode}`, params: {
+        ...mode === 'start' ? {} : { threadId: mode === 'resume' ? 'thread-1' : 'source-thread' },
+        cwd: 'C:/fixture/workspace',
+        approvalPolicy: permission.approval === 'ask' ? 'on-request' : 'never',
+        sandbox: permission.sandbox,
+      } })
+    })
+  })
+
+  it.each(['start', 'resume', 'fork'] as const)('applies each permission switch to the next turn of the cached %s thread', async (mode) => {
+    const { fixture } = codexProcess()
+    const session = await open(mode === 'resume' ? 'thread-1' : null, createSink(), { ...mode === 'fork' ? { forkFrom: 'source-thread' } : {}, permission: { sandbox: 'read-only', approval: 'ask' } })
+    const permissions: { permission: NativePermission, approvalPolicy: string, sandboxPolicy: Frame }[] = [
+      { permission: { sandbox: 'read-only', approval: 'ask' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } },
+      { permission: { sandbox: 'danger-full-access', approval: 'never' }, approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } },
+      { permission: { sandbox: 'danger-full-access', approval: 'ask' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'dangerFullAccess' } },
+      { permission: { sandbox: 'workspace-write', approval: 'never' }, approvalPolicy: 'never', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['C:/fixture/workspace'], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+      { permission: { sandbox: 'workspace-write', approval: 'ask' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['C:/fixture/workspace'], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+      { permission: { sandbox: 'read-only', approval: 'never' }, approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false } },
+    ]
+    for (const { permission, approvalPolicy, sandboxPolicy } of permissions) {
+      const started = fixture.next(frame => frame.method === 'turn/start')
+      const submitted = session.submit([user()], new AbortController().signal, undefined, permission)
+      const request = await started
+      completed(fixture)
+      await submitted
+      expect(request.params).toEqual({ threadId: 'thread-1', input: [{ type: 'text', text: 'inspect the workspace', text_elements: [] }], approvalPolicy, sandboxPolicy })
+    }
+    expect(fixture.frames.filter(frame => frame.method === `thread/${mode}`)).toHaveLength(1)
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(permissions.length)
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(session.id).toBe('thread-1')
+  })
+
+  it.each([
+    { permission: { approval: 'never' } as NativePermission, policy: { approvalPolicy: 'never' } },
+    { permission: { sandbox: 'read-only' } as NativePermission, policy: { sandboxPolicy: { type: 'readOnly', networkAccess: false } } },
+  ])('leaves missing permission fields to the native defaults: $permission', async ({ permission, policy }) => {
+    const { fixture } = codexProcess()
+    const session = await open(null, createSink(), { permission })
+    expect(fixture.frames[2]?.params).toEqual({ cwd: 'C:/fixture/workspace', ...permission.approval ? { approvalPolicy: 'never' } : {}, ...permission.sandbox ? { sandbox: 'read-only' } : {} })
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal, undefined, permission)
+    const request = await started
+    completed(fixture)
+    await submitted
+    expect(request.params).toEqual({ threadId: 'thread-1', input: [{ type: 'text', text: 'inspect the workspace', text_elements: [] }], ...policy })
+  })
+
+  it('snapshots permission before waiting for native turn preparation', async () => {
+    const { fixture } = codexProcess()
+    const session = await open()
+    const permission: NativePermission = { sandbox: 'danger-full-access', approval: 'never' }
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal, undefined, permission)
+    permission.sandbox = 'read-only'
+    permission.approval = 'ask'
+    const request = await started
+    completed(fixture)
+    await submitted
+    expect(request.params).toEqual({ threadId: 'thread-1', input: [{ type: 'text', text: 'inspect the workspace', text_elements: [] }], approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } })
+  })
+
+  it('never autoapproves a native request under never plus read-only', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const permission: NativePermission = { sandbox: 'read-only', approval: 'never' }
+    const session = await open(null, sink, { permission })
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal, undefined, permission)
+    await started
+    const answered = fixture.next(frame => frame.id === 'readonly-approval')
+    fixture.send({ id: 'readonly-approval', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'write-outside', command: 'write outside workspace' } })
+    const response = await answered
+    completed(fixture)
+    await submitted
+    expect(response).toEqual({ id: 'readonly-approval', result: { decision: 'decline' } })
+    expect(sink.approval).toHaveBeenCalledOnce()
   })
 
   it('resumes exactly the stored native thread without starting a replacement', async () => {
@@ -813,6 +897,170 @@ describe('codex native app-server contract', () => {
     expect(sink.assistant.mock.calls).toEqual([['command-1:call', [{ type: 'tool-call', id: 'command-1', name: 'commandExecution', arguments: arguments_ }]]])
     expect(sink.toolStart.mock.calls).toEqual([['command-1', 'commandExecution', arguments_]])
     expect(sink.toolEnd.mock.calls).toEqual([['command-1', 'fatal: not a git repository', true]])
+  })
+
+  it.each(['completed', 'failed'])('preserves a native Node REPL MCP text-image-text result with status %s exactly once', async (status) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'node-repl-image', type: 'mcpToolCall', server: 'node_repl', tool: 'js', arguments: { code: 'await nodeRepl.emitImage(image)' }, status: 'inProgress', result: null, error: null }
+    const result = { content: [
+      { type: 'text', text: 'before image' },
+      { type: 'image', data: 'cG5nLWZpeHR1cmU=', mimeType: 'image/png' },
+      { type: 'text', text: 'after image' },
+    ], isError: status === 'failed' }
+    notify(fixture, 'item/started', { item })
+    notify(fixture, 'item/completed', { item: { ...item, status, result } })
+    notify(fixture, 'item/completed', { item: { ...item, status, result } })
+    completed(fixture)
+    await submitted
+    const arguments_ = '{"code":"await nodeRepl.emitImage(image)"}'
+    expect(sink.assistant.mock.calls).toEqual([['node-repl-image:call', [{ type: 'tool-call', id: 'node-repl-image', name: 'mcp::node_repl/js', arguments: arguments_ }]]])
+    expect(sink.toolStart.mock.calls).toEqual([['node-repl-image', 'mcp::node_repl/js', arguments_]])
+    expect(sink.toolEnd.mock.calls).toEqual([['node-repl-image', `{"content":[{"type":"text","text":"before image"},{"type":"image","data":"cG5nLWZpeHR1cmU=","mimeType":"image/png"},{"type":"text","text":"after image"}],"isError":${status === 'failed' ? 'true' : 'false'}}`, status === 'failed']])
+    expect(fixture.frames.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
+  })
+
+  it.each(['completed', 'failed', 'declined'])('settles an announced file change from native turn items with terminal status %s', async (status) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal, undefined, { sandbox: 'workspace-write', approval: 'ask' })
+    await started
+    const item = { id: 'edit-terminal', type: 'fileChange', status: 'inProgress', changes: [
+      { path: 'C:/fixture/workspace/probe.svg', kind: { type: 'add' }, diff: '<svg>probe</svg>\n' },
+      { path: 'C:/fixture/workspace/probe.txt', kind: { type: 'add' }, diff: 'native-capability-probe\n' },
+    ] }
+    notify(fixture, 'item/started', { item })
+    notify(fixture, 'item/started', { item })
+    fixture.send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+      { ...item, status },
+      { id: 'unannounced-history', type: 'fileChange', status: 'completed', changes: [] },
+    ], itemsView: 'full' } } })
+    await submitted
+    expect(sink.toolStart).toHaveBeenCalledOnce()
+    expect(sink.toolStart.mock.calls[0]?.slice(0, 2)).toEqual(['edit-terminal', 'fileChange'])
+    expect(sink.toolEnd.mock.calls).toEqual([['edit-terminal', '[{"path":"C:/fixture/workspace/probe.svg","kind":{"type":"add"},"diff":"<svg>probe</svg>\\n"},{"path":"C:/fixture/workspace/probe.txt","kind":{"type":"add"},"diff":"native-capability-probe\\n"}]', status !== 'completed']])
+    expect(sink.assistant).toHaveBeenCalledOnce()
+  })
+
+  it.each(['inProgress', 'unknown', undefined])('does not invent a file-change result from nonterminal turn items with status %s', async (status) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'edit-unsettled', type: 'fileChange', changes: [], status }
+    notify(fixture, 'item/started', { item })
+    fixture.send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [item], itemsView: 'summary' } } })
+    await submitted
+    expect(sink.toolStart).toHaveBeenCalledExactlyOnceWith('edit-unsettled', 'fileChange', '{"changes":[]}')
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it.each(['completed', 'failed', 'declined', undefined])('settles a completed file-change notification once with status %s', async (status) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'edit-completed', type: 'fileChange', changes: [], status }
+    notify(fixture, 'item/started', { item: { ...item, status: 'inProgress' } })
+    notify(fixture, 'item/completed', { item })
+    notify(fixture, 'item/completed', { item })
+    fixture.send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [{ ...item, status: 'failed' }], itemsView: 'full' } } })
+    await submitted
+    expect(sink.toolStart).toHaveBeenCalledOnce()
+    expect(sink.toolEnd.mock.calls).toEqual([['edit-completed', '[]', status === 'failed' || status === 'declined']])
+    expect(sink.assistant).toHaveBeenCalledOnce()
+  })
+
+  it('leaves an announced file change unsettled when the native turn contains no result', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    notify(fixture, 'item/started', { item: { id: 'edit-missing', type: 'fileChange', changes: [], status: 'inProgress' } })
+    completed(fixture)
+    await submitted
+    expect(sink.toolStart).toHaveBeenCalledExactlyOnceWith('edit-missing', 'fileChange', '{"changes":[]}')
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it.each(['thread', 'turn'])('ignores terminal file-change items from another native %s', async (scope) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'edit-current', type: 'fileChange', changes: [], status: 'inProgress' }
+    notify(fixture, 'item/started', { item })
+    fixture.send({ method: 'turn/completed', params: { threadId: scope === 'thread' ? 'other-thread' : 'thread-1', turn: { id: scope === 'turn' ? 'other-turn' : 'turn-1', status: 'completed', items: [{ ...item, status: 'completed' }], itemsView: 'full' } } })
+    completed(fixture)
+    await submitted
+    expect(sink.toolStart).toHaveBeenCalledOnce()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it.each([true, false])('settles a native file change after approval returns %s without substituting the decision for a result', async (allowed) => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    sink.approval.mockResolvedValue(allowed)
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'edit-approval', type: 'fileChange', changes: [], status: 'inProgress' }
+    notify(fixture, 'item/started', { item })
+    const answered = fixture.next(frame => frame.id === 'patch-approval')
+    fixture.send({ id: 'patch-approval', method: 'item/fileChange/requestApproval', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'edit-approval' } })
+    expect(await answered).toEqual({ id: 'patch-approval', result: { decision: allowed ? 'accept' : 'decline' } })
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+    notify(fixture, 'item/completed', { item: { ...item, status: allowed ? 'completed' : 'declined' } })
+    completed(fixture)
+    await submitted
+    expect(sink.toolEnd.mock.calls).toEqual([['edit-approval', '[]', !allowed]])
+  })
+
+  it('does not present a streamed patch preview as a completed native file change', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    notify(fixture, 'item/fileChange/patchUpdated', { itemId: 'edit-preview', changes: [{ path: 'C:/fixture/workspace/probe.txt', kind: { type: 'add' }, diff: 'partial patch' }] })
+    completed(fixture)
+    await submitted
+    expect(sink.assistant).not.toHaveBeenCalled()
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it('preserves native file-change output deltas on a failed completion', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'edit-denied', type: 'fileChange', status: 'inProgress', changes: [{ path: 'C:/fixture/workspace/probe.txt', kind: { type: 'delete' }, diff: 'probe\n' }] }
+    notify(fixture, 'item/started', { item })
+    notify(fixture, 'item/fileChange/outputDelta', { itemId: 'edit-denied', delta: 'AccessDenied: ' })
+    notify(fixture, 'item/fileChange/outputDelta', { itemId: 'edit-denied', delta: 'delete denied by sandbox\n' })
+    notify(fixture, 'item/completed', { item: { ...item, status: 'failed' } })
+    completed(fixture)
+    await submitted
+    expect(sink.toolEnd.mock.calls).toEqual([['edit-denied', 'AccessDenied: delete denied by sandbox\n', true]])
   })
 
   it.each(['item/started', 'item/completed'] as const)('presents each tool before starting it when the first native notification is %s', async (first) => {

@@ -7,15 +7,18 @@ import type { NativeSession } from '../backends/types'
 import type { HostContext, PlatformLoader, RuntimeModules } from '../types'
 import type { DetectedCommand } from '../utils/detection'
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop'
 import * as llmModule from '@deepseek-ai/dsh-llm'
+import { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
 import { assertContiguous, materializeAppendBatch, materializeCreateHeader, SessionPersistence, SessionPersistenceRevision, validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as zodModule from 'zod'
 import { apply } from '../apply'
@@ -1129,6 +1132,41 @@ describe('official native session lifecycle', () => {
     expect(createClaudeSession).not.toHaveBeenCalled()
     expect(createCodexSession).not.toHaveBeenCalled()
     expect(runtime.sessions.size).toBe(0)
+  }, 10_000)
+
+  it('rejects a session directory that does not exist with the location error instead of a filesystem error', async () => {
+    await expect(session.create('codex', undefined, join(cwd, 'bridge-missing-session-directory'))).rejects.toThrow('BRIDGE_CWD_INVALID: 会话目录必须是已存在的绝对目录。')
+    expect(createCodexSession).not.toHaveBeenCalled()
+    expect(runtime.sessions.size).toBe(0)
+  }, 10_000)
+
+  it('refreshes official permission presets for each turn on a cached native connection', async () => {
+    context.provide('shell', { sandboxMode: 'workspace-write' })
+    await context.plugin(ApprovalService, { policy: 'ask' }).await()
+    await context.plugin(PermissionPresetService).await()
+    const connection = native('permission-native')
+    vi.mocked(createCodexSession).mockImplementation(async (_command, _cwd, _storedId, output) => {
+      connection.submit.mockImplementation(async () => output.assistant('permission-answer', [{ type: 'text', text: 'permission reply' }]))
+      return connection
+    })
+    await creating()
+    const agent = officialHandle!.agent
+    await followup(agent, 'use the pinned initial permissions')
+    context.permissionPresets.set(agent.session, 'danger-full-access')
+    await followup(agent, 'use full permissions without reconnecting')
+    context.permissionPresets.set(agent.session, 'workspace-write')
+    await followup(agent, 'restore approval mode without reconnecting')
+    expect(errors).toEqual([])
+    expect(createCodexSession).toHaveBeenCalledOnce()
+    expect(connection.submit.mock.calls.map(call => call[3])).toEqual([
+      { sandbox: 'workspace-write', approval: 'ask' },
+      { sandbox: 'danger-full-access', approval: 'never' },
+      { sandbox: 'workspace-write', approval: 'ask' },
+    ])
+    await session.remove(agent.id, agent)
+    vi.mocked(createCodexSession).mockClear()
+    await session.connect(agent, new AbortController().signal)
+    expect(vi.mocked(createCodexSession).mock.calls[0]![5]).toEqual({ permission: { sandbox: 'workspace-write', approval: 'ask' } })
   }, 10_000)
 
   it.each(['codex', 'claude'] as const)('publishes %s only after native ACK and official identity commit', async (id) => {

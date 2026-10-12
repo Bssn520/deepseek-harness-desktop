@@ -234,10 +234,14 @@ export const sink = defineService({
         if (!state.active)
           return
         if (error === undefined && !state.signal.aborted) {
-          if ([...state.streams.values()].some(current => current.content === undefined))
+          if ([...state.streams.values()].some(current => current.content === undefined)) {
             error = new Error('BRIDGE_ASSISTANT_UNSETTLED: 原生内核没有确认最终消息。')
-          else if ([...state.tools.values()].some(tool => tool.result === undefined))
-            error = new Error('BRIDGE_TOOL_UNSETTLED: 原生内核没有确认全部工具结果。')
+          }
+          else {
+            const pending = [...state.tools].filter(([, tool]) => tool.result === undefined).map(([id, tool]) => ({ id, name: tool.name }))
+            if (pending.length > 0)
+              error = new Error(`BRIDGE_TOOL_UNSETTLED: 原生内核没有确认全部工具结果。未确认工具：${JSON.stringify(pending)}`)
+          }
         }
         state.failure = error ?? (state.signal.aborted ? state.signal.reason : undefined)
         state.active = false
@@ -349,7 +353,7 @@ export const sink = defineService({
   },
 
   commitTool(value: Session, event: SessionEvent): void {
-    if (event.type !== 'tool/result')
+    if (event.type !== 'tool/result' || event.surfaceOp !== 'append')
       return
     const official = runtime.exchanges.get(value.id)
     if (!official || official.state.input.agent.session !== value || official.state.input.turn !== event.data.turn)
