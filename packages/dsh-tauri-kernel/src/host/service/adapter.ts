@@ -113,14 +113,14 @@ export const adapter = defineService({
     }
     const binding = identity.resolve(payload.agent)
     assertLive(payload.agent, payload.signal)
-    // Cold API activation supplies the global selection until the loop commits its first legal request header.
+    // The API controller answers every headerless session with the deployment default route, so an
+    // unstarted bound session keeps its kernel instead of failing its first message on that default.
     const fallback = ctx.get('agentDefaultModel')?.currentSelection()
-    const cold = runtime.coldRoutes.has(payload.agent) && payload.agent.session.requestHeader() === undefined && !payload.agent.session.snapshotEvents().some(event => event.type === 'model/selection')
-    const ambient = cold && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined
-    if (!ambient && (config.provider !== BRIDGE_PROVIDER || config.model !== binding.backend))
+    const bound = config.provider === BRIDGE_PROVIDER && config.model === binding.backend
+    const ambient = payload.agent.session.requestHeader() === undefined && fallback !== undefined && config.provider === fallback.provider && config.model === fallback.model && config.reasoningEffort === fallback.reasoningEffort && config.maxTokens === undefined && config.temperature === undefined && config.stop === undefined
+    if (!bound && !ambient)
       throw new Error(`BRIDGE_KERNEL_IMMUTABLE: 已绑定会话不能切换内核或由 DSH 覆写原生选项（请求 ${config.provider}/${config.model}，当前内核 ${binding.backend}）。`)
-    // The native kernel owns model, effort, and generation options; DSH values never reach it, and a
-    // DSH-side effort on the native route is dropped rather than failing the whole turn.
+    // The native kernel owns model, effort, and generation options: DSH values never reach it.
     const { reasoningEffort: _effort, maxTokens: _maxTokens, temperature: _temperature, stop: _stop, ...native } = config
     return { ...native, provider: BRIDGE_PROVIDER, model: binding.backend }
   },
@@ -215,7 +215,6 @@ export const adapter = defineService({
   },
 
   async remove(agent: Agent): Promise<void> {
-    runtime.coldRoutes.delete(agent)
     const current = runtime.exchanges.get(agent.id)
     if (current?.state.input.agent === agent)
       await session.finish(agent, current.state.input.turn)
@@ -226,11 +225,6 @@ export const adapter = defineService({
   },
 
   end(value: Session, event: SessionEvent): void {
-    if (event.type === 'request/header' || event.type === 'model/selection') {
-      const agent = getServerContext<HostContext>(server).agents.get(value.id)
-      if (agent?.session === value)
-        runtime.coldRoutes.delete(agent)
-    }
     sink.commitTool(value, event)
     if (event.type === 'step/end' || event.type === 'turn/end') {
       runtime.steps.delete(value.id)

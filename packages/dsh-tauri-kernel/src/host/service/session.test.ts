@@ -905,7 +905,7 @@ describe('official cold native route restoration', () => {
     expect(restored.session.requestHeader()).toBeUndefined()
     expect(identity.resolve(restored)).toEqual(binding)
     expect(factory).toHaveBeenCalledOnce()
-    expect(runtime.coldRoutes.has(restored)).toBe(true)
+    expect(restored.session.requestHeader()).toBeUndefined()
     const resumed = native(original.id)
     factory.mockImplementationOnce(async (_command, _cwd, storedId, output) => {
       expect(storedId).toBe(original.id)
@@ -921,7 +921,6 @@ describe('official cold native route restoration', () => {
     const replayed = restoreSerialized(restored.session)
     expect(replayed.requestHeader()?.config).toEqual({ provider: BRIDGE_PROVIDER, model: id })
     expect(replayed.snapshotEvents().filter(event => event.type === 'request/header').map(event => event.data.reason)).toEqual(['initial'])
-    expect(runtime.coldRoutes.has(restored)).toBe(false)
     expect(records(replayed)).toEqual(records(before))
     expect(replayed.deriveMessages().map(message => ({ role: message.role, content: message.content }))).toEqual([
       { role: 'user', content: [{ type: 'text', text: 'continue the cold native session' }] },
@@ -929,10 +928,7 @@ describe('official cold native route restoration', () => {
     ])
   }, 10_000)
 
-  it.each([
-    { provider: 'cloud-provider', model: 'global-default' },
-    { provider: 'dsh-tauri-kernel', model: 'claude' },
-  ])('rejects an explicit cold model selection instead of restoring over it: %j', async (selected) => {
+  it('rejects a bound-session kernel switch before its first request', async () => {
     const original = native('api-cold-selected')
     vi.mocked(createCodexSession).mockResolvedValueOnce(original)
     await creating()
@@ -943,6 +939,7 @@ describe('official cold native route restoration', () => {
     expect(found).not.toHaveProperty('error')
     if ('error' in found)
       throw found.error
+    const selected = { provider: BRIDGE_PROVIDER, model: 'claude' }
     controller.selectForNextRequest(found.agent, selected)
     await followup(found.agent, 'reject switching the bound native kernel')
     expect(errors).toEqual([expect.objectContaining({ message: expect.stringContaining('BRIDGE_KERNEL_IMMUTABLE') })])
@@ -952,8 +949,29 @@ describe('official cold native route restoration', () => {
     expect(found.agent.session.requestHeader()).toBeUndefined()
     expect(found.agent.session.snapshotEvents().filter((event: SessionEvent) => event.type === 'model/selection').map((event: SessionEvent) => event.data)).toEqual([selected])
     expect(identity.resolve(found.agent)).toEqual({ backend: 'codex', nativeSessionId: original.id, sessionId: previous.agent.id })
-    expect(runtime.coldRoutes.has(found.agent)).toBe(false)
     expect(() => restoreSerialized(found.agent.session)).not.toThrow()
+  }, 10_000)
+
+  it('keeps the bound kernel when a created session still receives the deployment default route', async () => {
+    const original = native('api-created-default-route')
+    vi.mocked(createCodexSession).mockResolvedValueOnce(original)
+    await creating()
+    const agent = officialHandle!.agent
+    const started = deferred<AbortSignal>()
+    const gate = deferred<void>()
+    releases.push(() => gate.resolve())
+    context.on('agent/pre-step', async ({ signal }) => {
+      started.resolve(signal)
+      await gate.promise
+      return { kind: 'reject' }
+    }, { global: true, prepend: true })
+    const turn = followup(agent, 'keep the kernel the session was created with')
+    const signal = await started.promise
+    await expect(adapter.request({ agent, signal }, async () => defaultSelection)).resolves.toEqual({ provider: BRIDGE_PROVIDER, model: 'codex' })
+    expect(identity.resolve(agent)).toEqual({ backend: 'codex', nativeSessionId: original.id, sessionId: agent.id })
+    gate.resolve()
+    await turn
+    expect(errors).toEqual([])
   }, 10_000)
 
   it('drops a DSH reasoning effort on the bound native route instead of failing the first turn', async () => {
