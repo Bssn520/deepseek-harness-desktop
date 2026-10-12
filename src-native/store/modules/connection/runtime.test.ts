@@ -331,12 +331,12 @@ function describeDiscovery() {
 
     const [candidates, options] = recordedScan()
     expect(boundary.ip).toHaveBeenCalledExactlyOnceWith()
-    expect([...new Set(candidates.map(candidatePort))]).toEqual([4444, 3082, 3080])
+    expect([...new Set(candidates.map(candidatePort))]).toEqual([4444, 3082, 3088, 3080])
 
     function candidatePort(candidate: ScanCandidate): number {
       return candidate.port
     }
-    expect(candidates).toHaveLength(759)
+    expect(candidates).toHaveLength(1012)
     expect(candidates.slice(0, 2)).toEqual([{ host: '10.0.0.1', port: 4444 }, { host: '10.0.0.2', port: 4444 }])
     expect(candidates).toContainEqual({ host: '10.0.0.20', port: 4444 })
     expect(candidates.filter(excludedCandidate)).toEqual([])
@@ -871,7 +871,7 @@ function describeDisconnectDiscovery() {
     expect(candidates).not.toContainEqual({ host: '10.0.0.3', port: 3080 })
     expect(candidates.filter(disconnectedHostCandidate)).toEqual([
       { host: '10.0.0.3', port: 4444 },
-      { host: '10.0.0.3', port: 3082 },
+      { host: '10.0.0.3', port: 3088 },
     ])
 
     function disconnectedHostCandidate(candidate: ScanCandidate): boolean {

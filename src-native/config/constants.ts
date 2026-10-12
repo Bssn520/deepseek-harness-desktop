@@ -1,4 +1,4 @@
-export const DEFAULT_PORTS = [3082, 3080] as const
+export const DEFAULT_PORTS = [3088, 3080] as const
 export const EXTRA_SCAN_PORTS: number[] = []
 export const SCAN_CONCURRENCY = 40
 export const PROBE_TIMEOUT_MS = 600

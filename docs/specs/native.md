@@ -97,7 +97,7 @@ src-native/
 * **再次进入**（历史中有主机）：只探测历史主机并自动连接可用项，检测期文案为「寻找可用连接」；全部不可用时停在连接方式选择，**不**退化为局域网扫描。
 * **主动发现**由用户操作触发：点击「自动扫描局域网」，或断开连接后紧接的那轮扫描。
 * 探测成功由可信 DSH 文档就绪消息确认，不以原生 `onLoad` 或 HTTP 200 判定。
-* 超时与预算集中在 `src-native/config/constants.ts`：默认端口 `3082` / `3080`、并发 40、单次探测 600 ms、历史探测 3 s、整体扫描预算 20 s、前台健康检查间隔 15 s。
+* 超时与预算集中在 `src-native/config/constants.ts`：默认端口 `3088` / `3080`、并发 40、单次探测 600 ms、历史探测 3 s、整体扫描预算 20 s、前台健康检查间隔 15 s。
 * 服务识别走上游公开的 `/__dsh_bridge__/auth-status`，旧响应缺少身份字段时再校验 `/manifest.webmanifest`；不把任意 HTML 200 当作 DSH 服务。
 * 探测与扫描拆成两个模块：`src-native/services/probe-bridge.ts` 的 `probeBridge(address, signal, timeoutMs?)` 探测单个地址（超时、网络错误、非 2xx、响应体不合法一律返回 `null`），`src-native/services/scan-candidates.ts` 的 `scanCandidates(candidates, { signal, concurrency, timeoutMs, budgetMs, onFound })` 以有界并发遍历候选地址并受总预算约束（参数非法直接抛 `RangeError`）。
 * 断开会清空当前连接并保留历史，紧接着的扫描跳过刚断开的精确 origin。
