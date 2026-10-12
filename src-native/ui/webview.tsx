@@ -17,6 +17,7 @@ import { WebView } from 'react-native-webview'
 import { Uniwind } from 'uniwind'
 import { useStore } from 'valtio-define'
 import { BreathingLight } from '@/components/breathing-light'
+import { Logo, Wordmark } from '@/components/icons'
 import { WEBVIEW_LOAD_TIMEOUT_MS } from '@/config/constants'
 import { useAppState } from '@/hooks/use-app-state'
 import { requestNotificationAccess, sendNativeNotification } from '@/hooks/use-notifications'
@@ -223,9 +224,13 @@ export function BridgeWebView({ address, generation }: { address: BridgeAddress,
         </If>
         <If cond={state.loading && !loadingTimedOut}>
           <Then>
-            <View className="absolute inset-0 items-center justify-center gap-5 bg-background">
+            <View className="absolute inset-0 items-center justify-center gap-7 bg-background px-8">
+              <View className="items-center gap-3">
+                <Logo />
+                <Wordmark />
+              </View>
               <BreathingLight />
-              <Text className="text-sm text-muted">{t('connection.loading')}</Text>
+              <Text className="text-sm text-muted" accessibilityLiveRegion="polite">{t('connection.loading')}</Text>
             </View>
           </Then>
         </If>

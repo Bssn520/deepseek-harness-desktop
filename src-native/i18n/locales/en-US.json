@@ -3,7 +3,7 @@
   "common.cancel": "Cancel",
   "connection.scanning": "Scanning LAN ports…",
   "connection.checkingHistory": "Looking for an available connection",
-  "connection.loading": "Looking for an available connection",
+  "connection.loading": "Connecting…",
   "connection.loadingSlow": "The page is loading slowly. Still waiting for a response; you can keep waiting or reconnect.",
   "connection.autoScan": "Scan LAN automatically",
   "connection.recentConnections": "Recent connections",

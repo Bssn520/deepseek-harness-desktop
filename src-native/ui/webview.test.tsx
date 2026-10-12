@@ -70,6 +70,7 @@ vi.mock('heroui-native/button', async () => {
   }
   return { Button }
 })
+vi.mock('react-native-svg', () => ({ default: 'Svg', Path: 'SvgPath', Rect: 'SvgRect', G: 'SvgGroup', Defs: 'SvgDefs', ClipPath: 'SvgClipPath' }))
 vi.mock('react-native-lucide', () => ({ ArrowLeft: 'Icon', Hand: 'Icon' }))
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }))
 vi.mock('react-native-reanimated', async () => {
@@ -356,7 +357,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
 
     expect(view.injectJavaScript).toHaveBeenCalledExactlyOnceWith(webView().props.injectedJavaScript)
     expect(connection.loading).toBe(true)
-    expect(texts()).toContain('寻找可用连接')
+    expect(texts()).toContain('连接中…')
     expect(connection.history).toEqual([])
     expect(connection.swipeHintVisible).toBe(false)
     expect(native.getPermissionsAsync).not.toHaveBeenCalled()
@@ -371,7 +372,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     expect(connection.history).toEqual([])
     expect(connection.guidedHosts).toEqual([])
     expect(texts()).toContain(failure)
-    expect(texts()).not.toContain('寻找可用连接')
+    expect(texts()).not.toContain('连接中…')
     expect(texts()).not.toContain('向左滑查看连接信息')
     expect(native.getPermissionsAsync).not.toHaveBeenCalled()
   })
@@ -397,7 +398,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     expect(connection.loading).toBe(false)
     expect(connection.loadError).toBeNull()
     expect(texts()).toContain('向左滑查看连接信息')
-    expect(texts()).not.toContain('寻找可用连接')
+    expect(texts()).not.toContain('连接中…')
     const hint = root().find(node => node.props.accessibilityLabel === '关闭滑动引导')
     await act(async () => {
       hint.props.onPress()
@@ -439,7 +440,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     expect(connection.history).toEqual([{ ...alpha, lastConnectedAt: 1767225600000 }])
     expect(connection.health['http://bridge.test:3080']).toBe('available')
     expect(texts()).not.toContain(failure)
-    expect(texts()).not.toContain('寻找可用连接')
+    expect(texts()).not.toContain('连接中…')
   })
 
   it('does not accept an HTTP 401 document without a DSH login or application fingerprint', async () => {
@@ -514,7 +515,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     expect(connection.loadError).toBeNull()
     expect(connection.history).toEqual([{ ...alpha, lastConnectedAt: 1767225600000 }])
     expect(texts()).not.toContain(failure)
-    expect(texts()).not.toContain('寻找可用连接')
+    expect(texts()).not.toContain('连接中…')
     expect(connection.swipeHintVisible).toBe(false)
   })
 
@@ -582,7 +583,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
       webView().props.onLoadStart({ nativeEvent: { url: 'http://bridge.test:3080/login', loading: true } })
     })
     expect(texts()).not.toContain(slowLoading)
-    expect(texts()).toContain('寻找可用连接')
+    expect(texts()).toContain('连接中…')
     await act(async () => {
       await vi.advanceTimersByTimeAsync(19999)
     })
@@ -652,7 +653,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
       await vi.advanceTimersByTimeAsync(19999)
     })
     expect(connection.loading).toBe(true)
-    expect(texts()).toContain('寻找可用连接')
+    expect(texts()).toContain('连接中…')
     expect(texts()).not.toContain(failure)
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1)

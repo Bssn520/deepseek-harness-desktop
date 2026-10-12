@@ -406,8 +406,13 @@ describe('rendered Home scanning and idle actions', () => {
       runtime.connectAddress(alpha)
     })
 
-    expect(root().findAll(node => String(node.type) === 'Svg')).toHaveLength(0)
+    expect(root().findAll(node => String(node.type) === 'Svg').map(node => node.props.accessibilityLabel)).toEqual(['DSH Bridge', 'DeepSeek', 'Harness'])
+    expect(texts()).toContain('连接中…')
+    expect(texts()).not.toContain('寻找可用连接')
     expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })
+    await ready()
+    expect(root().findAll(node => String(node.type) === 'Svg')).toHaveLength(0)
+    expect(texts()).not.toContain('连接中…')
   })
 
   it('opens the QR route from the idle scan action', async () => {
@@ -661,7 +666,7 @@ describe('rendered Home connection drawer', () => {
 
     expect(drawer().props.open).toBe(false)
     expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })
-    expect(texts()).toContain('寻找可用连接')
+    expect(texts()).toContain('连接中…')
     expect(connection.stage).toBe('connected')
   })
 
@@ -749,7 +754,7 @@ describe('rendered Home connection drawer', () => {
 
     expect(root().findByType(WebView).instance).toBe(instance)
     expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })
-    expect(texts()).not.toContain('寻找可用连接')
+    expect(texts()).not.toContain('连接中…')
   })
 })
 
