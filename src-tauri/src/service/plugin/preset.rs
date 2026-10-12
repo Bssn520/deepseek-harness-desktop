@@ -841,6 +841,14 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_manifest_lists_absorbed_running_changes() {
+        // dsh-tauri-running-changes 已并入 dsh-tauri-experimental，并从内置清单移除
+        // 条目：升级用户的残留副本仍从 dsh-tauri 导入 1.0.0 已移出的符号，启动即
+        // import 失败，只能靠弃用名单兜底卸载。
+        assert!(shipped_deprecated_ids().contains("dsh-tauri-running-changes"));
+    }
+
+    #[test]
     fn manifest_source_overrides_internal_field() {
         // 条目里的 `internal` 字段不参与判定：内部属性只由所在清单节决定
         let raw = r#"{"plugins":{

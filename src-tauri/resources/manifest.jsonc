@@ -74,7 +74,8 @@
       "dsh-tauri-ssh-ui",
       "dsh-tauri-turnrewind",
       "dsh-tauri-connection",
-      "dsh-tauri-bridge"
+      "dsh-tauri-bridge",
+      "dsh-tauri-running-changes"
     ],
     "built-in": [
       {
