@@ -130,6 +130,10 @@ export const adapter = defineService({
       yield* next()
       return
     }
+    if (options.purpose === 'session-title') {
+      yield* next()
+      return
+    }
     const ctx = getServerContext<HostContext>(server)
     const modules = await loadRuntimeModules(ctx.loader)
     if (options.purpose !== undefined || !modules.isAgentLoopRequest(options) || options.sessionId === undefined || options.signal === undefined)
@@ -152,6 +156,10 @@ export const adapter = defineService({
   },
 
   async* stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.purpose === 'session-title') {
+      yield* session.title(options)
+      return
+    }
     const admitted = options.sessionId === undefined ? undefined : runtime.steps.get(options.sessionId)
     if (!admitted || admitted.dispatched || !admitted.request || options.purpose !== undefined || options.signal !== admitted.signal || options.provider !== BRIDGE_PROVIDER || options.model !== admitted.request.model)
       throw new Error('BRIDGE_STEP_UNAVAILABLE: 原生请求未通过官方回合检查。')
