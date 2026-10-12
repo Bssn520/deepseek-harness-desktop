@@ -24,7 +24,7 @@ import * as zodModule from 'zod'
 import { apply } from '../apply'
 import { createClaudeSession } from '../backends/claude'
 import { createCodexSession } from '../backends/codex'
-import { BRIDGE_PROVIDER } from '../config/constants'
+import { BRIDGE_PROVIDER, SESSION_TITLE_PURPOSE } from '../config/constants'
 import { resetRuntime, runtime } from '../config/runtime'
 import { detectBackend } from '../utils/detection'
 import { adapter } from './adapter'
@@ -401,7 +401,7 @@ describe('native session title requests', () => {
       ...call.config,
       messages: [llmModule.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'name this session' }] })],
       system: 'Return only a short title.',
-      purpose: 'session-title',
+      purpose: SESSION_TITLE_PURPOSE,
       sessionId: agent.id,
       signal,
     }
@@ -428,7 +428,7 @@ describe('native session title requests', () => {
     const signal = new AbortController().signal
     const call = await context.llm.prepareCall({ provider: BRIDGE_PROVIDER, model: 'codex' }, signal)
     const request = async () => {
-      for await (const chunk of call.stream({ ...call.config, messages: [], purpose: 'session-title', sessionId: officialHandle!.agent.id, signal }))
+      for await (const chunk of call.stream({ ...call.config, messages: [], purpose: SESSION_TITLE_PURPOSE, sessionId: officialHandle!.agent.id, signal }))
         expect.fail(`unexpected title chunk: ${JSON.stringify(chunk)}`)
     }
     await expect(request()).rejects.toThrow('BRIDGE_TITLE_MODEL_UNAVAILABLE')
