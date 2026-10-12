@@ -17,9 +17,9 @@ const HEALTH_PROBE_CONCURRENCY: usize = 48;
 
 /// 读取 Harness 首页并解析本次启动实际声明的客户端模块。
 async fn client_probe_endpoints(port: u16) -> Result<Vec<String>, String> {
-    // 端口能绑上就说明还没有任何进程在监听它，此时发起 HTTP 探测只会吃满
-    // 建连超时（`LOOPBACK_CONNECT_TIMEOUT`）。绑定成功是「未监听」的充分证据，
-    // 判定成本不足 1ms；绑定失败则照旧走 HTTP 探测，不会把占用误判成未监听。
+    // 回环与通配地址都还绑得上，才说明没有任何进程在监听它，此时发起 HTTP 探测
+    // 只会吃满建连超时（`LOOPBACK_CONNECT_TIMEOUT`）。判定成本不足 1ms；任一地址
+    // 绑不上即照旧走 HTTP 探测，不会把占用误判成未监听。
     if !utils::is_port_in_use(port) {
         return Err(format!(
             "HARNESS_NOT_READY: Harness service is not listening yet (port {port})"
