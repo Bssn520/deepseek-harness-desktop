@@ -174,7 +174,10 @@ pub(crate) fn process_cleanup_failure(owner: ProcessOwner) -> Option<String> {
 
 pub(crate) fn is_process_cleanup_failure(error: &str) -> bool {
     [
-        "PNPM_PROBE_",
+        // 不能整段匹配 `PNPM_PROBE_`：锁被正常安装占住时的 `PNPM_PROBE_LOCK_TIMEOUT`
+        // 只是竞争，不代表上一次清理未确认。
+        "PNPM_PROBE_TREE_CLEANUP_FAILED:",
+        "PNPM_PROBE_CLEANUP_",
         "PLUGIN_PROCESS_",
         "PREINSTALL_WAIT:",
         "INTERNAL_PLUGIN_PROCESS_REAP_TIMEOUT:",
@@ -582,6 +585,9 @@ mod tests {
             );
         }
         for best_effort in [
+            "PNPM_PROBE_LOCK_TIMEOUT: timed out waiting for the process lock",
+            "PNPM_PROBE_TIMEOUT: pnpm version probe timed out but the process was recycled",
+            "PNPM_PROBE_TASK_FAILED: task panicked",
             "PNPM_INSTALL_FAILED: exit code 1: ERR_PNPM_UNEXPECTED_STORE",
             "INTERNAL_PLUGIN_INSTALL_FAILED: pnpm add failed",
             "DEPRECATED_PLUGIN_UNINSTALL_FAILED: dshmarket: missing",

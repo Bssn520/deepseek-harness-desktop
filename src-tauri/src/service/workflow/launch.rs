@@ -609,9 +609,18 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
 
     // 让市场子进程的 pnpm 与桌面端同一套受控策略（store 主版本感知、避免落到系统
     // homebrew pnpm）。与插件安装路径的 ensure_pnpm 版本感知一致，但启动阶段绝不
-    // 触发下载；捆绑版未安装或与 store 不匹配时不注入（交由用户 pnpm）。
-    if crate::service::plugin::harness_prefer_bundled_pnpm(&app_handle).await? {
-        envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
+    // 触发下载；捆绑版未安装或与 store 不匹配时不注入（交由用户 pnpm）。探测被正常
+    // 安装占住或探针自身失败只告警，只有进程清理未确认才终止启动。
+    match crate::service::plugin::harness_prefer_bundled_pnpm(&app_handle).await {
+        Ok(true) => {
+            envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
+        }
+        Ok(false) => {}
+        Err(e) if crate::service::plugin::is_process_cleanup_failure(&e) => {
+            log::error!("prefer bundled pnpm blocked by unconfirmed process cleanup: {e}");
+            return Err(e);
+        }
+        Err(e) => log::warn!("prefer bundled pnpm probe failed, keeping user pnpm: {e}"),
     }
 
     // 桌面端代理设置（issue #110）：核心（dsh-http-proxy）在启动时读
