@@ -114,7 +114,7 @@ vi.mock('heroui-native/button', async () => {
   return { Button: Object.assign(Button, { Label: 'Text' }) }
 })
 vi.mock('react-native-gesture-handler', () => ({ GestureHandlerRootView: 'GestureHandlerRootView' }))
-vi.mock('react-native-safe-area-context', () => ({ SafeAreaProvider: 'SafeAreaProvider', SafeAreaView: 'SafeAreaView' }))
+vi.mock('react-native-safe-area-context', () => ({ SafeAreaProvider: 'SafeAreaProvider', SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ top: 59, bottom: 34, left: 0, right: 0 }) }))
 vi.mock('react-native-lucide', () => ({ History: 'Icon', Radar: 'Icon', ScanLine: 'Icon', RefreshCw: 'Icon', X: 'Icon', ArrowLeft: 'Icon', Hand: 'Icon' }))
 vi.mock('react-native-svg', () => ({ default: 'Svg', Path: 'SvgPath', Rect: 'SvgRect', G: 'SvgGroup', Defs: 'SvgDefs', ClipPath: 'SvgClipPath' }))
 vi.mock('react-native', () => ({

@@ -20,6 +20,7 @@ const native = vi.hoisted(() => ({
   openSettings: vi.fn<() => Promise<void>>(),
   back: vi.fn<() => void>(),
   cancelAnimation: vi.fn(),
+  insets: { top: 59, bottom: 34, left: 0, right: 0 },
 }))
 
 vi.mock('react-native', () => ({
@@ -72,7 +73,7 @@ vi.mock('heroui-native/button', async () => {
   }
   return { Button: Object.assign(Button, { Label: 'Text' }) }
 })
-vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }))
+vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => native.insets }))
 vi.mock('react-native-lucide', () => ({ X: 'Icon' }))
 vi.mock('react-native-reanimated', async () => {
   const { useRef } = await import('react')
@@ -202,6 +203,12 @@ afterEach(async () => {
 })
 
 describe('rendered scanner camera permissions', () => {
+  it('pads the scanner chrome by the host safe-area insets', async () => {
+    await mount()
+
+    expect(screen?.toJSON()).toMatchObject({ props: { style: { paddingTop: 59, paddingBottom: 34 } } })
+  })
+
   it('shows a loader while permission is unresolved, then offers the denied-camera action', async () => {
     native.permission = null
     const permission = Promise.withResolvers<CameraPermission>()

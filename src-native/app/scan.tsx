@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { Else, If, Then } from 'react-if-lite'
 import { Linking, Text, View } from 'react-native'
 import { X } from 'react-native-lucide'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { BreathingLight } from '@/components/breathing-light'
 import { useAppState } from '@/hooks/use-app-state'
 import { connectAddress } from '@/store/modules/connection/runtime'
@@ -18,6 +18,8 @@ export default function ScanScreen() {
   const { t } = useTranslation()
   const [permission, requestPermission, refreshPermission] = useCameraPermissions()
   const appState = useAppState()
+  // 模态路由挂在独立的原生视图树上，SafeAreaView 沿 superview 找不到根 provider，insets 恒为 0，只能取 context。
+  const insets = useSafeAreaInsets()
   const [error, setError] = useState<string | null>(null)
   const [scanned, setScanned] = useState(false)
   const lockedRef = useRef(false)
@@ -60,7 +62,7 @@ export default function ScanScreen() {
   if (permission && !permission.canAskAgain)
     permissionLabel = t('scan.openSettings')
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: background }}>
+    <View style={{ flex: 1, backgroundColor: background, paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}>
       <View className="flex-row items-center justify-between gap-3 px-5 pb-3 pt-2">
         <Text className="flex-1 text-lg font-semibold text-foreground">{t('scan.cameraTitle')}</Text>
         <Button variant="ghost" isIconOnly accessibilityLabel={t('scan.closeScanner')} onPress={() => router.back()}>
@@ -108,6 +110,6 @@ export default function ScanScreen() {
         </Then>
         <Else><View className="flex-1 items-center justify-center"><BreathingLight /></View></Else>
       </If>
-    </SafeAreaView>
+    </View>
   )
 }
