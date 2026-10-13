@@ -22,7 +22,7 @@
 
 1. 在“钥匙串访问 → 我的证书”找到 Apple Distribution 证书，展开后必须能看到私钥，导出为带密码的 `.p12`。只有 `.cer` 文件不够。若已有有效证书，不必重新生成或撤销。
 2. 在 Apple Developer 的 Certificates, Identifiers & Profiles 中，确认 App ID 为 `com.dshtauri.dshbridge`。当前应用声明 Push Notifications entitlement，描述文件需支持相应能力。
-3. 创建 App Store Connect 分发描述文件，选择该 App ID 和刚导出的 Apple Distribution 证书。Development / Ad Hoc / Enterprise 描述文件不能代替它。
+3. 在 Apple Developer 门户手动创建 App Store Connect 分发描述文件，选择该 App ID 和刚导出的 Apple Distribution 证书。CI 使用手动签名，不能使用 Xcode 自动生成的 `iOS Team Store Provisioning Profile`（`IsXcodeManaged=true`），即使它能在本机通过自动签名上传。Development / Ad Hoc / Enterprise 描述文件也不能代替它。苹果描述文件可同时列出 iOS、xrOS、visionOS，包含 iOS 即可。
 4. 在 App Store Connect → Users and Access → Integrations → App Store Connect API 创建团队 API Key，赋予上传所需权限（通常 Developer 足够；按团队权限策略配置）。保存 `.p8`、Key ID、Issuer ID；私钥只能下载一次。这里不使用个人 API Key。
 5. 确认 App Store Connect 中已有相同 Bundle ID 的 iOS 应用记录，且开发者会员、协议均有效。
 

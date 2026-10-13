@@ -76,6 +76,15 @@ class ProfileTests(unittest.TestCase):
                 self.profile['Platform'] = platforms
                 self.validate()
 
+    def test_rejects_xcode_managed_profile_before_manual_signing(self):
+        self.profile['IsXcodeManaged'] = True
+        with self.assertRaisesRegex(ValueError, 'manually managed'):
+            self.validate()
+
+    def test_accepts_explicitly_manual_profile(self):
+        self.profile['IsXcodeManaged'] = False
+        self.assertEqual(self.validate(), self.identity)
+
     def test_rejects_wrong_team_app_platform_expiry_and_distribution(self):
         cases = [
             ('TeamIdentifier', ['OTHERTEAM1']),

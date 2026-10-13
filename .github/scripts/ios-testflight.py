@@ -38,6 +38,7 @@ def validate_profile(profile, team, now, identities):
     require(profile.get('ExpirationDate', dt.datetime.min) > now, 'Provisioning profile expired')
     platforms = profile.get('Platform')
     require(isinstance(platforms, list) and 'iOS' in platforms, 'Profile is not for iOS')
+    require(profile.get('IsXcodeManaged', False) is False, 'Profile must be manually managed; create an App Store Connect profile in the Apple Developer portal')
     require('ProvisionedDevices' not in profile and not profile.get('ProvisionsAllDevices'), 'Profile must use App Store distribution')
     require(entitlements.get('get-task-allow') is False, 'Profile must disallow debugging')
     require(entitlements.get('beta-reports-active') is True, 'Profile must support TestFlight')
