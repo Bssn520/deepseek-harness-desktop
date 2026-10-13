@@ -154,7 +154,7 @@ function describeDirectConnections() {
     runtime.connectAddress({ ...alpha, token: 'fixture-new-token' })
 
     expect(connection.current).toEqual({ ...alpha, token: 'fixture-new-token' })
-    expect(connection.tokens).toEqual({ 'http://10.0.0.20:4444': 'fixture-new-token' })
+    expect(connection.tokens).toEqual({ 'http://10.0.0.20:4444': 'fixture-old-token' })
     expect(connection.serialize()).toEqual({ version: 1, history: [], guidedHosts: [] })
   }
 
@@ -166,7 +166,7 @@ function describeDirectConnections() {
     runtime.connectAddress({ ...alpha, url: 'http://10.0.0.20:4444/tasks?auth=fixture-new-token&theme=dark' })
 
     expect(connection.current).toEqual({ ...alpha, token: 'fixture-new-token' })
-    expect(connection.tokens).toEqual({ 'http://10.0.0.20:4444': 'fixture-new-token' })
+    expect(connection.tokens).toEqual({ 'http://10.0.0.20:4444': 'fixture-old-token' })
   }
 
   it('aborts an in-flight history probe before a direct connection and ignores its late success', supersedeHistoryWithDirectConnection)

@@ -145,7 +145,7 @@ describe('mobile release workflow contracts', () => {
   it('pins TestFlight to the locally verified Xcode toolchain on macOS 26', () => {
     const signed = readSource('.github/workflows/release-testflight.yml')
     expect(signed).toContain('runs-on: macos-26')
-    expect(signed).toContain('xcode-version: \'26.4.1\'')
+    expect(signed).toContain('xcode-version: 26.4.1')
     expect(signed).not.toContain('runs-on: macos-15-intel')
   })
 

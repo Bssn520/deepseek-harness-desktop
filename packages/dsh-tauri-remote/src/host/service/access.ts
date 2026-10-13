@@ -19,8 +19,6 @@ const NO_LOCAL_PORT = '无法确定本机 DSH 端口（宿主 webserver 未暴�
 
 const CORRUPT_DOCUMENT = 'access.json 解析失败：已按未配置处理，写操作被拒绝以免覆盖原文件（请先修复或移走该文件）'
 
-const SESSION_SECRET = createSessionSecret()
-
 let failure: string | undefined
 
 let sequence = 0
@@ -30,7 +28,7 @@ let events: RemoteAccessEvent[] = []
 export const access = defineService({
   /** 网关每次判定都重新取用：配置与凭据变更立即生效（S2 §7.4）。 */
   policy(): RemoteAuthPolicy {
-    return { ...policyOf(readAccessDocument().document, SESSION_SECRET), pairingCode: pairingCodeOf().code, consumePairingCode }
+    return { ...policyOf(readAccessDocument().document), pairingCode: pairingCodeOf().code, consumePairingCode }
   },
 
   async status(): Promise<RemoteAccessStatus> {
@@ -96,6 +94,8 @@ export const access = defineService({
     const next = patchAccessDocument(parsed.document, body, enumerateAddresses())
     if (body.enabled === true && body.authEnabled === undefined)
       next.auth.enabled = true
+    if (next.auth.enabled)
+      next.auth.sessionSecret ??= createSessionSecret()
     writeAccessDocument(next)
     await activate(next)
     return await access.status()
@@ -105,7 +105,7 @@ export const access = defineService({
     const parsed = readAccessDocument()
     if (parsed.corrupt)
       throw new Error(CORRUPT_DOCUMENT)
-    const next = { ...parsed.document, auth: { ...parsed.document.auth, enabled: true } }
+    const next = { ...parsed.document, auth: { ...parsed.document.auth, enabled: true, sessionSecret: parsed.document.auth.sessionSecret ?? createSessionSecret() } }
     writeAccessDocument(next)
     await activate(next)
     return await access.status()
@@ -124,8 +124,10 @@ export const access = defineService({
     const parsed = readAccessDocument()
     if (parsed.corrupt)
       throw new Error(CORRUPT_DOCUMENT)
-    writeAccessDocument({ ...parsed.document, auth: { ...parsed.document.auth, token: null } })
-    note('token', '链接 Token 已作废，已签发的会话不受影响')
+    writeAccessDocument({ ...parsed.document, auth: { ...parsed.document.auth, token: null, sessionSecret: createSessionSecret() } })
+    gateway.revoke()
+    resetPairingCode()
+    note('token', '链接 Token、已配对设备与会话授权已撤销')
     return await access.status()
   },
 
@@ -138,6 +140,10 @@ export const access = defineService({
     }
     for (const warning of parsed.warnings)
       note('state', warning)
+    if (parsed.document.auth.enabled && parsed.document.auth.sessionSecret === undefined) {
+      parsed.document.auth.sessionSecret = createSessionSecret()
+      writeAccessDocument(parsed.document)
+    }
     if (!parsed.document.enabled) {
       failure = undefined
       return

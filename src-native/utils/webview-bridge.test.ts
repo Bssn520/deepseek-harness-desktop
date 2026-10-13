@@ -138,7 +138,8 @@ function createBrowser(options: { locationOrigin?: string, topFrame?: boolean, h
     dispatchEvent: vi.fn((event: Event) => documentEvents.dispatchEvent(event)),
   }
   const location = { origin: options.locationOrigin ?? origin }
-  const context = createVmContext({ window, document, location, MutationObserver: BrowserMutationObserver, Event, MessageEvent: BrowserMessageEvent, Date, setTimeout, clearTimeout })
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(null, { status: 404 }))
+  const context = createVmContext({ window, document, location, fetch, MutationObserver: BrowserMutationObserver, Event, MessageEvent: BrowserMessageEvent, Date, setTimeout, clearTimeout })
   function run(script: string): unknown {
     return runInContext(script, context, { timeout: 1000 })
   }
@@ -152,7 +153,7 @@ function createBrowser(options: { locationOrigin?: string, topFrame?: boolean, h
   function postMessage(data: unknown, eventOrigin = origin, source: unknown = window) {
     window.dispatchEvent(new BrowserMessageEvent('message', { data, origin: eventOrigin, source }))
   }
-  return { window, document, documentElement, body, styles, appendChild, mutations, location, posts, run, inject, postMessage }
+  return { window, document, documentElement, body, styles, appendChild, mutations, location, posts, fetch, run, inject, postMessage }
 }
 
 function sessionNode(attributes: Record<string, string>): SessionNode {
@@ -267,6 +268,67 @@ describe('parseNativeMessage', () => {
 
     expect(parseNativeMessage(boundary, nativeUrl, origin, nonce)).toEqual(payload)
     expect(parseNativeMessage(`${boundary} `, nativeUrl, origin, nonce)).toBeNull()
+  })
+})
+
+describe('paired device authorization bridge', () => {
+  const token = `v1.1700000000000.0.${'a'.repeat(64)}`
+
+  it('accepts a device ticket only through the nonce- and origin-verified native envelope', () => {
+    const payload = { type: 'dsh://device-session', token }
+    expect(parseNativeMessage(envelope(payload), nativeUrl, origin, nonce)).toEqual(payload)
+    expect(parseNativeMessage(envelope(payload), nativeUrl, origin, 'stale')).toBeNull()
+    expect(parseNativeMessage(envelope(payload), 'https://foreign.test/', origin, nonce)).toBeNull()
+    for (const token of ['AB23CD45', '', `v1.1700000000000.1702592000000.${'a'.repeat(64)}`, `v1.9007199254740992.0.${'a'.repeat(64)}`, null, 123])
+      expect(parseNativeMessage(envelope({ type: 'dsh://device-session', token }), nativeUrl, origin, nonce)).toBeNull()
+  })
+
+  it('fetches authorization once from a completed DSH app using its WebView cookies, including after manual pairing', async () => {
+    const browser = createBrowser({ login: true })
+    browser.fetch.mockResolvedValue(Response.json({ token }))
+    browser.inject()
+    expect(browser.fetch).not.toHaveBeenCalled()
+    browser.window.__DSH_BOOT__ = {}
+    browser.inject()
+    await vi.waitFor(() => expect(browser.posts.mock.calls.some(([raw]) => parseNativeMessage(raw, nativeUrl, origin, nonce)?.type === 'dsh://device-session')).toBe(true))
+    expect(browser.fetch).toHaveBeenCalledExactlyOnceWith(`${origin}/api/tauri/remote/access/session`, { credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+    browser.inject()
+    expect(browser.fetch).toHaveBeenCalledTimes(1)
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+
+  it.each([401, 404])('does not treat unsupported or unauthenticated session endpoint %s as a connection error', async (status) => {
+    const browser = createBrowser()
+    browser.fetch.mockResolvedValue(new Response(null, { status }))
+    browser.window.__DSH_BOOT__ = {}
+    browser.inject()
+    await vi.waitFor(() => expect(browser.fetch).toHaveBeenCalledTimes(1))
+    browser.inject()
+    expect(browser.posts.mock.calls.map(([raw]) => parseNativeMessage(raw, nativeUrl, origin, nonce)?.type)).toEqual(['dsh://bridge-ready', 'dsh://theme-state'])
+    browser.window.dispatchEvent(new Event('pagehide'))
+  })
+
+  it('ignores a credential response after navigation, nonce replacement or an explicit forget request', async () => {
+    for (const boundary of ['navigation', 'nonce', 'forget']) {
+      const browser = createBrowser()
+      const pending = Promise.withResolvers<Response>()
+      browser.fetch.mockReturnValueOnce(pending.promise).mockResolvedValue(new Response(null, { status: 204 }))
+      browser.window.__DSH_BOOT__ = {}
+      browser.inject()
+      expect(browser.fetch).toHaveBeenCalledTimes(1)
+      if (boundary === 'navigation')
+        browser.window.dispatchEvent(new Event('pagehide'))
+      else if (boundary === 'nonce')
+        browser.window.__dshBridgeNonce = 'new-nonce'
+      else
+        browser.run(nativeMessageScript(origin, nonce, { type: 'dsh://forget-session' }))
+      pending.resolve(Response.json({ token }))
+      await vi.waitFor(() => expect(browser.fetch).toHaveBeenCalledTimes(boundary === 'forget' ? 2 : 1))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(browser.posts.mock.calls.some(([raw]) => JSON.parse(raw).payload.type === 'dsh://device-session')).toBe(false)
+      browser.window.dispatchEvent(new Event('pagehide'))
+    }
   })
 })
 

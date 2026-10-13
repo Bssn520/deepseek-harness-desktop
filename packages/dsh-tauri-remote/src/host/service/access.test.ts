@@ -11,6 +11,7 @@ import { toDataURL } from 'qrcode'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ensureSourceSession, setCurrentHostInstance } from '../config/runtime'
 import { server as remoteServer } from '../server'
+import { signDeviceSession, signSession, verifyDeviceSession, verifySession } from '../utils/auth'
 import { access } from './access'
 import { defaultAccessDocument, enumerateAddresses, isReachableAddress, readAccessDocument, writeAccessDocument } from './access.utils'
 import { gateway } from './gateway'
@@ -242,13 +243,57 @@ async function enable(address = '127.0.0.1', port?: number): Promise<RemoteAcces
 }
 
 describe('access 监听生命周期', () => {
+  it('会话密钥落盘且模块重载保持授权，撤销使设备票据与会话失效', async () => {
+    await access.ensureAuth()
+    const secret = access.policy().sessionSecret
+    expect(secret).toMatch(/^[\w-]{43}$/u)
+    expect(storedDocument().auth.sessionSecret).toBe(secret)
+    const now = Date.now()
+    const cookie = signSession(secret, now).value
+    const device = signDeviceSession(secret, now).value
+    const document = readFileSync(documentFile(), 'utf8')
+    vi.resetModules()
+    const fresh = (await import('./access')).access
+    try {
+      expect(fresh.policy().sessionSecret).toBe(secret)
+      await fresh.restore()
+      expect(readFileSync(documentFile(), 'utf8')).toBe(document)
+      expect(verifySession(cookie, fresh.policy().sessionSecret, now)).toBe(true)
+      expect(verifyDeviceSession(device, fresh.policy().sessionSecret, now + 365 * 24 * 60 * 60 * 1000)).toBe(true)
+      const code = fresh.policy().pairingCode
+      await fresh.revoke()
+      expect(fresh.policy().sessionSecret).not.toBe(secret)
+      expect(fresh.policy().pairingCode).not.toBe(code)
+      expect(verifySession(cookie, fresh.policy().sessionSecret, now)).toBe(false)
+      expect(verifyDeviceSession(device, fresh.policy().sessionSecret, now)).toBe(false)
+      expect(JSON.stringify(await fresh.status())).not.toContain(fresh.policy().sessionSecret)
+    }
+    finally {
+      await fresh.dispose()
+    }
+  })
+
+  it('恢复旧配置只补一次会话密钥，即使只开隧道也保存授权', async () => {
+    const document = { ...defaultAccessDocument(), auth: { enabled: true, token: null, scope: 'all' as const } }
+    writeAccessDocument(document)
+    await access.restore()
+    const first = storedDocument()
+    expect(first.auth.sessionSecret).toMatch(/^[\w-]{43}$/u)
+    expect(first).toEqual({ ...document, auth: { ...document.auth, sessionSecret: first.auth.sessionSecret } })
+    const saved = readFileSync(documentFile(), 'utf8')
+    await access.restore()
+    access.policy()
+    expect(readFileSync(documentFile(), 'utf8')).toBe(saved)
+    expect(JSON.stringify(await access.status())).not.toContain(first.auth.sessionSecret ?? 'missing-secret')
+  })
+
   it('开启暴露仅使用配对码，不生成或保存访问密码', async () => {
     const status = await enable()
     expect(status.auth.enabled).toBe(true)
     expect(status.pairing?.code).toMatch(/^[2-9A-HJ-NP-Z]{8}$/u)
     expect(status).not.toHaveProperty('generatedPassword')
     expect(status.auth).not.toHaveProperty('hasPassword')
-    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only' })
+    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only', sessionSecret: access.policy().sessionSecret })
   })
 
   it('隧道前置认证仅使用配对码，重复调用不生成永久凭据', async () => {
@@ -256,7 +301,7 @@ describe('access 监听生命周期', () => {
     expect(status.auth.enabled).toBe(true)
     expect(status).not.toHaveProperty('generatedPassword')
     expect(status.auth).not.toHaveProperty('hasPassword')
-    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only' })
+    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only', sessionSecret: access.policy().sessionSecret })
     const code = access.policy().pairingCode
     await access.ensureAuth()
     expect(access.policy().pairingCode).toBe(code)
@@ -384,7 +429,7 @@ describe('access 监听生命周期', () => {
     expect(restored.port).toBe(applied.port)
     expect(restored.link).toBe(applied.link)
     const stored = storedDocument()
-    expect(stored).toEqual({ ...defaultAccessDocument(), enabled: true, listen: { address: '127.0.0.1', port }, auth: { enabled: true, token: null, scope: 'public_only' } })
+    expect(stored).toEqual({ ...defaultAccessDocument(), enabled: true, listen: { address: '127.0.0.1', port }, auth: { enabled: true, token: null, scope: 'public_only', sessionSecret: access.policy().sessionSecret } })
   })
 
   it('恢复失败时保持关闭并给出可读原因，且不静默改写配置', async () => {
@@ -583,7 +628,7 @@ describe('access 认证与来源判定（经真实网关）', () => {
     expect(again.headers.location).toBe('/')
   })
 
-  it('作废 Token 后旧链接失效，已签发的会话不受影响', async () => {
+  it('撤销授权后旧链接和已签发会话立即失效', async () => {
     const status = await enable()
     await access.apply({ authEnabled: true, scope: 'public_only' })
     const rotated = await access.rotate()
@@ -594,7 +639,7 @@ describe('access 认证与来源判定（经真实网关）', () => {
     expect(revoked.auth.hasToken).toBe(false)
     expect(revoked.link).toBe(`http://127.0.0.1:${status.port}/`)
     expect((await call(status.port, `/?auth=${token}`, { source: 'public' })).status).toBe(401)
-    expect((await call(status.port, '/api/probe', { source: 'public', cookie })).status).toBe(200)
+    expect((await call(status.port, '/api/probe', { source: 'public', cookie })).status).toBe(401)
   })
 
   it('配对码连续错误达阈值后封禁并返回可读剩余时间', async () => {

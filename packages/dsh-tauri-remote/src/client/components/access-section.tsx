@@ -317,7 +317,9 @@ export function AccessSection({ t }: AccessSectionProps): ReactElement {
       </Card>
 
       <Card>
-        <Row title={t('access.control.title')} hint={t('access.control.hint')}>{null}</Row>
+        <Row title={t('access.control.title')} hint={t('access.control.hint')}>
+          <Button variant="ghost" size="sm" data-testid="access-token-revoke" disabled={busy} onClick={revokeToken}>{t('access.token.revoke')}</Button>
+        </Row>
         <Row title={t('access.pairing.title')} hint={t('access.pairing.hint')}>
           <div className="flex flex-none items-center gap-[8px]" data-testid="access-pairing">
             {pairing === undefined
@@ -338,7 +340,6 @@ export function AccessSection({ t }: AccessSectionProps): ReactElement {
               ? <Button variant="outline" size="sm" data-testid="access-token-rotate" disabled={busy} onClick={issueToken}>{t('access.token.generate')}</Button>
               : (
                   <>
-                    <Button variant="ghost" size="sm" data-testid="access-token-revoke" disabled={busy} onClick={revokeToken}>{t('access.token.revoke')}</Button>
                     <Button variant="outline" size="sm" data-testid="access-permanent-reveal" aria-pressed={revealed} aria-label={t(revealed ? 'access.token.hide' : 'access.token.reveal')} onClick={() => setRevealed(value => !value)}>{t(revealed ? 'access.token.hide' : 'access.token.reveal')}</Button>
                     <code className="border-l-[0.5px] border-border-l2 pl-[8px] text-[14px] leading-[20px] tracking-[2px]" data-testid="access-permanent-value">{revealed ? token : '••••••••'}</code>
                   </>

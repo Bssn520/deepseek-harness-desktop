@@ -322,6 +322,67 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
+describe('rendered paired device authorization', () => {
+  const token = `v1.1700000000000.0.${'a'.repeat(64)}`
+
+  it('forces a new tokenless origin through pairing without persisting the pairing flag, while retaining remembered-host reconnects', async () => {
+    await mount()
+    expect(webView().props.source).toEqual({ uri: `${alpha.id}/?pair=1` })
+    await ready()
+    expect(connection.history[0]?.url).toBe(alpha.url)
+    await unmount()
+    runtime.connectAddress(alpha)
+    await mount()
+    expect(webView().props.source).toEqual({ uri: alpha.url })
+  })
+
+  it('requires pairing after forgetting even when switching hosts interrupts cookie clearing', async () => {
+    await mount()
+    await ready()
+    await message({ type: 'dsh://device-session', token })
+    await act(async () => connection.forget(alpha.id))
+    expect(connection.tokens).toEqual({})
+    expect(connection.history).toEqual([])
+    const generation = connection.viewGeneration
+    await act(async () => runtime.connectAddress(alpha))
+    expect(connection.viewGeneration).toBe(generation)
+    await unmount()
+    runtime.connectAddress(beta)
+    runtime.connectAddress(alpha)
+    await mount()
+    expect(webView().props.source).toEqual({ uri: `${alpha.id}/?pair=1` })
+  })
+
+  it('remembers authorization from the verified document without changing the initial WebView URI or generation', async () => {
+    runtime.connectAddress({ ...alpha, token: 'AB23CD45' })
+    await act(async () => {
+      screen = create(createElement(BridgeWebView, { address: connection.current!, generation: connection.viewGeneration }))
+    })
+    const instance = await viewRef()
+    const generation = connection.viewGeneration
+    const source = webView().props.source
+    await message({ type: 'dsh://device-session', token })
+    expect(connection.tokens).toEqual({})
+    await ready()
+    await message({ type: 'dsh://device-session', token }, { nonce: 'stale-nonce' })
+    await message({ type: 'dsh://device-session', token }, { url: beta.url })
+    expect(connection.tokens).toEqual({})
+    await message({ type: 'dsh://device-session', token })
+    expect(connection.tokens).toEqual({ [alpha.id]: token })
+    expect(connection.current?.token).toBe(token)
+    await act(async () => {
+      screen!.update(createElement(BridgeWebView, { address: connection.current!, generation }))
+    })
+    expect(webView().props.source).toEqual(source)
+    expect(await viewRef()).toBe(instance)
+    expect(connection.viewGeneration).toBe(generation)
+    expect(native.scheduleNotificationAsync).not.toHaveBeenCalled()
+    runtime.connectAddress(beta)
+    await message({ type: 'dsh://device-session', token: `v1.1700000000001.0.${'b'.repeat(64)}` })
+    expect(connection.tokens).toEqual({ [alpha.id]: token })
+  })
+})
+
 describe('rendered Bridge WebView document lifecycle', () => {
   it('reveals the real gateway pairing form after trusted SSR readiness instead of leaving it behind the fullscreen loader', async () => {
     vi.useRealTimers()
@@ -724,7 +785,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     await mount()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(20001)
-      webView().props[callback]({ nativeEvent: { url: alpha.url, code: -6, statusCode: 500, didCrash: true } })
+      webView().props[callback]({ nativeEvent: { url: webView().props.source.uri, code: -6, statusCode: 500, didCrash: true } })
     })
     const page = createPage()
     await rawMessage(page.posts[0]!)
@@ -764,7 +825,7 @@ describe('rendered Bridge WebView document lifecycle', () => {
     })
 
     expect(await viewRef()).not.toBe(oldView)
-    expect(webView().props.source).toEqual({ uri: 'https://second.test/workspaces' })
+    expect(webView().props.source).toEqual({ uri: 'https://second.test/?pair=1' })
     expect(connection.current).toEqual(beta)
     expect(connection.loading).toBe(true)
     expect(connection.loadError).toBeNull()

@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream'
 import { defineService } from 'dsh-tauri'
 import { messageOf } from '../../shared/error'
 import { ensureSourceSession } from '../config/runtime'
-import { rateLimitAfterFailure, rateLimitBlockedMs, signSession, tokenMatches, verifySession } from '../utils/auth'
+import { rateLimitAfterFailure, rateLimitBlockedMs, signDeviceSession, signSession, tokenMatches, verifyDeviceSession, verifySession } from '../utils/auth'
 import { classifySource, decideSourceAccess, isAuthConfigured, rateLimitKeyOf } from '../utils/source'
 import { authorityFor, cookiePairsOf, createCompressor, createDecompressor, deniedHtml, entryUrlOf, forwardHeadersOf, isCrossSiteRequest, isNavigationRequest, isReplayable, isUpgradeOf, loginPageHtml, mergeCookieHeader, parseCookieHeader, parseFormField, responseHeadersOf, responsePlanOf, supportsZstd, tunnelClientIpOf, upstreamPortOf } from './gateway.utils'
 
@@ -88,6 +88,19 @@ export const gateway = defineService({
 
   async stop(id: string): Promise<void> {
     await stopEntry(id)
+  },
+
+  revoke(): void {
+    for (const entry of entries.values()) {
+      if (entry.kind === 'outbound')
+        continue
+      for (const socket of entry.sockets)
+        socket.destroy()
+      for (const request of entry.requests)
+        request.destroy()
+      for (const socket of entry.upstreamSockets)
+        socket.destroy()
+    }
   },
 
   status(id: string): RemoteGatewayEntryStatus | undefined {
@@ -247,6 +260,7 @@ function listenAt(entry: GatewayEntry, port: number): Promise<Server> {
     server.on('connection', (socket) => {
       entry.sockets.add(socket)
       entry.connections += 1
+      socket.on('error', () => socket.destroy())
       socket.on('close', () => {
         entry.sockets.delete(socket)
         entry.connections = Math.max(0, entry.connections - 1)
@@ -287,12 +301,39 @@ async function dispatchRequest(entry: GatewayEntry, request: IncomingMessage, re
     return
   }
   const policy = entry.auth?.()
+  if (entry.kind !== 'outbound' && url.pathname === '/api/tauri/remote/access/session') {
+    if (request.method === 'DELETE') {
+      response.writeHead(204, { 'set-cookie': `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`, 'cache-control': 'no-store' })
+      response.end()
+      return
+    }
+    if (request.method !== 'GET') {
+      response.setHeader('allow', 'GET, DELETE')
+      writeJson(response, 405, '该端点仅支持 GET 与 DELETE。', 0)
+      return
+    }
+    const now = Date.now()
+    if (!isAuthConfigured(policy) || !verifySession(parseCookieHeader(cookieHeaderOf(request.headers.cookie)).get(SESSION_COOKIE), policy.sessionSecret, now)) {
+      writeAuthChallenge(request, response, undefined, 401, 0)
+      return
+    }
+    const body = JSON.stringify({ token: signDeviceSession(policy.sessionSecret, now).value })
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': String(Buffer.byteLength(body)), 'cache-control': 'no-store' })
+    response.end(body)
+    return
+  }
   const decision = decideSourceAccess(source, policy)
   if (decision === 'deny') {
     writeDenied(request, response, DENIED_REASON)
     return
   }
-  const exchange = entry.kind !== 'outbound' && source !== 'loopback' && isAuthConfigured(policy) && url.pathname === '/' && ((request.method === 'GET' && url.searchParams.has(AUTH_QUERY)) || isLoginSubmission(request))
+  const pairing = url.pathname === '/' && url.searchParams.get('pair') === '1'
+  if (entry.kind !== 'outbound' && isAuthConfigured(policy) && pairing && request.method === 'GET' && !url.searchParams.has(AUTH_QUERY)) {
+    response.setHeader('set-cookie', `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`)
+    writeAuthChallenge(request, response, undefined, 401, 0)
+    return
+  }
+  const exchange = entry.kind !== 'outbound' && isAuthConfigured(policy) && (source !== 'loopback' || url.searchParams.get(AUTH_QUERY)?.startsWith('v1.') || pairing) && url.pathname === '/' && ((request.method === 'GET' && url.searchParams.has(AUTH_QUERY)) || isLoginSubmission(request))
   if (decision === 'authenticate' || exchange) {
     if (policy === undefined || !await admitAuthenticated(entry, request, response, source, policy))
       return
@@ -308,16 +349,23 @@ function sourceOf(entry: GatewayEntry, request: IncomingMessage, session: string
 async function admitAuthenticated(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse, source: RemoteSourceClass, policy: RemoteAuthPolicy): Promise<boolean> {
   const now = Date.now()
   const bucket = rateLimitKeyOf(source, request.socket.remoteAddress, entry.kind === 'tunnel' ? tunnelClientIpOf(request.headers) : undefined)
-  if (verifySession(parseCookieHeader(cookieHeaderOf(request.headers.cookie)).get(SESSION_COOKIE), policy.sessionSecret, now))
+  const url = new URL(request.url ?? '/', 'http://gateway.invalid')
+  const provided = request.method === 'GET' && url.pathname === '/' ? url.searchParams.get(AUTH_QUERY) ?? undefined : undefined
+  const pairing = url.pathname === '/' && url.searchParams.get('pair') === '1'
+  const authenticated = !pairing && verifySession(parseCookieHeader(cookieHeaderOf(request.headers.cookie)).get(SESSION_COOKIE), policy.sessionSecret, now)
+  if (verifyDeviceSession(provided, policy.sessionSecret, now) || (authenticated && provided?.startsWith('v1.'))) {
+    authFailures.delete(bucket)
+    writeSessionRedirect(response, policy, url.pathname, now)
+    return false
+  }
+  if (authenticated)
     return true
   const banned = rateLimitBlockedMs(authFailures.get(bucket), now)
   if (banned > 0) {
     writeAuthChallenge(request, response, BANNED_REASON, 429, banned)
     return false
   }
-  const url = new URL(request.url ?? '/', 'http://gateway.invalid')
   if (request.method === 'GET' && url.pathname === '/' && url.searchParams.has(AUTH_QUERY)) {
-    const provided = url.searchParams.get(AUTH_QUERY) ?? undefined
     if (tokenMatches(provided, policy.linkToken) || (provided !== undefined && (policy.consumePairingCode?.(provided) ?? tokenMatches(provided, policy.pairingCode ?? null)))) {
       authFailures.delete(bucket)
       writeSessionRedirect(response, policy, url.pathname, now)
@@ -332,7 +380,7 @@ async function admitAuthenticated(entry: GatewayEntry, request: IncomingMessage,
     const completedAt = Date.now()
     if (submitted !== undefined && isAuthConfigured(latest) && (tokenMatches(submitted, latest.linkToken) || (latest.consumePairingCode?.(submitted) ?? tokenMatches(submitted, latest.pairingCode ?? null)))) {
       authFailures.delete(bucket)
-      writeSessionRedirect(response, latest, `${url.pathname}${url.search}`, completedAt)
+      writeSessionRedirect(response, latest, pairing ? '/' : `${url.pathname}${url.search}`, completedAt)
       return false
     }
     failAuth(bucket, completedAt, request, response, '配对码不正确或已失效。')
@@ -434,6 +482,8 @@ async function forward(entry: GatewayEntry, request: IncomingMessage, response: 
 }
 
 function sendUpstream(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse, headers: OutgoingHttpHeaders, attempt: ForwardAttempt, source: RemoteSourceClass): Promise<void> {
+  if (request.socket.destroyed || response.destroyed)
+    return Promise.resolve()
   return new Promise((resolve) => {
     const upstream = httpRequest({
       host: entry.upstream.hostname,

@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
 import type { RemoteAuthPolicy, RemoteGatewayEntryKind, RemoteGatewayEvent, RemoteGatewayStartOptions } from '../types/index'
 import { Buffer } from 'node:buffer'
@@ -1607,6 +1607,173 @@ describe('gateway 认证要素', () => {
   })
 })
 
+describe('gateway native 长期授权', () => {
+  const issuedAt = 1_700_000_000_000
+  const deviceToken = 'v1.1700000000000.0.d00a01b8c953df972df9b96b0d093564f73bf36fbf0f4119e5bd5c02e62b8f77'
+  const sessionPath = '/api/tauri/remote/access/session'
+
+  it('临时配对成功后用已认证会话取得长期授权，不缓存或转发凭据', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(issuedAt)
+    const first = pairingCodeOf()
+    const policy = policyOf({ linkToken: null, pairingCode: first.code, consumePairingCode })
+    const status = await startEntry('tunnel', upstream, { auth: () => policy })
+    const login = await call(status.port, `/?auth=${first.code}`, { headers: tunnelHeaders('') })
+    expect(login.status).toBe(302)
+    expect(pairingCodeOf().usedSeq).toBe(1)
+    const cookie = (login.headers['set-cookie'] ?? [])[0]?.split(';')[0] ?? ''
+    const reply = await call(status.port, sessionPath, { headers: tunnelHeaders(cookie) })
+    expect(reply.status).toBe(200)
+    expect(JSON.parse(reply.body.toString())).toEqual({ token: deviceToken })
+    expect(reply.headers['cache-control']).toBe('no-store')
+    expect(reply.headers['set-cookie']).toBeUndefined()
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it.each(['private', 'loopback', 'public'] as const)('%s 来源免密或未登录时不能取得长期授权', async (source) => {
+    const status = await startEntry('inbound', upstream, { auth: () => policyOf(), tokenProvider: upstream.mintUrlFor })
+    const reply = await call(status.port, sessionPath, { headers: markerHeaders(source) })
+    expect(reply.status).toBe(401)
+    expect(JSON.parse(reply.body.toString())).toEqual({ error: '需要认证后才能访问。' })
+    expect(reply.headers['set-cookie']).toBeUndefined()
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('认证停用时已有会话也不能取得长期授权', async () => {
+    const status = await startEntry('inbound', upstream, { auth: () => policyOf({ enabled: false }), tokenProvider: upstream.mintUrlFor })
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    const reply = await call(status.port, sessionPath, { headers: markerHeaders('private', { cookie }) })
+    expect(reply.status).toBe(401)
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('跨站来源不能取得长期授权或清除会话', async () => {
+    const status = await startEntry('inbound', upstream, { auth: () => policyOf() })
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    for (const method of ['GET', 'DELETE']) {
+      const reply = await call(status.port, sessionPath, { method, headers: markerHeaders('public', { cookie, origin: 'https://evil.example' }) })
+      expect(reply.status).toBe(403)
+      expect(reply.headers['set-cookie']).toBeUndefined()
+    }
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it.each(['POST', 'HEAD', 'OPTIONS'])('%s 不能取得长期授权或透传会话端点', async (method) => {
+    const status = await startEntry('inbound', upstream, { auth: () => policyOf() })
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    const reply = await call(status.port, sessionPath, { method, headers: markerHeaders('public', { cookie }) })
+    expect(reply.status).toBe(405)
+    expect(reply.headers.allow).toBe('GET, DELETE')
+    expect(reply.headers['set-cookie']).toBeUndefined()
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('设备授权一年后仍可重新取得有限会话，且不消费新的临时配对码', async () => {
+    const now = issuedAt + 365 * 24 * 60 * 60 * 1000
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    const code = pairingCodeOf().code
+    const status = await startEntry('tunnel', upstream, { auth: () => policyOf({ linkToken: null, pairingCode: code, consumePairingCode }), tokenProvider: upstream.mintUrlFor })
+    const reply = await call(status.port, `/?auth=${deviceToken}`, { headers: tunnelHeaders('') })
+    expect(reply.status).toBe(302)
+    expect(reply.headers.location).toBe('/')
+    const setCookie = (reply.headers['set-cookie'] ?? [])[0] ?? ''
+    expect(setCookie).toContain('; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax')
+    const cookie = setCookie.split(';')[0] ?? ''
+    expect((await call(status.port, '/api/ping', { headers: tunnelHeaders(cookie) })).status).toBe(200)
+    expect(pairingCodeOf().usedSeq).toBe(0)
+    clock.mockReturnValue(now + 30 * 24 * 60 * 60 * 1000)
+    expect((await call(status.port, '/api/ping', { headers: tunnelHeaders(cookie) })).status).toBe(401)
+    expect((await call(status.port, `/?auth=${deviceToken}`, { headers: tunnelHeaders('') })).status).toBe(302)
+    expect(upstream.calls.every(request => !request.url.includes(deviceToken))).toBe(true)
+  })
+
+  it('设备授权链接在已有有效会话时也跳到干净 URL，不透传长期凭据', async () => {
+    const status = await startEntry('tunnel', upstream, { auth: () => policyOf(), tokenProvider: upstream.mintUrlFor })
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    const reply = await call(status.port, `/?auth=${deviceToken}`, { headers: tunnelHeaders(cookie) })
+    expect(reply.status).toBe(302)
+    expect(reply.headers.location).toBe('/')
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('设备授权不是普通会话 cookie，普通会话也不能充当设备授权', async () => {
+    const status = await startEntry('tunnel', upstream, { auth: () => policyOf() })
+    const reply = await call(status.port, sessionPath, { headers: tunnelHeaders(`dsh_remote_session=${deviceToken}`) })
+    expect(reply.status).toBe(401)
+    const session = signSession('session-secret', Date.now()).value
+    expect((await call(status.port, `/?auth=${session}`, { headers: tunnelHeaders('') })).status).toBe(401)
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('授权密钥轮换后旧设备授权和已签会话均被拒绝', async () => {
+    let policy = policyOf()
+    const status = await startEntry('tunnel', upstream, { auth: () => policy })
+    const login = await call(status.port, `/?auth=${deviceToken}`, { headers: tunnelHeaders('') })
+    expect(login.status).toBe(302)
+    const cookie = (login.headers['set-cookie'] ?? [])[0]?.split(';')[0] ?? ''
+    policy = { ...policy, sessionSecret: 'revoked-session-secret' }
+    expect((await call(status.port, `/?auth=${deviceToken}`, { headers: tunnelHeaders('') })).status).toBe(401)
+    expect((await call(status.port, sessionPath, { headers: tunnelHeaders(cookie) })).status).toBe(401)
+    expect((await call(status.port, '/api/ping', { headers: tunnelHeaders(cookie) })).status).toBe(401)
+    expect(upstream.calls).toHaveLength(0)
+  })
+
+  it('冷缓存铸造期间撤销授权后不再把已接纳的写请求发往上游', async () => {
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    let release = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const provider = vi.fn(async (authority: string) => {
+      await gate
+      return await upstream.mintUrlFor(authority)
+    })
+    const status = await startEntry('tunnel', upstream, { auth: () => policyOf(), tokenProvider: provider })
+    const pending = call(status.port, '/api/echo', { method: 'POST', headers: tunnelHeaders(cookie), body: 'must-not-forward' }).catch((error: unknown) => error)
+    try {
+      await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce())
+      gateway.revoke()
+      expect(await pending).toMatchObject({ code: 'ECONNRESET' })
+    }
+    finally {
+      release()
+    }
+    const resumed = await call(status.port, '/api/ping', { headers: tunnelHeaders(cookie) })
+    expect(resumed.status).toBe(200)
+    expect(upstream.calls.map(request => request.url)).toEqual(['/?token=launch-token-1', '/api/ping'])
+  })
+
+  it.each(['inbound', 'tunnel'] as const)('删除后在 %s 入口重新配对时忽略残留会话，仍需新的配对码', async (kind) => {
+    const status = await startEntry(kind, upstream, { auth: () => policyOf(), tokenProvider: upstream.mintUrlFor })
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    const headers = kind === 'tunnel' ? tunnelHeaders(cookie) : markerHeaders('private', { cookie })
+    const challenge = await call(status.port, '/?pair=1', { headers: { ...headers, ...navigation() } })
+    expect(challenge.status).toBe(401)
+    expect(challenge.body.toString()).toContain('<form id="loginForm" method="post">')
+    expect(challenge.headers['set-cookie']).toEqual(['dsh_remote_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax'])
+    expect(upstream.calls).toHaveLength(0)
+    const login = await call(status.port, '/?pair=1', {
+      method: 'POST',
+      headers: { ...headers, ...navigation(), 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'code=AB23CD45',
+    })
+    expect(login.status).toBe(302)
+    expect(login.headers.location).toBe('/')
+    const pairedCookie = (login.headers['set-cookie'] ?? [])[0]?.split(';')[0] ?? ''
+    expect(pairedCookie).toContain('dsh_remote_session=')
+    expect((await call(status.port, sessionPath, { headers: { ...headers, cookie: pairedCookie } })).status).toBe(200)
+  })
+
+  it('退出配对会话只清除当前 cookie，不在上游残留连接或凭据', async () => {
+    const status = await startEntry('tunnel', upstream, { auth: () => policyOf() })
+    const reply = await call(status.port, sessionPath, { method: 'DELETE', headers: tunnelHeaders('') })
+    expect(reply.status).toBe(204)
+    expect(reply.headers['set-cookie']).toEqual(['dsh_remote_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax'])
+    expect(reply.headers['cache-control']).toBe('no-store')
+    expect(reply.body.length).toBe(0)
+    expect(upstream.calls).toHaveLength(0)
+  })
+})
+
 describe('gateway 内部来源标识', () => {
   it('把分类与会话标识注入到本机上游，隧道入口恒定声明 tunnel', async () => {
     const inbound = await startEntry('inbound', upstream, { tokenProvider: upstream.mintUrlFor })
@@ -2068,11 +2235,37 @@ describe('gateway Upgrade 例外', () => {
     expect(gateway.status('entry')).toMatchObject({ state: 'stopped', connections: 0 })
   })
 
-  it('升级连接被客户端强行中断后网关仍然可用', async () => {
+  it('撤销授权关闭入站与隧道的在途升级连接，保留监听端口和出站连接', async () => {
+    const cookie = `dsh_remote_session=${signSession('session-secret', Date.now()).value}`
+    const inbound = await gateway.start({ id: 'inbound', kind: 'inbound', upstream: upstream.origin, port: 0, auth: () => policyOf(), tokenProvider: upstream.mintUrlFor })
+    const tunnel = await gateway.start({ id: 'tunnel', kind: 'tunnel', upstream: upstream.origin, port: 0, auth: () => policyOf(), tokenProvider: upstream.mintUrlFor })
+    const outbound = await gateway.start({ id: 'outbound', kind: 'outbound', upstream: upstream.origin, port: 0, tokenProvider: upstream.mintUrlFor })
+    const incoming = await upgraded(inbound.port, '/api/remote.mux', markerHeaders('public', { cookie }))
+    const tunneled = await upgraded(tunnel.port, '/api/remote.mux', tunnelHeaders(cookie))
+    const outgoing = await upgraded(outbound.port, '/api/remote.mux', {})
+    const closed = [incoming, tunneled].map((reply) => {
+      const pending = once(reply.socket, 'close')
+      reply.socket.resume()
+      return pending
+    })
+    gateway.revoke()
+    await Promise.all(closed)
+    await vi.waitFor(() => {
+      expect(gateway.status('inbound')).toMatchObject({ state: 'listening', port: inbound.port, connections: 0 })
+      expect(gateway.status('tunnel')).toMatchObject({ state: 'listening', port: tunnel.port, connections: 0 })
+    })
+    expect(gateway.status('outbound')).toMatchObject({ state: 'listening', port: outbound.port, connections: 1 })
+    expect(outgoing.socket.destroyed).toBe(false)
+    expect((await call(inbound.port, '/api/ping', { headers: markerHeaders('public', { cookie }) })).status).toBe(200)
+    outgoing.socket.destroy()
+  })
+
+  it('升级连接被客户端 TCP 重置后不抛未捕获异常，网关仍然可用', async () => {
     const status = await startEntry('inbound', upstream, { tokenProvider: upstream.mintUrlFor })
     const reply = await upgraded(status.port, '/api/remote.mux', markerHeaders('private'))
     expect(reply.status).toBe(101)
-    reply.socket.destroy()
+    const socket = reply.socket as Socket
+    socket.resetAndDestroy()
     await vi.waitFor(() => expect(gateway.status('entry')?.connections).toBe(0))
     const after = await call(status.port, '/api/ping', { headers: markerHeaders('private') })
     expect(after.status).toBe(200)
@@ -2450,7 +2643,9 @@ function freePortAt(port: number): Promise<{ port: number, release: () => Promis
 /** 占用 P 且保证 P+1 空闲，使「回落到下一个可用端口」有唯一确定的期望值。 */
 async function occupiedPortWithFreeNext(): Promise<{ port: number, release: () => Promise<void> }> {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const base = await freePort()
+    const base = await freePortAt(25_000 + attempt * 32)
+    if (base === undefined)
+      continue
     const next = await freePortAt(base.port + 1)
     if (next !== undefined) {
       await next.release()

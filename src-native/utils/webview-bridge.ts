@@ -1,11 +1,13 @@
 import type { Edge } from 'react-native-safe-area-context'
 import type { NativeNotificationMessage } from './notification-policy'
 import { FOCUS_RETRY_INTERVAL_MS, FOCUS_TIMEOUT_MS } from '@/config/constants'
-import { isRecord, isTrustedOrigin } from './bridge-protocol'
+import { isDeviceSession, isRecord, isTrustedOrigin } from './bridge-protocol'
 
 export type NativeWebViewMessage
   = | NativeNotificationMessage
     | { type: 'dsh://bridge-ready' }
+    | { type: 'dsh://device-session', token: string }
+    | { type: 'dsh://session-forgotten' }
     | { type: 'dsh://theme-state', theme: 'light' | 'dark' | 'system' }
     | { type: 'dsh://focus-result', requestId: string, handled: boolean }
 
@@ -19,8 +21,10 @@ export function parseNativeMessage(raw: string, nativeUrl: string, expectedOrigi
     const payload = value.payload
     if (!isRecord(payload))
       return null
-    if (payload.type === 'dsh://bridge-ready')
-      return { type: 'dsh://bridge-ready' }
+    if (payload.type === 'dsh://bridge-ready' || payload.type === 'dsh://session-forgotten')
+      return { type: payload.type }
+    if (payload.type === 'dsh://device-session')
+      return isDeviceSession(payload.token) ? { type: 'dsh://device-session', token: payload.token } : null
     if (payload.type === 'dsh://theme-state') {
       if (payload.theme !== 'light' && payload.theme !== 'dark' && payload.theme !== 'system')
         return null
@@ -100,6 +104,9 @@ export function createNotificationShim(origin: string, nonce: string, nativeSafe
   var focusStartedAt = 0;
   var focusTimer = null;
   var results = new Map();
+  var sessionRequested = false;
+  var sessionForgotten = false;
+  var sessionUrl = expectedOrigin + '/api/tauri/remote/access/session';
   function send(payload) {
     if (!active || window.__dshBridgeNonce !== nonce || !window.ReactNativeWebView) return false;
     var raw = JSON.stringify({ channel: 'dsh-bridge', origin: expectedOrigin, nonce: nonce, payload: payload });
@@ -217,6 +224,13 @@ export function createNotificationShim(origin: string, nonce: string, nativeSafe
   }
   window.__dshBridgeReceive = function (data) {
     if (!active || window.__dshBridgeNonce !== nonce || !data || data.nonce !== nonce) return;
+    if (data.type === 'dsh://forget-session') {
+      if (sessionForgotten) return;
+      sessionForgotten = true;
+      if (typeof fetch === 'function') fetch(sessionUrl, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+        .then(function (response) { if (response.ok) send({ type: 'dsh://session-forgotten' }); }).catch(function () {});
+      return;
+    }
     if (data.type === 'dsh://visibility-state') {
       if (hidden !== !!data.hidden) {
         hidden = !!data.hidden;
@@ -340,6 +354,15 @@ export function createNotificationShim(origin: string, nonce: string, nativeSafe
       window.__dshBridgeThemeObserver = themeObserver;
     }
     syncTheme();
+    if (readySent && !sessionRequested && !sessionForgotten && (window.__DSH_BOOT__ || window.__dshClientCtx) && typeof fetch === 'function') {
+      sessionRequested = true;
+      fetch(sessionUrl, { credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (data) {
+          if (!sessionForgotten && location.origin === expectedOrigin && data && typeof data.token === 'string' && data.token.length <= 128)
+            send({ type: 'dsh://device-session', token: data.token });
+        }).catch(function () {});
+    }
     clearTimeout(sessionWatchTimer);
     watchSessions();
   }
