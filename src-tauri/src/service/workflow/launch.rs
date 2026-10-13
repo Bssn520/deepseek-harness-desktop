@@ -419,6 +419,9 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = crate::service::patch::composer::apply(&app_handle) {
         log::warn!("composer workspace-less patch failed: {e}");
     }
+    if let Err(e) = crate::service::patch::conversation_draft::apply(&app_handle) {
+        log::warn!("conversation draft compatibility patch failed: {e}");
+    }
     if let Err(e) = crate::service::patch::mobile_composer::apply(&app_handle) {
         log::warn!("mobile composer patch failed: {e}");
     }
