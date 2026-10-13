@@ -293,7 +293,7 @@ describe('rendered Home scanning and idle actions', () => {
     await press('自动扫描局域网')
 
     expect(connection.current).toEqual({ id: origin, url: `${origin}/`, host: '192.168.1.2', port: 3088 })
-    expect(webView().props.source).toEqual({ uri: `${origin}/` })
+    expect(webView().props.source).toEqual({ uri: `${origin}/?pair=1` })
     expect(connection.loading).toBe(true)
     expect(connection.history).toEqual([])
     expect(connection.notice).toBeNull()
@@ -487,6 +487,14 @@ describe('rendered Home connection editing', () => {
     expect(root().findAll(node => String(node.type) === 'WebView')).toHaveLength(1)
     native.fetch.mockClear()
     await act(async () => confirmation[2]![1]!.onPress!())
+    expect(connection.current?.id).toBe(alpha.id)
+    expect(connection.forgettingOrigin).toBe(alpha.id)
+    expect(connection.history.some(entry => entry.id === alpha.id)).toBe(false)
+    expect(connection.tokens[alpha.id]).toBeUndefined()
+    const generation = connection.viewGeneration
+    await act(async () => runtime.connectAddress(alpha))
+    expect(connection.viewGeneration).toBe(generation)
+    await act(async () => vi.advanceTimersByTimeAsync(2000))
     expect(connection.current).toBeNull()
     expect(connection.stage).toBe('idle')
     expect(connection.history.some(entry => entry.id === alpha.id)).toBe(false)

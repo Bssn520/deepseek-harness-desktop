@@ -105,6 +105,14 @@ describe('connect URL and label', () => {
     expect(address.url).toBe('https://bridge.local:8443/workspaces/w-1?theme=dark&auth=old')
   })
 
+  it('exchanges a device ticket only at its origin root without forwarding the deep route or public query', () => {
+    const token = `v1.1700000000000.0.${'a'.repeat(64)}`
+    const address = { id: 'https://bridge.local:8443', url: 'https://bridge.local:8443/tasks?session=7', host: 'bridge.local', port: 8443, token }
+    expect(buildConnectUrl(address)).toBe(`https://bridge.local:8443/?auth=${token}`)
+    expect(address.url).toBe('https://bridge.local:8443/tasks?session=7')
+    expect(address.token).toBe(token)
+  })
+
   it('keeps a token-free URL unchanged', () => {
     expect(buildConnectUrl({ id: 'http://bridge.local', url: 'http://bridge.local/tasks?session=7', host: 'bridge.local', port: 80 })).toBe('http://bridge.local/tasks?session=7')
   })

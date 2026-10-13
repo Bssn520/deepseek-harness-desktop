@@ -9,6 +9,7 @@ export interface RemoteAccessAuthDocument {
   enabled: boolean
   token: string | null
   scope: RemoteAuthScope
+  sessionSecret?: string
 }
 
 export interface RemoteAccessDocument {

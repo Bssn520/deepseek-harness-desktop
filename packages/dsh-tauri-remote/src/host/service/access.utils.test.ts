@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'pathe'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createSessionSecret } from '../utils/auth'
 import { ACCESS_DOCUMENT_VERSION, addressProblemOf, buildLink, DEFAULT_ACCESS_ADDRESS, DEFAULT_ACCESS_PORT, defaultAccessDocument, enumerateAddresses, isReachableAddress, isSelectableAddress, linkHostOf, maskLinkOf, pairingLinksOf, parseAccessDocument, patchAccessDocument, policyOf, rankAddresses, readAccessDocument, redactStatus, serializeAccessDocument, writeAccessDocument } from './access.utils'
 
 const homes: string[] = []
@@ -96,6 +97,20 @@ describe('parseAccessDocument', () => {
     expect(parsed.document.auth).toEqual({ enabled: true, token: 'keep-token', scope: 'all' })
     expect(parsed.warnings).toEqual(['access.json 丢弃未知键 auth.password'])
     expect(serializeAccessDocument(parsed.document)).not.toContain('password')
+  })
+
+  it('保留随机会话密钥并拒绝无效密钥，补丁不会清除授权密钥', () => {
+    const secret = createSessionSecret()
+    const parsed = parseAccessDocument(JSON.stringify({ auth: { enabled: true, sessionSecret: secret } }))
+    expect(parsed.document.auth.sessionSecret).toBe(secret)
+    expect(parsed.warnings).toEqual([])
+    expect(parseAccessDocument(serializeAccessDocument(parsed.document)).document.auth.sessionSecret).toBe(secret)
+    expect(patchAccessDocument(parsed.document, { scope: 'all' }, []).auth.sessionSecret).toBe(secret)
+    for (const sessionSecret of ['', 'weak-secret', null, 123, `${secret}x`]) {
+      const invalid = parseAccessDocument(JSON.stringify({ auth: { sessionSecret } }))
+      expect(invalid.document.auth.sessionSecret).toBeUndefined()
+      expect(invalid.warnings).toEqual(['access.json 的 auth.sessionSecret 非法，已丢弃'])
+    }
   })
 
   it('文件缺失或全为空白时回落默认文档且不算损坏', () => {
@@ -400,6 +415,8 @@ describe('pairingLinksOf', () => {
 describe('policyOf', () => {
   it('把文档映射为网关认证快照', () => {
     const document = { ...defaultAccessDocument(), auth: { enabled: true, token: 'tok', scope: 'all' as const } }
-    expect(policyOf(document, 'secret')).toEqual({ enabled: true, scope: 'all', linkToken: 'tok', sessionSecret: 'secret' })
+    expect(policyOf(document)).toEqual({ enabled: true, scope: 'all', linkToken: 'tok', sessionSecret: '' })
+    const sessionSecret = createSessionSecret()
+    expect(policyOf({ ...document, auth: { ...document.auth, sessionSecret } }).sessionSecret).toBe(sessionSecret)
   })
 })

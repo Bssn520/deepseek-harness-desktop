@@ -4,7 +4,7 @@ import { defineStore } from 'valtio-define'
 import { persist } from 'valtio-define/plugins/persist'
 import { CONNECTION_STORAGE_KEY, HISTORY_LIMIT, RECENT_LIMIT } from '@/config/constants'
 import { i18n } from '@/i18n'
-import { isRecord, parseQrPayload } from '@/utils/bridge-protocol'
+import { isDeviceSession, isRecord, parseQrPayload } from '@/utils/bridge-protocol'
 
 export type ConnectionStage = 'scanning' | 'idle' | 'connected'
 export type HostHealth = 'checking' | 'available' | 'unavailable'
@@ -44,6 +44,7 @@ export interface ConnectionState {
   viewGeneration: number
   pendingFocus: NotificationFocus | null
   focusGeneration: number
+  forgettingOrigin: string | null
 }
 
 /** 持久化字段：插件按此顺序把 state 写成 `{version, history, guidedHosts}`。 */
@@ -182,6 +183,7 @@ export function createConnectionState(): ConnectionState {
     viewGeneration: 0,
     pendingFocus: null,
     focusGeneration: 0,
+    forgettingOrigin: null,
   }
 }
 
@@ -210,6 +212,7 @@ export const connection = defineStore({
       this.notice = null
       this.drawerOpen = false
       this.swipeHintVisible = false
+      this.forgettingOrigin = null
       return this.scanGeneration
     },
     cancelScan() {
@@ -227,7 +230,7 @@ export const connection = defineStore({
       if (generation !== undefined && generation !== this.scanGeneration)
         return false
       const normalized = parseQrPayload(address.url)
-      if (!normalized)
+      if (!normalized || normalized.id === this.forgettingOrigin)
         return false
       let name = this.history.find(entry => entry.id === normalized.id)?.name
       if (!name && this.current?.id === normalized.id)
@@ -235,10 +238,8 @@ export const connection = defineStore({
       if (name)
         normalized.name = name
       const token = address.token ?? normalized.token ?? this.tokens[normalized.id]
-      if (token) {
+      if (token)
         normalized.token = token
-        this.tokens[normalized.id] = token
-      }
       this.scanGeneration++
       this.current = normalized
       this.stage = 'connected'
@@ -248,6 +249,7 @@ export const connection = defineStore({
       this.drawerOpen = false
       this.swipeHintVisible = false
       this.health[normalized.id] = 'available'
+      this.forgettingOrigin = null
       this.viewGeneration++
       return true
     },
@@ -264,6 +266,14 @@ export const connection = defineStore({
       this.guidedHosts = this.guidedHosts.filter(origin => retained.has(origin))
       this.swipeHintVisible = !this.guidedHosts.includes(id)
       this.health[id] = 'available'
+    },
+    rememberDeviceSession(origin: string, token: string, generation: number) {
+      if (generation !== this.viewGeneration || this.current?.id !== origin || this.loading || this.loadError
+        || this.forgettingOrigin === origin || !isDeviceSession(token)) {
+        return
+      }
+      this.tokens[origin] = token
+      this.current.token = token
     },
     markLoadFailed(generation: number, message: string) {
       if (!this.current || generation !== this.viewGeneration)
@@ -303,6 +313,20 @@ export const connection = defineStore({
       if (this.current?.id === id)
         this.current.name = trimmed
     },
+    forget(id: string) {
+      if (this.current?.id !== id) {
+        this.remove(id)
+        return
+      }
+      this.history = this.history.filter(entry => entry.id !== id)
+      this.guidedHosts = this.guidedHosts.filter(origin => origin !== id)
+      delete this.tokens[id]
+      delete this.health[id]
+      delete this.current.token
+      if (this.pendingFocus?.origin === id)
+        this.queueFocus(null)
+      this.forgettingOrigin = id
+    },
     remove(id: string) {
       if (this.current?.id === id)
         this.disconnect('idle')
@@ -324,6 +348,7 @@ export const connection = defineStore({
       this.drawerOpen = false
       this.swipeHintVisible = false
       this.pendingFocus = null
+      this.forgettingOrigin = null
     },
     /** 当前应当落盘的快照（含归一化），磁盘格式与旧版实现一致。 */
     serialize(): ConnectionSnapshot {

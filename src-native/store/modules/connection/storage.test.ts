@@ -18,6 +18,8 @@ vi.mock('expo-localization', () => ({ getLocales: () => [{ languageTag: 'zh-CN' 
 
 const alpha = { id: 'http://bridge.local:3080', url: 'http://bridge.local:3080/tasks?theme=dark', host: 'bridge.local', port: 3080 }
 const beta = { id: 'https://second.local', url: 'https://second.local/workspaces', host: 'second.local', port: 443 }
+const deviceToken = `v1.1700000000000.0.${'a'.repeat(64)}`
+const betaDeviceToken = `v1.1700000000001.0.${'b'.repeat(64)}`
 const alphaKey = 'dsh-bridge.token.0068007400740070003a002f002f006200720069006400670065002e006c006f00630061006c003a0033003000380030'
 const betaKey = 'dsh-bridge.token.00680074007400700073003a002f002f007300650063006f006e0064002e006c006f00630061006c'
 const emptySnapshot: ConnectionSnapshot = { version: 1, history: [], guidedHosts: [] }
@@ -84,9 +86,56 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('paired device authorization', () => {
+  it('keeps the input pairing code transient and persists only authorization received from the verified document', async () => {
+    await hydrate()
+    bind()
+    connection.accept({ ...alpha, token: 'AB23CD45' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(connection.tokens).toEqual({})
+    expect(native.writeToken).not.toHaveBeenCalled()
+    connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(native.writeToken).toHaveBeenCalledExactlyOnceWith(alphaKey, deviceToken)
+    expect(connection.current?.token).toBe(deviceToken)
+    expect(writtenPayloads().every(value => !value.includes(deviceToken) && !value.includes('AB23CD45'))).toBe(true)
+  })
+
+  it('does not replace authorization from a stale, foreign, failed, loading or forgetting document', async () => {
+    await hydrate()
+    connection.accept(alpha)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
+    expect(connection.tokens).toEqual({})
+    connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(beta.id, deviceToken, connection.viewGeneration)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration - 1)
+    connection.rememberDeviceSession(alpha.id, 'AB23CD45', connection.viewGeneration)
+    expect(connection.tokens).toEqual({})
+    connection.markLoadFailed(connection.viewGeneration, 'network error')
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
+    expect(connection.tokens).toEqual({})
+    connection.accept(alpha)
+    connection.markLoaded(connection.viewGeneration, 20)
+    connection.forget(alpha.id)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
+    expect(connection.tokens).toEqual({})
+  })
+
+  it('restores a reusable device ticket for reconnection but deletes a previously saved temporary pairing code', async () => {
+    native.read.mockResolvedValue(payload([{ ...alpha, lastConnectedAt: 10 }, { ...beta, lastConnectedAt: 5 }]))
+    native.readToken.mockImplementation(async key => key === alphaKey ? deviceToken : 'AB23CD45')
+    await restoreConnections()
+    expect(connection.tokens).toEqual({ [alpha.id]: deviceToken })
+    expect(native.deleteToken).toHaveBeenCalledExactlyOnceWith(betaKey)
+    connection.accept(alpha)
+    expect(connection.current?.token).toBe(deviceToken)
+  })
+})
+
 describe('connection editing persistence', () => {
   it('persists a renamed host and deletes its secure token when the active connection is removed', async () => {
-    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [alpha.id] }, { [alpha.id]: 'secret' })
+    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [alpha.id] }, { [alpha.id]: deviceToken })
     bind()
     connection.accept(alpha)
     connection.rename(alpha.id, '我的电脑')
@@ -113,7 +162,7 @@ describe('restoreConnections', () => {
     }))
     native.readToken.mockImplementation(async (key) => {
       if (key === alphaKey)
-        return 'secure-alpha'
+        return deviceToken
       if (key === betaKey)
         return null
       throw new Error(`Unexpected secure key: ${key}`)
@@ -123,7 +172,7 @@ describe('restoreConnections', () => {
     expect(native.readToken.mock.calls).toEqual([[betaKey], [alphaKey]])
     expect(connection.hydrated).toBe(true)
     expect(connection.history).toEqual([{ ...beta, lastConnectedAt: 20 }, { ...alpha, lastConnectedAt: 10 }])
-    expect(connection.tokens).toEqual({ 'http://bridge.local:3080': 'secure-alpha' })
+    expect(connection.tokens).toEqual({ 'http://bridge.local:3080': deviceToken })
     expect(connection.guidedHosts).toEqual(['http://bridge.local:3080'])
     expect(connection.current).toBeNull()
     expect(connection.stage).toBe('idle')
@@ -244,7 +293,7 @@ describe('restoreConnections', () => {
     native.readToken.mockImplementation(async (key) => {
       if (key === betaKey)
         throw error
-      return 'secure-alpha'
+      return deviceToken
     })
     await restoreConnections()
     expect(connection.serialize()).toEqual({
@@ -252,7 +301,7 @@ describe('restoreConnections', () => {
       history: [{ ...beta, lastConnectedAt: 20 }, { ...alpha, lastConnectedAt: 10 }],
       guidedHosts: [alpha.id],
     })
-    expect(connection.tokens).toEqual({ [alpha.id]: 'secure-alpha' })
+    expect(connection.tokens).toEqual({ [alpha.id]: deviceToken })
     expect(connection.notice).toBe(storageFailure)
     expect(log).toHaveBeenCalledExactlyOnceWith('[connection] token restore failed:', error)
     expect(native.write).not.toHaveBeenCalled()
@@ -280,12 +329,12 @@ describe('restoreConnections', () => {
     expect(connection.history).toEqual([{ ...alpha, lastConnectedAt: 10 }])
     expect(connection.tokens).toEqual({})
     expect(native.write).not.toHaveBeenCalled()
-    tokenRead.resolve('secure-alpha')
+    tokenRead.resolve(deviceToken)
     await restoring
     await vi.advanceTimersByTimeAsync(0)
     expect(connection.hydrated).toBe(true)
-    expect(connection.tokens).toEqual({ [alpha.id]: 'secure-alpha' })
-    expect(native.writeToken).toHaveBeenCalledExactlyOnceWith(alphaKey, 'secure-alpha')
+    expect(connection.tokens).toEqual({ [alpha.id]: deviceToken })
+    expect(native.writeToken).toHaveBeenCalledExactlyOnceWith(alphaKey, deviceToken)
     expect(native.write).not.toHaveBeenCalled()
     expect(native.deleteToken).not.toHaveBeenCalled()
   })
@@ -337,31 +386,34 @@ describe('bindConnectionPersistence security and ordering', () => {
     expect(native.deleteToken).not.toHaveBeenCalled()
   })
 
-  it('retains the current unsaved token in secure storage without putting it in the public snapshot', async () => {
+  it('retains verified device authorization in secure storage without putting it in the public snapshot', async () => {
     await hydrate()
     bind()
     connection.accept({ ...alpha, token: 'current-secret' })
     await vi.advanceTimersByTimeAsync(0)
-    expect(native.writeToken).toHaveBeenCalledExactlyOnceWith(alphaKey, 'current-secret')
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'current-secret']])
+    expect(native.writeToken).not.toHaveBeenCalled()
     expect(native.write).not.toHaveBeenCalled()
     connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
     await vi.advanceTimersByTimeAsync(0)
+    expect(native.writeToken).toHaveBeenCalledExactlyOnceWith(alphaKey, deviceToken)
     expect(native.write).toHaveBeenCalledExactlyOnceWith('dsh-bridge/connections', payload([{ ...alpha, lastConnectedAt: 10 }]))
     expect(writtenPayloads()[0]).not.toContain('current-secret')
-    expect(connection.tokens).toEqual({ [alpha.id]: 'current-secret' })
+    expect(writtenPayloads()[0]).not.toContain(deviceToken)
+    expect(connection.tokens).toEqual({ [alpha.id]: deviceToken })
     expect(native.deleteToken).not.toHaveBeenCalled()
   })
 
   it('writes only retained-origin tokens and excludes secrets from successful history serialization', async () => {
     await hydrate()
-    connection.$patch({ tokens: { 'http://orphan.local': 'orphan-secret' } })
+    connection.$patch({ tokens: { 'http://orphan.local': betaDeviceToken } })
     bind()
     connection.accept({ ...alpha, url: 'http://bridge.local:3080/tasks?auth=qr-secret&token=other&theme=dark#private', token: 'secure-secret' })
     connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
     connection.dismissHint()
     await vi.advanceTimersByTimeAsync(0)
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'secure-secret']])
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken]])
     expect(native.write).toHaveBeenCalledExactlyOnceWith('dsh-bridge/connections', payload([{ ...alpha, lastConnectedAt: 10 }], ['http://bridge.local:3080']))
     expect(native.write.mock.calls[0]?.[1]).not.toContain('secret')
     expect(native.write.mock.calls[0]?.[1]).not.toContain('auth')
@@ -373,34 +425,36 @@ describe('bindConnectionPersistence security and ordering', () => {
     native.write.mockReturnValueOnce(firstWrite.promise)
     await hydrate()
     bind()
-    connection.accept({ ...alpha, token: 'alpha-secret' })
+    connection.accept(alpha)
     connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
     await vi.advanceTimersByTimeAsync(0)
     expect(native.write).toHaveBeenCalledTimes(1)
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'alpha-secret']])
-    connection.accept({ ...beta, token: 'beta-secret' })
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken]])
+    connection.accept(beta)
     connection.markLoaded(connection.viewGeneration, 20)
+    connection.rememberDeviceSession(beta.id, betaDeviceToken, connection.viewGeneration)
     await vi.advanceTimersByTimeAsync(0)
     expect(native.write).toHaveBeenCalledTimes(1)
     expect(JSON.parse(native.write.mock.calls[0]![1])).toEqual({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] })
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'alpha-secret'], [alphaKey, 'alpha-secret'], [betaKey, 'beta-secret']])
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken], [alphaKey, deviceToken], [betaKey, betaDeviceToken]])
     firstWrite.resolve(undefined)
     await vi.advanceTimersByTimeAsync(0)
     expect(native.write.mock.calls.map(call => [call[0], JSON.parse(call[1])])).toEqual([
       ['dsh-bridge/connections', { version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }],
       ['dsh-bridge/connections', { version: 1, history: [{ ...beta, lastConnectedAt: 20 }, { ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }],
     ])
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'alpha-secret'], [alphaKey, 'alpha-secret'], [betaKey, 'beta-secret']])
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken], [alphaKey, deviceToken], [betaKey, betaDeviceToken]])
   })
 
   it('writes the pruned history and deletes the secure token of an evicted origin without waiting for the snapshot write', async () => {
     const snapshotWrite = deferred<void>()
     native.write.mockReturnValueOnce(snapshotWrite.promise)
-    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }, { ...beta, lastConnectedAt: 5 }], guidedHosts: [] }, { 'http://bridge.local:3080': 'alpha-secret', 'https://second.local': 'beta-secret' })
+    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }, { ...beta, lastConnectedAt: 5 }], guidedHosts: [] }, { 'http://bridge.local:3080': deviceToken, 'https://second.local': betaDeviceToken })
     bind()
     connection.$patch({ history: [{ ...beta, lastConnectedAt: 5 }] })
     await vi.advanceTimersByTimeAsync(0)
-    expect(native.writeToken.mock.calls).toEqual([[betaKey, 'beta-secret']])
+    expect(native.writeToken.mock.calls).toEqual([[betaKey, betaDeviceToken]])
     expect(native.write).toHaveBeenCalledExactlyOnceWith('dsh-bridge/connections', payload([{ ...beta, lastConnectedAt: 5 }]))
     expect(native.deleteToken).toHaveBeenCalledExactlyOnceWith(alphaKey)
     expect(native.write.mock.invocationCallOrder[0]).toBeLessThan(native.deleteToken.mock.invocationCallOrder[0]!)
@@ -409,17 +463,17 @@ describe('bindConnectionPersistence security and ordering', () => {
     expect(native.deleteToken).toHaveBeenCalledExactlyOnceWith(alphaKey)
   })
 
-  it('keeps saved history tokens on disconnect while deleting a token for an unsaved current origin', async () => {
-    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }, { 'http://bridge.local:3080': 'alpha-secret' })
+  it('keeps saved device authorization on disconnect without saving an unverified current pairing code', async () => {
+    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }, { 'http://bridge.local:3080': deviceToken })
     bind()
     connection.accept({ ...beta, token: 'unsaved-secret' })
     await vi.advanceTimersByTimeAsync(0)
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'alpha-secret'], [betaKey, 'unsaved-secret']])
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken]])
     connection.disconnect()
     await vi.advanceTimersByTimeAsync(0)
     expect(connection.history).toEqual([{ ...alpha, lastConnectedAt: 10 }])
-    expect(native.deleteToken.mock.calls).toEqual([[betaKey]])
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'alpha-secret'], [betaKey, 'unsaved-secret'], [alphaKey, 'alpha-secret']])
+    expect(native.deleteToken).not.toHaveBeenCalled()
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken], [alphaKey, deviceToken]])
     expect(native.write).not.toHaveBeenCalled()
   })
 
@@ -503,23 +557,22 @@ describe('connection persistence failures', () => {
     native.writeToken.mockRejectedValueOnce(error)
     await hydrate()
     bind()
-    connection.accept({ ...alpha, token: 'secure-secret' })
+    connection.accept(alpha)
+    connection.markLoaded(connection.viewGeneration, 10)
+    connection.rememberDeviceSession(alpha.id, deviceToken, connection.viewGeneration)
     await vi.advanceTimersByTimeAsync(0)
     expect(log).toHaveBeenCalledExactlyOnceWith('[connection] token save failed:', error)
     expect(connection.notice).toBe(storageFailure)
-    expect(native.writeToken.mock.calls).toEqual([[alphaKey, 'secure-secret'], [alphaKey, 'secure-secret']])
-    expect(native.write).not.toHaveBeenCalled()
-    connection.markLoaded(connection.viewGeneration, 10)
-    await vi.advanceTimersByTimeAsync(0)
+    expect(native.writeToken.mock.calls).toEqual([[alphaKey, deviceToken], [alphaKey, deviceToken]])
     expect(native.write).toHaveBeenCalledExactlyOnceWith('dsh-bridge/connections', payload([{ ...alpha, lastConnectedAt: 10 }]))
-    expect(writtenPayloads()[0]).not.toContain('secure-secret')
+    expect(writtenPayloads()[0]).not.toContain(deviceToken)
   })
 
   it('reports a secure deletion failure and retries the eviction on the next persistence sync', async () => {
     const error = new Error('Secure delete refused')
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     native.deleteToken.mockRejectedValueOnce(error)
-    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }, { 'http://bridge.local:3080': 'secure-secret' })
+    await hydrate({ version: 1, history: [{ ...alpha, lastConnectedAt: 10 }], guidedHosts: [] }, { 'http://bridge.local:3080': deviceToken })
     bind()
     connection.$patch({ history: [] })
     await vi.advanceTimersByTimeAsync(0)

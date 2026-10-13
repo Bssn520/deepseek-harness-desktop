@@ -18,7 +18,7 @@ const DOCUMENT_KEYS = new Set(['version', 'enabled', 'listen', 'auth', 'tunnel']
 
 const LISTEN_KEYS = new Set(['address', 'port'])
 
-const AUTH_KEYS = new Set(['enabled', 'token', 'scope'])
+const AUTH_KEYS = new Set(['enabled', 'token', 'scope', 'sessionSecret'])
 
 const TUNNEL_KEYS = new Set(['enabled', 'mode', 'token', 'hostname'])
 
@@ -136,12 +136,12 @@ export function isSelectableAddress(address: string, addresses: RemoteAccessAddr
   return addresses.some(entry => entry.address === address)
 }
 
-export function policyOf(document: RemoteAccessDocument, sessionSecret: string): RemoteAuthPolicy {
+export function policyOf(document: RemoteAccessDocument): RemoteAuthPolicy {
   return {
     enabled: document.auth.enabled,
     scope: document.auth.scope,
     linkToken: document.auth.token,
-    sessionSecret,
+    sessionSecret: document.auth.sessionSecret ?? '',
   }
 }
 
@@ -326,6 +326,10 @@ function readAuth(value: unknown, document: RemoteAccessDocument, warnings: stri
     document.auth.token = value.token
   else if (value.token !== undefined && value.token !== null)
     warnings.push('access.json 的 auth.token 非法，已丢弃')
+  if (typeof value.sessionSecret === 'string' && /^[\w-]{43}$/u.test(value.sessionSecret))
+    document.auth.sessionSecret = value.sessionSecret
+  else if (value.sessionSecret !== undefined)
+    warnings.push('access.json 的 auth.sessionSecret 非法，已丢弃')
 }
 
 function readTunnel(value: unknown, document: RemoteAccessDocument, warnings: string[]): void {

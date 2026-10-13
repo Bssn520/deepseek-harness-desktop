@@ -357,14 +357,30 @@ describe('接入面板', () => {
     await waitFor(() => expect(getCalls(BASE, 'GET').length).toBeGreaterThanOrEqual(2))
   })
 
-  it('永久码未签发时只给生成按钮，生成后当次明文可见并走 POST /access/token', async () => {
+  it('只用临时码配对也能撤销所有设备授权，不必先生成永久码', async () => {
+    once(
+      replies.ok(statusPayload({ auth: authPayload({ hasToken: false }), pairing: pairingPayload() })),
+      replies.ok(statusPayload({ auth: authPayload({ hasToken: false }), pairing: pairingPayload({ code: 'WX67YZ89' }) })),
+    )
+    render(<AccessSection t={t} />)
+    await screen.findByTestId('access-pairing-code')
+    const revoke = screen.getByTestId('access-token-revoke')
+    expect(revoke.textContent).toBe(en['access.token.revoke'])
+    expect((revoke as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByTestId('access-permanent-value')).toBeNull()
+    fireEvent.click(revoke)
+    await waitFor(() => expect(getCalls(TOKEN, 'DELETE')).toHaveLength(1))
+    await waitFor(() => expect(screen.getByTestId('access-pairing-code').textContent).toBe('WX67YZ89'))
+  })
+
+  it('永久码未签发时给生成按钮，生成后当次明文可见并走 POST /access/token', async () => {
     once(replies.ok(statusPayload()), replies.ok(statusPayload({ auth: authPayload({ token: PERMANENT }) })))
     render(<AccessSection t={t} />)
     await screen.findByTestId('access-token-rotate')
     expect(screen.getByTestId('access-token-rotate').textContent).toBe(en['access.token.generate'])
     expect(screen.queryByTestId('access-permanent-value')).toBeNull()
     expect(screen.queryByTestId('access-permanent-reveal')).toBeNull()
-    expect(screen.queryByTestId('access-token-revoke')).toBeNull()
+    expect(screen.getByTestId('access-token-revoke').textContent).toBe(en['access.token.revoke'])
     fireEvent.click(screen.getByTestId('access-token-rotate'))
     await waitFor(() => expect(getCalls(TOKEN, 'POST')).toHaveLength(1))
     await screen.findByTestId('access-permanent-value')
@@ -384,7 +400,7 @@ describe('接入面板', () => {
     const reveal = screen.getByTestId('access-permanent-reveal')
     expect(reveal.textContent).toBe(en['access.token.reveal'])
     expect(reveal.getAttribute('aria-pressed')).toBe('false')
-    expect(Array.from(screen.getByTestId('access-permanent').children, child => child.getAttribute('data-testid'))).toEqual(['access-token-revoke', 'access-permanent-reveal', 'access-permanent-value'])
+    expect(Array.from(screen.getByTestId('access-permanent').children, child => child.getAttribute('data-testid'))).toEqual(['access-permanent-reveal', 'access-permanent-value'])
     expect(screen.getByTestId('access-permanent-value').className).toContain('border-l-[0.5px]')
     fireEvent.click(reveal)
     await waitFor(() => expect(screen.getByTestId('access-permanent-value').textContent).toBe(PERMANENT))

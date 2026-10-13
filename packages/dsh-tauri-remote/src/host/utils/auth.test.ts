@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createLinkToken, createSessionSecret, rateLimitAfterFailure, rateLimitBlockedMs, signSession, tokenMatches, verifySession } from './auth'
+import { createLinkToken, createSessionSecret, rateLimitAfterFailure, rateLimitBlockedMs, signDeviceSession, signSession, tokenMatches, verifyDeviceSession, verifySession } from './auth'
 
 const FAILURE_LIMIT = 5
 
@@ -40,6 +40,31 @@ describe('signSession / verifySession', () => {
 
   it('refuses to verify anything while no secret is configured', () => {
     expect(verifySession(SESSION_VALUE, '', ISSUED_AT)).toBe(false)
+  })
+})
+
+describe('device sessions', () => {
+  it('keeps signed device authorization past cookie expiry without accepting it as a cookie', () => {
+    const ticket = signDeviceSession(SESSION_SECRET, ISSUED_AT)
+    expect(ticket.issuedAt).toBe(ISSUED_AT)
+    expect(ticket.expiresAt).toBe(0)
+    expect(verifyDeviceSession(ticket.value, SESSION_SECRET, ISSUED_AT)).toBe(true)
+    expect(verifyDeviceSession(ticket.value, SESSION_SECRET, EXPIRES_AT + 365 * 24 * 60 * 60 * 1000)).toBe(true)
+    expect(verifySession(ticket.value, SESSION_SECRET, ISSUED_AT)).toBe(false)
+    expect(verifyDeviceSession(SESSION_VALUE, SESSION_SECRET, ISSUED_AT)).toBe(false)
+    expect(verifyDeviceSession(ticket.value, 'rotated-secret', ISSUED_AT)).toBe(false)
+    expect(verifyDeviceSession(ticket.value.replace(`.${ISSUED_AT}.`, `.${ISSUED_AT + 1}.`), SESSION_SECRET, ISSUED_AT)).toBe(false)
+    expect(verifyDeviceSession(ticket.value.replace('.0.', `.${EXPIRES_AT}.`), SESSION_SECRET, ISSUED_AT)).toBe(false)
+  })
+
+  it('rejects malformed or unsafe signed timestamps in both ticket types', () => {
+    for (const issuedAt of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(verifySession(signSession(SESSION_SECRET, issuedAt, EXPIRES_AT).value, SESSION_SECRET, ISSUED_AT)).toBe(false)
+      expect(verifyDeviceSession(signDeviceSession(SESSION_SECRET, issuedAt).value, SESSION_SECRET, ISSUED_AT)).toBe(false)
+    }
+    for (const value of [undefined, '', 'v1.1.0.x', 'v2.1.0.x'])
+      expect(verifyDeviceSession(value, SESSION_SECRET, ISSUED_AT)).toBe(false)
+    expect(verifySession(signSession(SESSION_SECRET, ISSUED_AT, Number.MAX_SAFE_INTEGER).value, SESSION_SECRET, ISSUED_AT)).toBe(false)
   })
 })
 

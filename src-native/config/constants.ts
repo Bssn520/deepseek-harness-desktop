@@ -8,6 +8,7 @@ export const HEALTH_INTERVAL_MS = 15000
 export const HISTORY_LIMIT = 20
 export const RECENT_LIMIT = 5
 export const WEBVIEW_LOAD_TIMEOUT_MS = 20000
+export const SESSION_FORGET_TIMEOUT_MS = 2000
 export const FOCUS_RETRY_INTERVAL_MS = 200
 export const FOCUS_TIMEOUT_MS = 15000
 export const NOTIFICATION_CHANNEL = 'dsh-bridge'

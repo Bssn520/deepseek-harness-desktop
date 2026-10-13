@@ -66,8 +66,13 @@ export function parseQrPayload(raw: string): BridgeAddress | null {
   }
 }
 
+export function isDeviceSession(value: unknown): value is string {
+  return typeof value === 'string' && /^v1\.(?:0|[1-9]\d{0,15})\.0\.[a-f0-9]{64}$/u.test(value)
+    && Number.isSafeInteger(Number(value.split('.')[1]))
+}
+
 export function buildConnectUrl(address: BridgeAddress): string {
-  const url = new URL(address.url)
+  const url = isDeviceSession(address.token) ? new URL('/', address.id) : new URL(address.url)
   if (address.token)
     url.searchParams.set('auth', address.token)
   return url.toString()

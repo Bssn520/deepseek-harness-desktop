@@ -53,7 +53,7 @@ function ConnectionDrawer() {
           { text: t('common.cancel'), style: 'cancel' },
           { text: t('connection.delete'), style: 'destructive', onPress: () => {
             stopConnectionRuntime()
-            connection.remove(entry.id)
+            connection.forget(entry.id)
           } },
         ])
       } },

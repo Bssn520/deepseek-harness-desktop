@@ -1,5 +1,6 @@
 import * as SecureStore from 'expo-secure-store'
 import { i18n } from '@/i18n'
+import { isDeviceSession } from '@/utils/bridge-protocol'
 import { connection } from './index'
 
 function tokenKey(origin: string): string {
@@ -27,7 +28,9 @@ export async function restoreConnections(): Promise<void> {
   const entries = await Promise.all(connection.history.map(async (entry) => {
     try {
       const token = await SecureStore.getItemAsync(tokenKey(entry.id))
-      return [entry.id, token] as const
+      if (token && !isDeviceSession(token))
+        await SecureStore.deleteItemAsync(tokenKey(entry.id))
+      return [entry.id, isDeviceSession(token) ? token : null] as const
     }
     catch (error) {
       console.error('[connection] token restore failed:', error)
@@ -57,8 +60,8 @@ export function bindConnectionPersistence(): () => void {
     const retained = new Set(connection.history.map(entry => entry.id))
     if (connection.current)
       retained.add(connection.current.id)
-    const tokens = Object.fromEntries(Object.entries(connection.tokens).filter(([id]) => retained.has(id)))
-    const payload = JSON.stringify(tokens)
+    const tokens = Object.fromEntries(Object.entries(connection.tokens).filter(([id, token]) => retained.has(id) && isDeviceSession(token)))
+    const payload = JSON.stringify({ tokens, retained: [...retained].sort() })
     if (payload === lastPayload)
       return
     lastPayload = payload
@@ -66,10 +69,10 @@ export function bindConnectionPersistence(): () => void {
       for (const [id, token] of Object.entries(tokens))
         await SecureStore.setItemAsync(tokenKey(id), token)
       for (const id of writtenIds) {
-        if (!retained.has(id))
+        if (!tokens[id])
           await SecureStore.deleteItemAsync(tokenKey(id))
       }
-      writtenIds = retained
+      writtenIds = new Set(Object.keys(tokens))
     }).catch((error) => {
       lastPayload = ''
       console.error('[connection] token save failed:', error)

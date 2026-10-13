@@ -17,11 +17,26 @@ const LINK_TOKEN_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
 const SESSION_VERSION = 'v1'
 
 export function signSession(secret: string, now: number, ttlMs = SESSION_TTL_MS): RemoteSessionTicket {
-  const expiresAt = now + ttlMs
-  return { value: `${SESSION_VERSION}.${now}.${expiresAt}.${signatureOf(secret, now, expiresAt)}`, issuedAt: now, expiresAt }
+  return signTicket(secret, now, now + ttlMs)
+}
+
+export function signDeviceSession(secret: string, now: number): RemoteSessionTicket {
+  return signTicket(secret, now, 0)
 }
 
 export function verifySession(value: string | undefined, secret: string, now: number): boolean {
+  return verifyTicket(value, secret, now, false)
+}
+
+export function verifyDeviceSession(value: string | undefined, secret: string, now: number): boolean {
+  return verifyTicket(value, secret, now, true)
+}
+
+function signTicket(secret: string, issuedAt: number, expiresAt: number): RemoteSessionTicket {
+  return { value: `${SESSION_VERSION}.${issuedAt}.${expiresAt}.${signatureOf(secret, issuedAt, expiresAt)}`, issuedAt, expiresAt }
+}
+
+function verifyTicket(value: string | undefined, secret: string, now: number, device: boolean): boolean {
   if (value === undefined || secret === '')
     return false
   const segments = value.split('.')
@@ -29,8 +44,11 @@ export function verifySession(value: string | undefined, secret: string, now: nu
   const issuedAt = Number(segments[1])
   const expiresAt = Number(segments[2])
   const mac = segments[3]
-  if (segments.length !== 4 || version !== SESSION_VERSION || mac === undefined || !Number.isInteger(issuedAt) || !Number.isInteger(expiresAt) || expiresAt <= now)
+  if (segments.length !== 4 || version !== SESSION_VERSION || mac === undefined
+    || !Number.isSafeInteger(issuedAt) || issuedAt < 0 || !Number.isSafeInteger(expiresAt)
+    || (device ? expiresAt !== 0 : expiresAt <= now || expiresAt <= issuedAt)) {
     return false
+  }
   return matches(Buffer.from(signatureOf(secret, issuedAt, expiresAt)), Buffer.from(mac))
 }
 

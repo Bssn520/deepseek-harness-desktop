@@ -198,6 +198,7 @@ vi.mock('react-native-webview', async () => {
 
 const alpha = { id: 'http://bridge.local:3080', url: 'http://bridge.local:3080/tasks', host: 'bridge.local', port: 3080 }
 const beta = { id: 'https://second.local', url: 'https://second.local/workspaces', host: 'second.local', port: 443 }
+const deviceToken = `v1.1700000000000.0.${'a'.repeat(64)}`
 const snapshot = { version: 1 as const, history: [{ ...alpha, lastConnectedAt: 20 }, { ...beta, lastConnectedAt: 10 }], guidedHosts: ['http://bridge.local:3080', 'https://second.local'] }
 let screen: ReactTestRenderer | undefined
 let store: typeof import('@/store/modules/connection')
@@ -467,12 +468,12 @@ describe('rendered root hydration', () => {
     expect(native.fetch).not.toHaveBeenCalled()
     expect(native.write).not.toHaveBeenCalled()
     await act(async () => {
-      tokenRead.resolve('secure-token')
+      tokenRead.resolve(deviceToken)
       await vi.advanceTimersByTimeAsync(0)
     })
 
     expect(drawer().props.swipeEnabled).toBe(true)
-    expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/tasks?auth=secure-token' })
+    expect(webView().props.source).toEqual({ uri: `http://bridge.local:3080/?auth=${deviceToken}` })
     expect(texts()).toContain('连接中…')
     expect(native.read).toHaveBeenCalledExactlyOnceWith('dsh-bridge/connections')
     expect(native.getIpAddressAsync).not.toHaveBeenCalled()
@@ -488,7 +489,7 @@ describe('rendered root hydration', () => {
     for (const [key, payload] of native.write.mock.calls) {
       expect(key).toBe('dsh-bridge/connections')
       expect(JSON.parse(payload)).toEqual({ version: 1, history: [{ ...alpha, lastConnectedAt: 30 }], guidedHosts: [] })
-      expect(payload).not.toContain('secure-token')
+      expect(payload).not.toContain(deviceToken)
     }
   })
 })
@@ -629,7 +630,7 @@ describe('rendered root notification focus', () => {
     expect(native.dismissTo).not.toHaveBeenCalled()
     expect(native.fetch).not.toHaveBeenCalled()
     await act(async () => {
-      tokenRead.resolve('cold-secret')
+      tokenRead.resolve(deviceToken)
       await vi.advanceTimersByTimeAsync(0)
     })
 
@@ -637,7 +638,7 @@ describe('rendered root notification focus', () => {
     expect(texts()).not.toContain('扫码连接 DSH Mobile')
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(0)
     expect(drawer().props.open).toBe(false)
-    expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/tasks?auth=cold-secret' })
+    expect(webView().props.source).toEqual({ uri: `http://bridge.local:3080/?auth=${deviceToken}` })
     expect(native.getIpAddressAsync).not.toHaveBeenCalled()
     expect(connection.pendingFocus?.sessionId).toBe('cold-session')
     const instance = await webViewInstance()
@@ -724,7 +725,7 @@ describe('rendered root notification focus', () => {
     expect(root().findAll(node => String(node.type) === 'CameraView')).toHaveLength(0)
     expect(connection.viewGeneration).toBe(1)
     expect(connection.history).toEqual([])
-    expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/tasks' })
+    expect(webView().props.source).toEqual({ uri: 'http://bridge.local:3080/?pair=1' })
     expect(connection.pendingFocus?.sessionId).toBe('pending-session')
     const instance = await webViewInstance()
     await ready('http://bridge.local:3080')

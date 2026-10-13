@@ -331,7 +331,7 @@ describe('rendered scanner QR events', () => {
 
     expect(connection.current).toEqual({ id: 'http://bridge.local:3080', url: 'http://bridge.local:3080/tasks?theme=dark', host: 'bridge.local', port: 3080, token: 'qr-token' })
     expect(connection.stage).toBe('connected')
-    expect(connection.tokens).toEqual({ 'http://bridge.local:3080': 'qr-token' })
+    expect(connection.tokens).toEqual({})
     expect(native.back).toHaveBeenCalledExactlyOnceWith()
     expect(camera().props.onBarcodeScanned).toBeUndefined()
     const generation = connection.viewGeneration
