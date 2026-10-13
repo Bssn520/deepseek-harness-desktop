@@ -325,7 +325,7 @@ afterEach(async () => {
 describe('rendered Bridge WebView document lifecycle', () => {
   it('reveals the real gateway pairing form after trusted SSR readiness instead of leaving it behind the fullscreen loader', async () => {
     vi.useRealTimers()
-    const { loginPageHtml } = await import('../../packages/dsh-tauri-remote/src/host/service/gateway.utils')
+    const { loginPageHtml } = await vi.importActual<{ loginPageHtml: (message?: string) => string }>('../../packages/dsh-tauri-remote/src/host/service/gateway.utils')
     vi.useFakeTimers()
     await mount()
     const page = createPage(undefined, 'unverified', loginPageHtml())
