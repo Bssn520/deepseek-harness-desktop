@@ -66,6 +66,16 @@ class ProfileTests(unittest.TestCase):
     def test_valid_profile_allows_legacy_app_identifier_prefix(self):
         self.assertEqual(self.validate(), self.identity)
 
+    def test_accepts_apple_multiplatform_profile_containing_ios(self):
+        self.profile['Platform'] = ['iOS', 'xrOS', 'visionOS']
+        self.assertEqual(self.validate(), self.identity)
+
+    def test_rejects_platform_metadata_without_ios_or_not_a_list(self):
+        for platforms in (None, [], ['xrOS', 'visionOS'], 'iOS', {'iOS': True}):
+            with self.subTest(platforms=platforms), self.assertRaisesRegex(ValueError, 'iOS'):
+                self.profile['Platform'] = platforms
+                self.validate()
+
     def test_rejects_wrong_team_app_platform_expiry_and_distribution(self):
         cases = [
             ('TeamIdentifier', ['OTHERTEAM1']),
