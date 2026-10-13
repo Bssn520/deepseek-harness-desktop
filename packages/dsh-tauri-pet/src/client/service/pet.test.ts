@@ -15,11 +15,13 @@ import {
   loadPetCatalog,
   loadPetOverlaySupported,
   loadPetStatus,
+  loadPetUpdates,
   openCommunityShare,
   resizePet,
   toggleForceXwayland,
   togglePet,
   togglePetThrow,
+  updatePetRepository,
 } from './pet'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
@@ -63,6 +65,7 @@ function resetStore(): void {
     fetchRevision: 0,
     catalogLoaded: false,
     presetPets: [],
+    petUpdates: [],
     chatPets: [],
     codexPets: [],
     prefills: {},
@@ -241,6 +244,46 @@ describe('pet service native command contracts', () => {
       ? [['import_pet_repository', { repository: 'owner/repo' }]]
       : [['import_pet_repository', { repository: 'owner/repo' }], ['list_preset_pets']])
     expect(store.pet.presetPets).toEqual(presets)
+    expect(store.pet.status).toEqual(status)
+  })
+
+  it('update checks store native IDs and replacement clears only the updated flag without changing selection', async () => {
+    store.pet.setPresetPets([{ id: 'pet', name: 'Old', remote: true }, { id: 'other', name: 'Other' }])
+    store.pet.setStatus(status)
+    invoke.mockResolvedValueOnce(['pet', 'other']).mockResolvedValueOnce({ id: 'pet', name: 'New', image: 'pinned.gif' })
+    expect(await loadPetUpdates()).toEqual({ ok: true })
+    expect(store.pet.petUpdates).toEqual(['pet', 'other'])
+    expect(await updatePetRepository({ id: 'pet' })).toEqual({ ok: true })
+    expect(invoke.mock.calls).toEqual([['check_pet_updates'], ['update_pet_repository', { id: 'pet' }]])
+    expect(store.pet.presetPets).toEqual([{ id: 'pet', name: 'New', image: 'pinned.gif', remote: true }, { id: 'other', name: 'Other' }])
+    expect(store.pet.petUpdates).toEqual(['other'])
+    expect(store.pet.status).toEqual(status)
+  })
+
+  it('a delayed update check cannot restore flags after replacing a preset', async () => {
+    store.pet.setPresetPets([{ id: 'pet', name: 'Old', remote: true }])
+    let resolve!: (ids: string[]) => void
+    invoke.mockReturnValueOnce(new Promise<string[]>((done) => {
+      resolve = done
+    })).mockResolvedValueOnce({ id: 'pet', name: 'New' })
+    const pending = loadPetUpdates()
+    expect(await updatePetRepository({ id: 'pet' })).toEqual({ ok: true })
+    resolve(['pet'])
+    expect(await pending).toEqual({ ok: true })
+    expect(store.pet.petUpdates).toEqual([])
+    expect(store.pet.presetPets[0].name).toBe('New')
+  })
+
+  it('failed updates preserve the old card, selection and retry flag', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const presets = [{ id: 'pet', name: 'Old', remote: true }]
+    store.pet.setPresetPets(presets)
+    store.pet.setPetUpdates(['pet'])
+    store.pet.setStatus(status)
+    invoke.mockRejectedValue(new Error('download refused'))
+    expect(await updatePetRepository({ id: 'pet' })).toEqual({ ok: false, error: 'download refused' })
+    expect(store.pet.presetPets).toEqual(presets)
+    expect(store.pet.petUpdates).toEqual(['pet'])
     expect(store.pet.status).toEqual(status)
   })
 

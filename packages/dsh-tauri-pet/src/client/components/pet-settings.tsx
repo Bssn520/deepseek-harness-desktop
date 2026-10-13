@@ -15,11 +15,13 @@ import {
   loadForceXwayland,
   loadPetCatalog,
   loadPetOverlaySupported,
+  loadPetUpdates,
   openCommunityShare,
   resizePet,
   toggleForceXwayland,
   togglePet,
   togglePetThrow,
+  updatePetRepository,
 } from '../service/pet'
 import { store } from '../store'
 import { PetCard } from './pet-card'
@@ -52,7 +54,7 @@ function readAsBase64(file: File): Promise<string> {
 /** 桌宠设置页：预设 / Chat / Codex 三类宠物卡片（选择、启用、取消选择）、开关、大小滑条与导入。 */
 export function PetSettings(props: PetSettingsProps): ReactElement {
   locale.useLocale()
-  const { status, presetPets, chatPets, codexPets, catalogLoaded, overlaySupported, forceXwayland } = useStore(store.pet)
+  const { status, presetPets, petUpdates, chatPets, codexPets, catalogLoaded, overlaySupported, forceXwayland } = useStore(store.pet)
   const [tab, setTab] = useState<'pets' | 'codex'>('pets')
   const [busy, setBusy] = useState(() => !catalogLoaded)
   const [error, setError] = useState<string | null>(null)
@@ -98,6 +100,8 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
       setBusy(false)
       if (!result.ok)
         setError(locale.text('listFailed'))
+      else
+        void loadPetUpdates()
     })
     return () => {
       cancelled = true
@@ -261,6 +265,8 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
                   onAction={() => { void (active === item.id ? clearSelection() : enablePreset(item.id)) }}
                   deleteLabel={item.remote ? locale.text('delete') : undefined}
                   onDelete={item.remote ? () => { void remove(item.id) } : undefined}
+                  updateLabel={locale.text('update')}
+                  onUpdate={item.remote && petUpdates.includes(item.id) ? () => { void run(() => updatePetRepository({ id: item.id }), 'updateFailed') } : undefined}
                 />
               ))}
               {cards(chatPets)}

@@ -14,7 +14,7 @@
 use crate::config;
 use crate::desktop::pet as pet_window;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -1834,6 +1834,7 @@ async fn read_repository_spec(
     client: &reqwest::Client,
     base: &str,
     name: &str,
+    check_media: bool,
 ) -> Result<config::manifest::PresetPetSpec, String> {
     let manifest = repository_metadata(
         client,
@@ -1850,7 +1851,154 @@ async fn read_repository_spec(
         std::str::from_utf8(&bytes).map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
     let value: Value = serde_json::from_str(&config::manifest::strip_jsonc(raw))
         .map_err(|error| format!("PET_CONFIG_INVALID: {error}"))?;
-    animation_names(&value)?;
+    let names = animation_names(&value)?;
+    if check_media {
+        let ext = spec.ext.as_ref().unwrap();
+        let mut urls = vec![spec.image.clone().unwrap()];
+        for (uri, extension) in [
+            (Some(spec.uri.default.as_str()), Some(ext.default.as_str())),
+            (spec.uri.mac.as_deref(), ext.mac.as_deref()),
+        ] {
+            let Some(uri) = uri else { continue };
+            for name in &names {
+                urls.push(repository_asset_url(
+                    &format!("{uri}/"),
+                    &format!("{name}.{}", extension.unwrap()),
+                )?);
+            }
+        }
+        futures_util::stream::iter(urls.into_iter().map(|url| async move {
+            let response = client
+                .head(&url)
+                .send()
+                .await
+                .map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "PET_ASSET_INVALID: HTTP {} for {url}",
+                    response.status()
+                ));
+            }
+            Ok::<_, String>(())
+        }))
+        .buffer_unordered(4)
+        .try_collect::<Vec<_>>()
+        .await?;
+    }
+    Ok(spec)
+}
+
+fn repository_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+    config::proxy::http_client_builder(app)?
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("deepseek-harness-desktop")
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))
+}
+
+pub(super) fn pet_repository_revision(
+    spec: &config::manifest::PresetPetSpec,
+) -> Result<(String, String, String), String> {
+    let url = reqwest::Url::parse(&spec.config)
+        .map_err(|error| format!("PET_REPOSITORY_INVALID: {error}"))?;
+    let parts: Vec<_> = url.path_segments().into_iter().flatten().collect();
+    if url.scheme() != "https"
+        || url.host_str() != Some("raw.githubusercontent.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || parts.len() < 4
+        || !(parts[2] == "HEAD" || valid_commit(parts[2]))
+    {
+        return Err("PET_REPOSITORY_INVALID: pet is not a registered GitHub repository".into());
+    }
+    let (owner, name) = parse_pet_repository(&format!("{}/{}", parts[0], parts[1]))?;
+    Ok((owner, name, parts[2].to_string()))
+}
+
+fn valid_commit(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|value| value.is_ascii_hexdigit())
+}
+
+async fn repository_head(
+    client: &reqwest::Client,
+    owner: &str,
+    name: &str,
+) -> Result<String, String> {
+    let bytes = repository_metadata(
+        client,
+        &format!("https://api.github.com/repos/{owner}/{name}/commits/HEAD"),
+        PET_CONFIG_MAX_BYTES,
+        false,
+    )
+    .await?
+    .unwrap();
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("PET_REPOSITORY_INVALID: {error}"))?;
+    value
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| valid_commit(sha))
+        .map(|sha| sha.to_ascii_lowercase())
+        .ok_or_else(|| "PET_REPOSITORY_INVALID: missing commit SHA".into())
+}
+
+#[tauri::command]
+pub async fn check_pet_updates(app: AppHandle) -> Result<Vec<String>, String> {
+    let entries = crate::bridge::preset_pet::list_preset_pets(app.clone())?;
+    let client = repository_client(&app)?;
+    // ponytail: 仓库提交变化都提示更新；需要排除纯文档提交时改用资源树 SHA。
+    Ok(futures_util::stream::iter(
+        entries
+            .into_iter()
+            .filter(|entry| entry.remote)
+            .map(|entry| {
+                let client = &client;
+                async move {
+                    let (owner, name, current) = pet_repository_revision(&entry.spec).ok()?;
+                    let latest = repository_head(client, &owner, &name).await.ok()?;
+                    (current.to_ascii_lowercase() != latest).then_some(entry.spec.id)
+                }
+            }),
+    )
+    .buffer_unordered(4)
+    .filter_map(|id| async { id })
+    .collect()
+    .await)
+}
+
+#[tauri::command]
+pub async fn update_pet_repository(
+    app: AppHandle,
+    id: String,
+) -> Result<config::manifest::PresetPetSpec, String> {
+    let entry = crate::bridge::preset_pet::list_preset_pets(app.clone())?
+        .into_iter()
+        .find(|entry| entry.remote && entry.spec.id == id)
+        .ok_or_else(|| format!("PET_NOT_FOUND: preset {id} is not registered"))?;
+    let (owner, name, _) = pet_repository_revision(&entry.spec)?;
+    let spec = tokio::time::timeout(Duration::from_secs(12), async {
+        let client = repository_client(&app)?;
+        let commit = repository_head(&client, &owner, &name).await?;
+        read_repository_spec(
+            &client,
+            &format!("https://raw.githubusercontent.com/{owner}/{name}/{commit}/"),
+            &name,
+            true,
+        )
+        .await
+    })
+    .await
+    .map_err(|_| "PET_REPOSITORY_TIMEOUT: update exceeded 12 seconds".to_string())??;
+    let spec = crate::bridge::preset_pet::update_remote_pet(
+        &app,
+        config::manifest::PresetPetSpec { id, ..spec },
+    )?;
+    let _ = app.emit_to(pet_window::PET_WINDOW_LABEL, "pet://catalog", &spec.id);
     Ok(spec)
 }
 
@@ -1861,14 +2009,10 @@ pub async fn import_pet_repository(
 ) -> Result<config::manifest::PresetPetSpec, String> {
     let (owner, name) = parse_pet_repository(&repository)?;
     tokio::time::timeout(Duration::from_secs(12), async {
-        let base = format!("https://raw.githubusercontent.com/{owner}/{name}/HEAD/");
-        let client = config::proxy::http_client_builder(&app)?
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(12))
-            .build()
-            .map_err(|error| format!("PET_REPOSITORY_DOWNLOAD_FAILED: {error}"))?;
-        let spec = read_repository_spec(&client, &base, &name).await?;
+        let client = repository_client(&app)?;
+        let commit = repository_head(&client, &owner, &name).await?;
+        let base = format!("https://raw.githubusercontent.com/{owner}/{name}/{commit}/");
+        let spec = read_repository_spec(&client, &base, &name, false).await?;
         crate::bridge::preset_pet::register_remote_pet(&app, spec)
     })
     .await
@@ -1884,18 +2028,24 @@ mod tests {
     struct TestDirectory(PathBuf);
 
     #[tokio::test]
-    async fn repository_registration_fetches_only_manifest_and_final_config_without_media() {
-        for manifest in [
-            None,
-            Some(
-                r#"{"id":"declared","kind":"dsh","configPath":"assets/config.jsonc","uriPath":"webm","previewPath":"preview/preview.gif","ext":{"default":"webm","mac":"webm"}}"#,
+    async fn repository_metadata_skips_media_on_import_and_checks_it_before_update() {
+        for (manifest, check_media, missing_media) in [
+            (None, false, false),
+            (
+                Some(
+                    r#"{"id":"declared","kind":"dsh","configPath":"assets/config.jsonc","uriPath":"webm","previewPath":"preview/preview.gif","ext":{"default":"webm","mac":"webm"}}"#,
+                ),
+                false,
+                false,
             ),
+            (None, true, false),
+            (None, true, true),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/", listener.local_addr().unwrap());
             let handle = std::thread::spawn(move || {
                 let mut paths = Vec::new();
-                for index in 0..2 {
+                for index in 0..if check_media { 4 } else { 2 } {
                     let (mut socket, _) = listener.accept().unwrap();
                     let mut request = [0u8; 4096];
                     let count = socket.read(&mut request).unwrap();
@@ -1915,8 +2065,17 @@ mod tests {
                             },
                             manifest.unwrap_or(""),
                         )
-                    } else {
+                    } else if index == 1 {
                         ("200 OK", r#"{"animations":{"idle":["idle"]}}"#)
+                    } else {
+                        (
+                            if missing_media && index == 3 {
+                                "404 Not Found"
+                            } else {
+                                "200 OK"
+                            },
+                            "",
+                        )
                     };
                     write!(socket, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
@@ -1928,9 +2087,28 @@ mod tests {
                 .timeout(Duration::from_secs(2))
                 .build()
                 .unwrap();
-            let spec = read_repository_spec(&client, &base, "pet").await.unwrap();
+            let result = read_repository_spec(&client, &base, "pet", check_media).await;
+            let paths = handle.join().unwrap();
+            if check_media {
+                let mut media = paths[2..].to_vec();
+                media.sort();
+                assert_eq!(
+                    media,
+                    [
+                        "HEAD /preview/preview.gif HTTP/1.1",
+                        "HEAD /webm/idle.webm HTTP/1.1"
+                    ]
+                );
+            }
+            if missing_media {
+                assert!(result
+                    .unwrap_err()
+                    .starts_with("PET_ASSET_INVALID: HTTP 404"));
+                continue;
+            }
+            let spec = result.unwrap();
             assert_eq!(
-                handle.join().unwrap(),
+                paths[..2],
                 [
                     "GET /pet.json HTTP/1.1",
                     if manifest.is_some() {
@@ -2026,6 +2204,35 @@ mod tests {
         )
         .unwrap_err()
         .starts_with("PET_KIND_FORBIDDEN:"));
+    }
+
+    #[test]
+    fn repository_updates_recover_origin_from_pinned_urls_and_reject_untrusted_targets() {
+        let base =
+            "https://raw.githubusercontent.com/owner/pet/0123456789abcdef0123456789abcdef01234567/";
+        let mut spec = repository_spec(base, "pet", None).unwrap();
+        assert_eq!(
+            pet_repository_revision(&spec).unwrap(),
+            (
+                "owner".into(),
+                "pet".into(),
+                "0123456789abcdef0123456789abcdef01234567".into()
+            )
+        );
+        spec.config = "https://raw.githubusercontent.com/owner/pet/HEAD/config.jsonc".into();
+        assert_eq!(pet_repository_revision(&spec).unwrap().2, "HEAD");
+        for url in [
+            "https://evil.test/o/r/HEAD/c",
+            "http://raw.githubusercontent.com/o/r/HEAD/c",
+            "https://user@raw.githubusercontent.com/o/r/HEAD/c",
+            "https://raw.githubusercontent.com/o/r/main/c",
+            "https://raw.githubusercontent.com/o/r/HEAD/c?x=1",
+        ] {
+            spec.config = url.into();
+            assert!(pet_repository_revision(&spec)
+                .unwrap_err()
+                .starts_with("PET_REPOSITORY_INVALID:"));
+        }
     }
 
     #[test]

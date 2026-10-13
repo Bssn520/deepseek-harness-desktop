@@ -2,6 +2,7 @@ import type { CodexPetConfig, DshPetConfig, PetConfig } from 'dsh-pet-component'
 import { useUnmount, useWatch } from '@reause/core'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { useRef, useState } from 'react'
+import { useListen } from '@/hooks/use-listen'
 import { PET_CODEX_ASPECT, PET_DSH_ASPECT } from '../constants'
 import { reportPetIssue } from '../utils/log'
 
@@ -133,12 +134,18 @@ export function usePetSource(activePet: string): PetSourceState {
     error: string | null
   } | null>(null)
 
+  const [catalogRevision, setCatalogRevision] = useState(0)
+  useListen<string>('pet://catalog', ({ payload }) => {
+    if (payload === activePet)
+      setCatalogRevision(revision => revision + 1)
+  })
+
   const requestRef = useRef(0)
   useUnmount(() => {
     requestRef.current++
   })
 
-  useWatch(activePet, (id) => {
+  useWatch([activePet, catalogRevision], ([id]) => {
     const request = ++requestRef.current
     if (id === '')
       return

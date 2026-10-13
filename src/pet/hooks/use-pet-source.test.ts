@@ -5,7 +5,8 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { assetSource, usePetSource } from './use-pet-source'
 
-const invoke = vi.hoisted(() => vi.fn())
+const { invoke, useListen } = vi.hoisted(() => ({ invoke: vi.fn(), useListen: vi.fn() }))
+vi.mock('@/hooks/use-listen', () => ({ useListen }))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({ ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke }))
 
 function deferred<T>() {
@@ -121,6 +122,25 @@ describe('pet source requests', () => {
       width: 220,
       cache: true,
     })
+  })
+
+  it('reloads an active preset on catalog updates with new commit URLs but ignores unrelated pets', async () => {
+    const spec = { id: 'pet', name: 'Pet', config: 'https://raw/old/config.jsonc', uri: { default: 'https://raw/old/webm' } }
+    invoke.mockResolvedValueOnce([spec]).mockResolvedValueOnce([{ ...spec, config: 'https://raw/new/config.jsonc', uri: { default: 'https://raw/new/webm' } }])
+    const { result } = renderHook(() => usePetSource('pet'))
+    await act(async () => {})
+    const handler = useListen.mock.calls.at(-1)![1]
+    expect(useListen.mock.calls.at(-1)![0]).toBe('pet://catalog')
+    await act(async () => {
+      handler({ payload: 'other' })
+    })
+    expect(invoke).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      handler({ payload: 'pet' })
+    })
+    expect(invoke.mock.calls).toEqual([['list_preset_pets'], ['list_preset_pets']])
+    expect(result.current.source?.config).toBe('https://raw/new/config.jsonc')
+    expect(result.current.source?.uri).toEqual({ default: 'https://raw/new/webm' })
   })
 
   it.each(['resolve', 'reject'] as const)('preserves the current pet when an older request finishes with %s', async (completion) => {

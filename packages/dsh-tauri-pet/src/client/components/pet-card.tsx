@@ -16,6 +16,8 @@ export interface PetCardProps {
   name: string
   onAction: () => void
   onDelete?: () => void
+  onUpdate?: () => void
+  updateLabel?: string
   thumbnail?: string
   thumbnailType?: 'gif' | 'spritesheet'
 }
@@ -65,6 +67,13 @@ export function PetCard(props: PetCardProps): ReactElement {
         >
           {props.actionLabel}
         </Button>
+        {props.onUpdate
+          ? (
+              <Button type="button" variant="outline" size="sm" disabled={props.disabled} onClick={props.onUpdate}>
+                {props.updateLabel}
+              </Button>
+            )
+          : null}
       </span>
     </div>
   )

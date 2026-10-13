@@ -56,11 +56,13 @@ vi.mock('../service/pet', () => ({
   loadForceXwayland: vi.fn(),
   loadPetCatalog: vi.fn(),
   loadPetOverlaySupported: vi.fn(),
+  loadPetUpdates: vi.fn(),
   openCommunityShare: vi.fn(),
   resizePet: vi.fn(),
   toggleForceXwayland: vi.fn(),
   togglePet: vi.fn(),
   togglePetThrow: vi.fn(),
+  updatePetRepository: vi.fn(),
 }))
 
 let container: HTMLDivElement
@@ -121,6 +123,7 @@ beforeEach(() => {
     status: { active_pet: 'chat', enabled: false, visible: false, throw_enabled: false },
     fetchRevision: 0,
     catalogLoaded: true,
+    petUpdates: [],
     presetPets: [{ id: 'preset', name: 'Preset', desc: 'Preset description', image: 'preset.gif' }],
     chatPets: [{ id: 'chat', name: 'Chat', source: 'chat', description: 'Chat description', thumbnail: 'chat.png' }],
     codexPets: [{ id: 'codex', name: 'Codex', source: 'codex', thumbnail: 'codex.png' }],
@@ -128,7 +131,7 @@ beforeEach(() => {
     overlaySupported: false,
     forceXwayland: false,
   })
-  for (const action of [petService.loadPetCatalog, petService.choosePet, petService.clearPetSelection, petService.deletePet, petService.enablePet, petService.togglePet, petService.toggleForceXwayland, petService.resizePet, petService.togglePetThrow, petService.importPetArchive, petService.importPetRepository, petService.openCommunityShare])
+  for (const action of [petService.loadPetCatalog, petService.choosePet, petService.clearPetSelection, petService.deletePet, petService.enablePet, petService.togglePet, petService.toggleForceXwayland, petService.resizePet, petService.togglePetThrow, petService.importPetArchive, petService.importPetRepository, petService.openCommunityShare, petService.loadPetUpdates, petService.updatePetRepository])
     vi.mocked(action).mockResolvedValue({ ok: true })
   container = document.createElement('div')
   document.body.append(container)
@@ -195,6 +198,41 @@ describe('pet settings action boundaries', () => {
     await click(button('codex'))
     await click(deleteButton('Codex'))
     expect(petService.deletePet).toHaveBeenLastCalledWith({ id: 'codex' })
+  })
+
+  it('shows updates only for changed remote pets to the right of enable and keeps retry available after failure', async () => {
+    store.pet.setPresetPets([
+      { id: 'preset', name: 'Preset' },
+      { id: 'remote', name: 'Remote', remote: true },
+      { id: 'unchanged', name: 'Unchanged', remote: true },
+    ])
+    store.pet.setPetUpdates(['preset', 'remote'])
+    const pending = deferred()
+    vi.mocked(petService.updatePetRepository).mockReturnValueOnce(pending.promise)
+    await mount()
+    expect(petService.loadPetUpdates).toHaveBeenCalledExactlyOnceWith()
+    expect(card('Preset').textContent).not.toContain(locale.text('update'))
+    expect(card('Unchanged').textContent).not.toContain(locale.text('update'))
+    const update = actionButton('Remote', locale.text('update'))
+    expect(actionButton('Remote', locale.text('enable')).nextElementSibling).toBe(update)
+    await click(update)
+    expect(petService.updatePetRepository).toHaveBeenCalledExactlyOnceWith({ id: 'remote' })
+    expect(update.disabled).toBe(true)
+    await click(update)
+    expect(petService.updatePetRepository).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      pending.resolve({ ok: false, error: 'network' })
+    })
+    expect(update.disabled).toBe(false)
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(locale.text('updateFailed'))
+    vi.mocked(petService.updatePetRepository).mockImplementationOnce(async () => {
+      store.pet.replacePresetPet({ id: 'remote', name: 'Updated', remote: true })
+      return { ok: true }
+    })
+    await click(update)
+    expect(Array.from(card('Updated').querySelectorAll('button')).map(button => button.textContent)).not.toContain(locale.text('update'))
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect(petService.enablePet).not.toHaveBeenCalled()
   })
 
   it.each([

@@ -2,6 +2,7 @@ import type { ClientAdapter } from 'dsh-tauri/client'
 import type { PetActionResult, PetListItem, PetStatus, PresetPetItem } from './pet.types'
 import { invoke } from 'dsh-tauri/client'
 import {
+  CMD_CHECK_PET_UPDATES,
   CMD_DELETE_PET,
   CMD_GET_FORCE_XWAYLAND,
   CMD_GET_PET_OVERLAY_SUPPORTED,
@@ -16,6 +17,7 @@ import {
   CMD_SET_PET_ENABLED,
   CMD_SET_PET_SIZE,
   CMD_SET_PET_THROW_ENABLED,
+  CMD_UPDATE_PET_REPOSITORY,
   PET_COMMUNITY_URL,
   PET_HATCH_PROMPT,
 } from '../constants'
@@ -182,6 +184,24 @@ export async function resizePet(input: { size: number }): Promise<PetActionResul
 export async function togglePetThrow(input: { enabled: boolean }): Promise<PetActionResult> {
   return guard('toggle pet throw', async () => {
     store.pet.setStatus(await invoke<PetStatus>(CMD_SET_PET_THROW_ENABLED, { enabled: input.enabled }))
+    return { ok: true }
+  })
+}
+
+export async function loadPetUpdates(): Promise<PetActionResult> {
+  return guard('check pet updates', async () => {
+    const presets = store.pet.$state.presetPets
+    const ids = await invoke<string[]>(CMD_CHECK_PET_UPDATES)
+    if (presets === store.pet.$state.presetPets)
+      store.pet.setPetUpdates(ids)
+    return { ok: true }
+  })
+}
+
+export async function updatePetRepository(input: { id: string }): Promise<PetActionResult> {
+  return guard('update pet repository', async () => {
+    const item = await invoke<PresetPetItem>(CMD_UPDATE_PET_REPOSITORY, { id: input.id })
+    store.pet.replacePresetPet({ ...item, remote: true })
     return { ok: true }
   })
 }

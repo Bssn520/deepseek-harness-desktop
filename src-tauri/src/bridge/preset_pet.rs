@@ -52,7 +52,10 @@ fn read_preset_entries(app: &AppHandle) -> Result<Vec<PresetPetEntry>, String> {
         .pets
         .built_in
         .into_iter()
-        .map(|spec| PresetPetEntry { spec, remote: false })
+        .map(|spec| PresetPetEntry {
+            spec,
+            remote: false,
+        })
         .collect();
     entries.extend(
         remote_catalog(store.get(REMOTE_PET_CATALOG_KEY))?
@@ -132,6 +135,39 @@ pub(super) fn unregister_remote_pet(app: &AppHandle, id: &str) -> Result<(), Str
     write_remote_catalog(app, registered)
 }
 
+pub(super) fn update_remote_pet(
+    app: &AppHandle,
+    spec: PresetPetSpec,
+) -> Result<PresetPetSpec, String> {
+    let _guard = pet_catalog_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let store = app
+        .store(crate::config::store_dat_file_name())
+        .map_err(|error| format!("PET_REMOTE_STORE_FAILED: {error}"))?;
+    let mut registered = remote_catalog(store.get(REMOTE_PET_CATALOG_KEY))?;
+    replace_registered(&mut registered, &spec)?;
+    write_remote_catalog(app, registered)?;
+    Ok(spec)
+}
+
+fn replace_registered(catalog: &mut [PresetPetSpec], spec: &PresetPetSpec) -> Result<(), String> {
+    let index = catalog
+        .iter()
+        .position(|item| item.id == spec.id)
+        .ok_or_else(|| format!("PET_NOT_FOUND: preset {} is not registered", spec.id))?;
+    ensure_new_pet(
+        &catalog
+            .iter()
+            .filter(|item| item.id != spec.id)
+            .cloned()
+            .collect::<Vec<_>>(),
+        spec,
+    )?;
+    catalog[index] = spec.clone();
+    Ok(())
+}
+
 fn drop_registered(catalog: &mut Vec<PresetPetSpec>, id: &str) -> Result<(), String> {
     if !catalog.iter().any(|spec| spec.id == id) {
         return Err(format!("PET_NOT_FOUND: preset {id} is not registered"));
@@ -142,10 +178,20 @@ fn drop_registered(catalog: &mut Vec<PresetPetSpec>, id: &str) -> Result<(), Str
 
 fn ensure_new_pet(catalog: &[PresetPetSpec], spec: &PresetPetSpec) -> Result<(), String> {
     validate_catalog(std::slice::from_ref(spec))?;
-    if catalog
-        .iter()
-        .any(|item| item.id == spec.id || item.config == spec.config)
-    {
+    if catalog.iter().any(|item| {
+        item.id == spec.id
+            || item.config == spec.config
+            || match (
+                super::pet::pet_repository_revision(item),
+                super::pet::pet_repository_revision(spec),
+            ) {
+                (Ok((owner, name, _)), Ok((other_owner, other_name, _))) => {
+                    owner.eq_ignore_ascii_case(&other_owner)
+                        && name.eq_ignore_ascii_case(&other_name)
+                }
+                _ => false,
+            }
+    }) {
         return Err(format!(
             "PET_ALREADY_IMPORTED: pet {} or repository is already registered",
             spec.id
@@ -219,6 +265,30 @@ mod tests {
     }
 
     #[test]
+    fn updates_replace_only_registered_entries_and_preserve_original_on_invalid_spec() {
+        let original: PresetPetSpec = serde_json::from_str(
+            r#"{"id":"remote","name":"Old","config":"https://e/old","uri":{"default":"https://e/old/webm"}}"#,
+        ).unwrap();
+        let mut catalog = vec![original.clone()];
+        let mut updated = original.clone();
+        updated.name.clear();
+        assert!(replace_registered(&mut catalog, &updated).is_err());
+        assert_eq!(catalog[0].name, "Old");
+        updated.name = "New".into();
+        updated.id = "builtin".into();
+        assert!(replace_registered(&mut catalog, &updated)
+            .unwrap_err()
+            .starts_with("PET_NOT_FOUND:"));
+        assert_eq!(catalog[0].name, "Old");
+        updated.id = "remote".into();
+        updated.config = "https://e/new".into();
+        assert_eq!(replace_registered(&mut catalog, &updated), Ok(()));
+        assert_eq!(catalog[0].config, "https://e/new");
+        assert_eq!(catalog[0].name, "New");
+        assert_eq!(catalog.len(), 1);
+    }
+
+    #[test]
     fn unregister_drops_only_registered_ids_and_rejects_built_in_ones() {
         let spec = |id: &str| -> PresetPetSpec {
             serde_json::from_str(&format!(
@@ -255,6 +325,10 @@ mod tests {
             .starts_with("PET_ALREADY_IMPORTED:"));
         let mut renamed = spec.clone();
         renamed.id = "renamed".into();
+        assert!(ensure_new_pet(&catalog, &renamed)
+            .unwrap_err()
+            .starts_with("PET_ALREADY_IMPORTED:"));
+        renamed.config = "https://raw.githubusercontent.com/O/R/0123456789abcdef0123456789abcdef01234567/new/config.jsonc".into();
         assert!(ensure_new_pet(&catalog, &renamed)
             .unwrap_err()
             .starts_with("PET_ALREADY_IMPORTED:"));

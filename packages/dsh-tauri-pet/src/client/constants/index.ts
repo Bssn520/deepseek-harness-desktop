@@ -30,6 +30,8 @@ export const CMD_LIST_PETS = 'list_pets'
 export const CMD_IMPORT_PET = 'import_pet'
 export const CMD_DELETE_PET = 'delete_pet'
 export const CMD_IMPORT_PET_REPOSITORY = 'import_pet_repository'
+export const CMD_CHECK_PET_UPDATES = 'check_pet_updates'
+export const CMD_UPDATE_PET_REPOSITORY = 'update_pet_repository'
 export const CMD_LIST_PRESET_PETS = 'list_preset_pets'
 export const CMD_OPEN_EXTERNAL_URL = 'open_external_url'
 
