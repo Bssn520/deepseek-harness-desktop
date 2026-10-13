@@ -160,11 +160,11 @@ src-native/
 
 | Workflow | `name` | 触发 | 职责 |
 | --- | --- | --- | --- |
-| `.github/workflows/release-native.yml` | `Release Android APK (Native)` | 桌面端 `Build & Release` 完成（`workflow_run`）+ 手动 `workflow_dispatch`（输入 `tag`） | prepare → build → publish：构建 release APK，并把资产上传到**已存在的**GitHub Release |
-| `.github/workflows/build-android.yml` | `Android Native Build` | push `main`（按 `src-native/**`、`app.json`、`package.json` 等 paths 过滤）+ 手动 | 常规构建，只上传 Actions artifact `android-apk-${VERSION}`（retention 14），**不碰**Release |
+| `.github/workflows/release-native.yml` | `Release Mobile Apps (Native)` | 桌面端 `Build & Release` 完成（`workflow_run`）+ 手动 `workflow_dispatch`（输入 `tag`） | prepare → Android / iOS 共享构建 → publish：把 APK 与未签名 IPA 上传到**已存在的**GitHub Release |
+| `.github/workflows/build-android.yml` | `Android Native Build` | `workflow_call` + 手动，不由 push / PR 触发 | 常规构建，只上传 Actions artifact `android-apk-${VERSION}`（retention 14），**不碰**Release |
 | `.github/workflows/build-android-test.yml` | `Build Android Test` | 仅手动 `workflow_dispatch` | 复用 `build-android.yml`，产出内置 JS bundle、可脱离 Metro 运行的 release APK，artifact `android-apk-${VERSION}`（retention 14） |
 
-* **发版只由桌面端 Release 驱动**：`release-native.yml` 只执行 `gh release upload --clobber`，**从不** create / edit Release——`release.yml` 的 finalize 是 Release 的单一 writer。该 workflow 只保留 `types: [completed]`，并在 job 级校验 `conclusion == 'success'` 与「触发运行来自本仓库」。
+* **发版只由桌面端 Release 驱动**：`release-native.yml` 只执行 `gh release upload --clobber`，**从不** create / edit Release——`release.yml` 的 finalize 是 Release 的单一 writer。该 workflow 只保留 `types: [completed]`，校验整轮成功、同仓来源及 `Publish GitHub Release` job 确实成功，避免被跳过的桌面发版误触发移动端构建。
 * `build-android-test.yml` **不跟随 CI 自动触发**（与 build-test.yml 同样只保留 `workflow_dispatch`），避免 Android SDK / NDK / Gradle 全量编译挤占 PR 队列；需要验证 native 可编译时手动触发即可。
 * `build-android-test.yml` 不传签名 secret 给复用工作流，因此 release APK 使用开发证书；仍检查 16 KB 页对齐、签名、内置非空 JS bundle 与非 debuggable 标记，不依赖 Metro。
 
@@ -172,7 +172,7 @@ src-native/
 
 * 三个 workflow 都从 `app.json` 的 `expo.version` 读取版本，并断言它等于 `package.json` 的 `version`，不一致直接 `::error::` 失败。
 * 三个 workflow 的资产名均为 `Deepseek.Harness.Android_<version>.apk`。版本跟随桌面端（见 §8.4）。
-* 发布资产同时包含 `SHA256SUMS.txt` 与 `THIRD_PARTY_NOTICES.md`；`app.config.js` 注入的声明会在签名校验步骤里与仓库内文件比对，缺全文即失败。
+* 发布资产同时包含 `SHA256SUMS-Android.txt`、`SHA256SUMS-iOS.txt` 与 `THIRD_PARTY_NOTICES.md`；`app.config.js` 注入的声明会在签名校验步骤里与仓库内文件比对，缺全文即失败。
 * **只有提交了 `app.json` 的 tag 才能发版**：prepare 用 `git cat-file -e "${tag_commit}:app.json"` 守卫，早于本次迁移、不含 `app.json` 的历史 tag（如 `v0.21.0`）会被正确跳过；手动指定 tag 时用 `::error::`，`workflow_run` 触发时用 `::warning::` 跳过。
 * 手动触发要求 dispatch 的 ref 就是 tag 指向的提交；`release.yml` 的手动试跑（`test-<ref>-<run>` 预发布）不指向其构建提交，因此不会触发 Android 发版。
 
@@ -187,7 +187,9 @@ src-native/
 * 远端构建环境：JDK 17 + Android SDK（`android-36` / `build-tools 36.0.0` / NDK / CMake）；`pnpm run prebuild:native` 生成原生工程后由 Gradle 编译，无需本地安装 SDK。
 * `app.json` 被列入 `bump.config.ts` 的 `files`，由 `patches/bumpp.patch` 增补的 `app.json` 分支在 bump 流程中同步：写入 `expo.version`，并把 `expo.android.versionCode` 递增 1（Android 要求 versionCode 严格递增），因此 `app.json` 会和 `package.json` 一起进入 release commit，不需要 `execute` 脚本或 `all`。
 * 本仓库根依赖由共享 catalog 固定，`react` / `react-dom` / `typescript` 与 Expo 57 期望版本不一致，`expo install --check` 在本机与 CI 上必然非零退出，因此**不**把它当门禁；原生兼容性以 `prebuild` + Gradle 编译为准。
-* **iOS 尚未发布**，`bundleIdentifier` 已配置为 `com.dshtauri.dshbridge`，但无构建与发布流程。
+* `build-ios.yml` 用 Expo prebuild、CocoaPods 与真机 Release 构建生成未签名 IPA，复用输入 `source_ref` 指向发布提交；`build-ios-test.yml` 仅手动调用，不随 CI 打包。
+* iOS 资产名为 `Deepseek.Harness.iOS_<version>_unsigned.ipa`，artifact 为 `ios-ipa-<version>`；`bundleIdentifier` 为 `com.dshtauri.dshbridge`。构建校验非空内嵌 JS bundle 与第三方声明，不依赖 Metro。
+* IPA 不含分发签名，不能直接安装或提交 App Store，需自行签名。预发布完整版本保留在资产名中，iOS `CFBundleShortVersionString` 使用三段数字核心版本。
 
 ---
 

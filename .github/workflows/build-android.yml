@@ -1,33 +1,27 @@
 name: Android Native Build
 
-# 常规构建产物：main 上的 native 变更与手动触发时产出正式签名的 APK。
-# 只上传 Actions artifact，不碰任何 GitHub Release（随桌面端 release 发布见 release-native.yml，
-# PR 校验构建见 build-android-test.yml）。
-#
-# 签名 secret（与 dsh-bridge-mobile 同名，需在本仓库 Settings → Secrets 配置）：
-#   ANDROID_KEYSTORE_BASE64   keystore 的 Base64
-#   ANDROID_KEYSTORE_PASSWORD keystore 密码
-#   ANDROID_KEY_ALIAS         签名 key alias
-#   ANDROID_KEY_PASSWORD      签名 key 密码
-# 四项全有 → 用正式 key 重新签名；四项全无 → 用 Android 开发证书并在日志/摘要中警告；
-# 部分配置 → 直接失败（半成品签名不可发布）。
 on:
-  push:
-    branches: [main]
-    paths:
-      - src-native/**
-      - assets/native/**
-      - app.json
-      - app.config.js
-      - metro.config.js
-      - tsconfig.native.json
-      - vitest.native.config.ts
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/build-android.yml
   workflow_dispatch:
   workflow_call:
+    inputs:
+      source_ref:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+      signing:
+        value: ${{ jobs.build.outputs.signing }}
 
 permissions:
   contents: read
@@ -48,6 +42,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
       - name: Setup Node.js and pnpm
@@ -55,9 +50,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # 资产名里的版本号取自 app.json 的 expo.version；bumpp 目前只改 package.json /
-      # Cargo.toml / tauri.conf.json，两者不一致时必须在发版前同步。
       - name: Read native version
         id: meta
         run: |
@@ -126,9 +118,6 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon --stacktrace
-
-      # 发布资产名固定为 Deepseek.Harness.Android_<expo.version>.apk；同时校验 16 KB
-      # 页对齐、签名、APK 内的标准版本号，以及 app.config.js 注入的第三方声明。
       - name: Sign and verify APK
         env:
           VERSION: ${{ steps.meta.outputs.version }}
@@ -159,7 +148,6 @@ jobs:
             cp "$source" "$destination"
           fi
           "$tools/apksigner" verify --verbose --print-certs "$destination"
-          # 先落文件再读取：`aapt dump badging | head` 会让 aapt 收到 SIGPIPE，pipefail 下误报失败。
           "$tools/aapt" dump badging "$destination" > "$RUNNER_TEMP/badging.txt"
           head -n 5 "$RUNNER_TEMP/badging.txt"
           grep -q "versionName='${VERSION}'" "$RUNNER_TEMP/badging.txt" \
@@ -183,7 +171,7 @@ jobs:
             console.log("APK embeds the complete third-party notices.");
           '
           cp THIRD_PARTY_NOTICES.md release/THIRD_PARTY_NOTICES.md
-          (cd release && sha256sum ./*.apk ./THIRD_PARTY_NOTICES.md > SHA256SUMS.txt)
+          (cd release && sha256sum ./*.apk ./THIRD_PARTY_NOTICES.md > SHA256SUMS-Android.txt)
           find release -type f -print | sort
 
       - name: Upload APK artifact

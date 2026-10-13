@@ -45,6 +45,7 @@
 ## 功能
 
 - 🪶 **原生桌面** — Tauri 2 + React 19 + Hero 3，内嵌本地 Harness 界面。
+- 📱 **远程连接** — 通过原生 Android / iOS 移动端连接电脑上的 DSH 实例。
 - 🔄 **运行时管理** — 安装依赖、选择内核版本，并提供桌面端与内核更新入口。
 - 🔀 **多内核支持** — 在同一界面畅用 DSH / Codex / Claude，发挥各自原生工具能力。
 - 🧩 **插件管理** — 13 个内置插件；支持本地路径安装、内置插件停用、社区插件安装、升级、卸载与错误查看。
@@ -80,7 +81,6 @@
 - [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) — 按会话隔离的右编辑器侧栏
 - [Billion Context](https://github.com/ranxianglei/billion-context) — 上下文压缩与历史恢复
 - [DSH Rewind](https://github.com/SiriLee/dsh-rewind) — 对话回退与工作区备份
-- [DSH Bridge](https://github.com/wenbin-wb/dsh-bridge) — 远程访问、隧道接入
 - [DSH IM](https://github.com/xmanrui/dsh-im) — IM 渠道与机器人管理
 
 新增或更新预设请提交 [Issue](https://github.com/dsh-tauri/deepseek-harness-desktop/issues)；可用版本由清单中的内核兼容规则决定。
@@ -118,7 +118,7 @@ brew install dsh-tauri/desktop/deepseek-harness
 同一仓库内维护移动端 **DSH Mobile**（Expo / React Native）：在局域网发现 DSH 主机，并以全屏 WebView 承载 Harness 网页，源码位于 `src-native/`。
 
 - Android APK 可在 [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) 页面下载，资产名形如 `Deepseek.Harness.Android_x.x.x.apk`，版本跟随桌面端。
-- **iOS 尚未发布**，当前只有 Android 构建与发版流程。
+- **iOS 未签名 IPA 随桌面端发版**；需自行签名后安装，不能直接安装。
 - 该移动端**仅在官方未推出移动端服务期间维护**，属于过渡方案。
 - 开发命令（`pnpm dev:native`、`pnpm android`、`pnpm test:native`、`pnpm typecheck:native` 等）与发现、连接、持久化、发版约定见[移动端规范](docs/specs/native.md)。
 
