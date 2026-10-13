@@ -46,6 +46,7 @@
 ## Features
 
 - 🪶 **Native desktop** — Tauri 2 + React 19 + HeroUI 3, embedding the local Harness UI.
+- 📱 **Remote connection** — Connect to the DSH instance on your computer from the native Android / iOS mobile app.
 - 🔄 **Runtime management** — Install dependencies, select core versions, and access desktop/core updates.
 - 🔀 **Multi-backend support** — Use DSH / Codex / Claude in one interface, powered by their native tools.
 - 🧩 **Plugin management** — 13 built-in plugins, plus local-directory installs, built-in disabling, community plugin installation, upgrades, removal, and error details.
@@ -81,7 +82,6 @@ Setup offers the following community plugins for installation on demand.
 - [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) — Per-session editor sidebar
 - [Billion Context](https://github.com/ranxianglei/billion-context) — Context compression and history restoration
 - [DSH Rewind](https://github.com/SiriLee/dsh-rewind) — Conversation rewind and workspace backups
-- [DSH Bridge](https://github.com/wenbin-wb/dsh-bridge) — Remote access, tunnels, and bot connections
 - [DSH IM](https://github.com/xmanrui/dsh-im) — IM channels and bot management
 
 Request new or updated presets via [Issues](https://github.com/dsh-tauri/deepseek-harness-desktop/issues). Available versions follow the manifest's core compatibility rules.
@@ -119,7 +119,7 @@ brew install dsh-tauri/desktop/deepseek-harness
 The same repository also maintains the **DSH Mobile** mobile app (Expo / React Native): it discovers a DSH host on the local network and hosts the Harness web UI in a full-screen WebView. The source lives in `src-native/`.
 
 - Android APKs are downloadable from the [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) page as `Deepseek.Harness.Android_x.x.x.apk`, and the version follows the desktop app.
-- **iOS is not published yet**: only the Android build and release pipeline exists.
+- **An unsigned iOS IPA is distributed with desktop releases**; you must sign it yourself before installation—it cannot be installed directly.
 - The mobile app is maintained **only while no official mobile service exists**, as a stopgap.
 - Development commands (`pnpm dev:native`, `pnpm android`, `pnpm test:native`, `pnpm typecheck:native`, …) plus the discovery, connection, persistence and release conventions are documented in the [mobile specification](docs/specs/native.md).
 

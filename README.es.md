@@ -46,6 +46,7 @@
 ## Características
 
 - 🪶 **Escritorio nativo** — Tauri 2 + React 19 + HeroUI 3, con la interfaz local de Harness integrada.
+- 📱 **Conexión remota** — Conectate a la instancia de DSH en tu computadora desde la app móvil nativa para Android / iOS.
 - 🔄 **Gestión del runtime** — Instalá dependencias, elegí versiones del núcleo y accedé a actualizaciones del escritorio y del núcleo.
 - 🔀 **Soporte para distintos motores** — Usá DSH / Codex / Claude en una misma interfaz, con sus herramientas nativas.
 - 🧩 **Gestión de plugins** — 13 plugins integrados; instalación desde directorios locales, desactivación de integrados y gestión de plugins comunitarios.
@@ -81,7 +82,6 @@ El asistente ofrece los siguientes plugins comunitarios para instalar a demanda.
 - [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) — Barra lateral del editor por sesión
 - [Billion Context](https://github.com/ranxianglei/billion-context) — Compresión de contexto y restauración del historial
 - [DSH Rewind](https://github.com/SiriLee/dsh-rewind) — Retroceso de conversación y backups del workspace
-- [DSH Bridge](https://github.com/wenbin-wb/dsh-bridge) — Acceso remoto, túneles y conexión de bots
 - [DSH IM](https://github.com/xmanrui/dsh-im) — Canales IM y gestión de bots
 
 Pedí preajustes nuevos o actualizados mediante [Issues](https://github.com/dsh-tauri/deepseek-harness-desktop/issues). Las versiones disponibles siguen las reglas de compatibilidad del manifiesto.
@@ -119,7 +119,7 @@ brew install dsh-tauri/desktop/deepseek-harness
 El mismo repositorio también mantiene la app móvil **DSH Mobile** (Expo / React Native): descubre un host DSH en la red local y muestra la interfaz web de Harness en un WebView a pantalla completa. El código está en `src-native/`.
 
 - Los APK de Android se descargan desde la página de [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) como `Deepseek.Harness.Android_x.x.x.apk`, y la versión sigue a la de escritorio.
-- **iOS todavía no se publica**: solo existe el flujo de compilación y publicación de Android.
+- **El IPA de iOS sin firmar se distribuye con las versiones de escritorio**; tenés que firmarlo por tu cuenta antes de instalarlo: no se puede instalar directamente.
 - La app móvil se mantiene **solo mientras no exista un servicio móvil oficial**, como solución transitoria.
 - Los comandos de desarrollo (`pnpm dev:native`, `pnpm android`, `pnpm test:native`, `pnpm typecheck:native`, etc.) y las convenciones de descubrimiento, conexión, persistencia y publicación están en la [especificación móvil](docs/specs/native.md).
 
