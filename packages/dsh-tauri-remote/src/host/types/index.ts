@@ -209,19 +209,10 @@ export type RemoteAccessDecision = 'allow' | 'authenticate' | 'deny'
 
 export type RemoteAuthScope = 'public_only' | 'all'
 
-/** 访问密码的落盘形态；`salt` 与 `hash` 均为 base64（S2 §7.4）。 */
-export interface RemotePasswordRecord {
-  algo: 'pbkdf2-sha256'
-  salt: string
-  iterations: number
-  hash: string
-}
-
 /** 认证要素快照：由持久化配置推导，每次请求重新读取，使配置变更即时生效。 */
 export interface RemoteAuthPolicy {
   enabled: boolean
   scope: RemoteAuthScope
-  password: RemotePasswordRecord | null
   linkToken: string | null
   sessionSecret: string
   /** 当前临时配对码：与永久凭据并行的额外凭据，5 分钟轮换。 */

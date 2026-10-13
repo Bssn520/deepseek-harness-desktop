@@ -1,3 +1,4 @@
+import { FetchError } from 'expo/src/winter/fetch/FetchErrors'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { deferredNetwork, jsonResponse } from './bridge.test-utils'
 import { scanCandidates } from './scan-candidates'
@@ -25,25 +26,25 @@ describe('scanCandidates scheduling', () => {
       { host: '10.0.0.5', port: 3080 },
     ], { signal: new AbortController().signal, concurrency: 2, timeoutMs: 1000, budgetMs: 5000, onFound })
     expect(network.requests.map(request => request.url)).toEqual([
-      'http://10.0.0.1:3080/__dsh_bridge__/auth-status',
-      'http://10.0.0.2:3080/__dsh_bridge__/auth-status',
+      'http://10.0.0.1:3080/manifest.webmanifest',
+      'http://10.0.0.2:3080/manifest.webmanifest',
     ])
     expect(network.active()).toBe(2)
-    network.requests[1]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[1]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await vi.advanceTimersByTimeAsync(0)
     expect(network.requests).toHaveLength(3)
     expect(onFound.mock.calls.map(call => call[0].id)).toEqual(['http://10.0.0.2:3080'])
-    network.requests[0]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[0]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await vi.advanceTimersByTimeAsync(0)
     expect(network.requests).toHaveLength(4)
-    network.requests[2]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[2]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await vi.advanceTimersByTimeAsync(0)
     expect(network.requests).toHaveLength(5)
-    network.requests[3]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
-    network.requests[4]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[3]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
+    network.requests[4]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     const found = await pending
     expect(found.map(host => host.id)).toEqual(['http://10.0.0.2:3080', 'http://10.0.0.1:3080', 'http://10.0.0.3:3080', 'http://10.0.0.4:3080', 'http://10.0.0.5:3080'])
-    expect(found[0]).toEqual({ id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080, auth: { enabled: false, allowLoopback: true } })
+    expect(found[0]).toEqual({ id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080 })
     expect(onFound.mock.calls.map(call => call[0].id)).toEqual(['http://10.0.0.2:3080', 'http://10.0.0.1:3080', 'http://10.0.0.3:3080', 'http://10.0.0.4:3080', 'http://10.0.0.5:3080'])
     expect(network.maximum()).toBe(2)
     expect(network.active()).toBe(0)
@@ -57,10 +58,10 @@ describe('scanCandidates scheduling', () => {
     expect(network.requests).toHaveLength(40)
     expect(network.active()).toBe(40)
     for (const request of network.requests.slice())
-      request.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+      request.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await vi.advanceTimersByTimeAsync(0)
     expect(network.requests).toHaveLength(41)
-    network.requests[40]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[40]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     expect(await pending).toHaveLength(41)
     expect(network.maximum()).toBe(40)
     expect(vi.getTimerCount()).toBe(0)
@@ -77,9 +78,33 @@ describe('scanCandidates scheduling', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(network.requests[0]?.signal.aborted).toBe(true)
     expect(network.requests[1]?.signal.aborted).toBe(false)
-    network.requests[1]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[1]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     expect((await pending).map(host => host.id)).toEqual(['http://10.0.0.2:3080'])
     expect(network.maximum()).toBe(1)
+  })
+
+  it('continues past an Expo57 connection refusal and discovers the next LAN DSH', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(FetchError.createFromError(new Error('Failed to connect to /10.0.0.1:3080')))
+      .mockResolvedValueOnce(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const caller = new AbortController()
+    const onFound = vi.fn()
+
+    await expect(scanCandidates([
+      { host: '10.0.0.1', port: 3080 },
+      { host: '10.0.0.2', port: 3080 },
+    ], { signal: caller.signal, concurrency: 1, onFound })).resolves.toEqual([
+      { id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080 },
+    ])
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'http://10.0.0.1:3080/manifest.webmanifest',
+      'http://10.0.0.2:3080/manifest.webmanifest',
+    ])
+    expect(onFound).toHaveBeenCalledExactlyOnceWith({ id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080 })
+    expect(caller.signal.aborted).toBe(false)
+    expect(fetchMock.mock.calls.every(([, init]) => init?.signal?.aborted === false)).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('aborts all active requests at the scan budget and returns only prior discoveries', async () => {
@@ -91,7 +116,7 @@ describe('scanCandidates scheduling', () => {
       { host: '10.0.0.3', port: 3080 },
       { host: '10.0.0.4', port: 3080 },
     ], { signal: new AbortController().signal, concurrency: 2, timeoutMs: 1000, budgetMs: 50, onFound })
-    network.requests[0]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[0]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await vi.advanceTimersByTimeAsync(49)
     expect(network.requests).toHaveLength(3)
     expect(network.active()).toBe(2)
@@ -113,7 +138,7 @@ describe('scanCandidates scheduling', () => {
       { host: '10.0.0.2', port: 3080 },
       { host: '10.0.0.3', port: 3080 },
     ], { signal: caller.signal, concurrency: 2, onFound })
-    network.requests[0]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[0]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     expect((await pending).map(host => host.id)).toEqual(['http://10.0.0.1:3080'])
     expect(onFound).toHaveBeenCalledTimes(1)
     expect(network.requests).toHaveLength(2)
@@ -134,7 +159,7 @@ describe('scanCandidates scheduling', () => {
       onFound() { throw error },
     })
     const rejection = expect(pending).rejects.toBe(error)
-    network.requests[0]!.resolve(jsonResponse({ enabled: false, allowLoopback: true }))
+    network.requests[0]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await rejection
     expect(network.requests[1]?.signal.aborted).toBe(true)
     expect(network.active()).toBe(0)
@@ -152,7 +177,7 @@ describe('scanCandidates scheduling', () => {
       { host: '10.0.0.3', port: 3080 },
     ], { signal: new AbortController().signal, concurrency: 256, onFound })).toEqual([])
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://10.0.0.3:3080/__dsh_bridge__/auth-status')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://10.0.0.3:3080/manifest.webmanifest')
     expect(onFound).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })

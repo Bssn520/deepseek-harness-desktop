@@ -11,7 +11,7 @@ import { tunnel } from './tunnel'
 
 const HOST_PORT = 45_678
 
-const POLICY: RemoteAuthPolicy = { enabled: true, scope: 'public_only', password: null, linkToken: 'link-token', sessionSecret: 'session-secret' }
+const POLICY: RemoteAuthPolicy = { enabled: true, scope: 'public_only', linkToken: 'link-token', sessionSecret: 'session-secret' }
 
 interface Spawned {
   env?: NodeJS.ProcessEnv
@@ -80,6 +80,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await tunnel.dispose()
   await gateway.dispose()
   setCurrentHostInstance(undefined)
@@ -156,6 +157,54 @@ describe('tunnel 生命周期', () => {
       expect((await tunnel.status()).state).toBe('error')
     })
     expect((await tunnel.status()).error).toContain('落盘')
+  })
+
+  it.each(['落盘失败', '进程退出'])('%s 后重启必须等旧入口回收，不能被旧清理覆盖状态', async (cause) => {
+    await tunnel.start('quick')
+    const originalStop = gateway.stop
+    const originalStart = gateway.start
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let entered = false
+    let completed = false
+    const cleanup = vi.spyOn(gateway, 'stop').mockImplementationOnce(async (id) => {
+      await originalStop(id)
+      entered = true
+      await gate
+      completed = true
+    })
+    try {
+      if (cause === '落盘失败') {
+        writeFileSync(join(process.env.DSH_HOME ?? '', 'remote', 'access.json'), '{ broken')
+        spawned[0]!.handlers.onLine('INF Your quick Tunnel has been created! Visit it at https://bold-fox-abc.trycloudflare.com')
+      }
+      else {
+        spawned[0]!.crash(1)
+      }
+      await vi.waitFor(() => expect(entered).toBe(true))
+      expect((await tunnel.status()).state).toBe('error')
+      writeAccessDocument(defaultAccessDocument())
+      const order: boolean[] = []
+      vi.spyOn(gateway, 'start').mockImplementationOnce(async (options) => {
+        order.push(completed)
+        release()
+        return await originalStart(options)
+      })
+      const restarting = tunnel.start('quick')
+      setImmediate(release)
+      await restarting
+      await cleanup.mock.results[0]!.value
+      expect(order).toEqual([true])
+      const status = await tunnel.status()
+      expect(status.state).toBe('starting')
+      expect(status.port).toBe(gateway.status('tunnel')?.port)
+      expect(spawned).toHaveLength(2)
+    }
+    finally {
+      release()
+    }
   })
 
   it('token 模式缺凭据或主机名时拒绝启动，且不落盘、不装入口、不起进程', async () => {

@@ -18,6 +18,9 @@ const RELEASE_API = 'https://api.github.com/repos/cloudflare/cloudflared/release
 
 const RELEASE_TIMEOUT_MS = 20_000
 
+// ponytail: API 限流时固定已核验版本，升级时同步官方资产摘要。
+const FALLBACK_VERSION = '2026.10.0'
+
 const MIRROR_PREFIX = 'https://ghfast.top/'
 
 const STATE_DIR = 'remote'
@@ -44,14 +47,15 @@ export interface CloudflaredAsset {
   asset: string
   executable: string
   archive: boolean
+  digest: string
 }
 
 const ASSETS: Record<string, CloudflaredAsset> = {
-  'darwin-arm64': { asset: 'cloudflared-darwin-arm64.tgz', executable: 'cloudflared', archive: true },
-  'darwin-x64': { asset: 'cloudflared-darwin-amd64.tgz', executable: 'cloudflared', archive: true },
-  'linux-x64': { asset: 'cloudflared-linux-amd64', executable: 'cloudflared', archive: false },
-  'linux-arm64': { asset: 'cloudflared-linux-arm64', executable: 'cloudflared', archive: false },
-  'win32-x64': { asset: 'cloudflared-windows-amd64.exe', executable: 'cloudflared.exe', archive: false },
+  'darwin-arm64': { asset: 'cloudflared-darwin-arm64.tgz', executable: 'cloudflared', archive: true, digest: 'sha256:a2f79ff7b9420aa537d74af239f376da170bbabeb529aec416002adac6a72e70' },
+  'darwin-x64': { asset: 'cloudflared-darwin-amd64.tgz', executable: 'cloudflared', archive: true, digest: 'sha256:903845b81828c8cb3c5d13d816a2de71c06a3da5785469df8eb0e1b736d92f9f' },
+  'linux-x64': { asset: 'cloudflared-linux-amd64', executable: 'cloudflared', archive: false, digest: 'sha256:d33ff2d14475178d2012c2c56beba87389ac5ded27649519f198a7d3134a99db' },
+  'linux-arm64': { asset: 'cloudflared-linux-arm64', executable: 'cloudflared', archive: false, digest: 'sha256:e6422b9d4f72d3194bc5a38676f13667c06666523217b842a877d72a80b5ac08' },
+  'win32-x64': { asset: 'cloudflared-windows-amd64.exe', executable: 'cloudflared.exe', archive: false, digest: 'sha256:86aee4017b26625cee8484c113558f48effa4cd47f7aa05fcf425604e5d2b23c' },
 }
 
 export function cloudflaredAsset(platform: string = process.platform, arch: string = process.arch): CloudflaredAsset | undefined {
@@ -75,8 +79,12 @@ export interface CloudflaredRelease {
 export async function fetchCloudflaredRelease(asset: string, version?: string): Promise<CloudflaredRelease> {
   const url = version === undefined || version === '' ? RELEASE_API : `https://api.github.com/repos/cloudflare/cloudflared/releases/tags/${version}`
   const response = await fetch(url, { signal: AbortSignal.timeout(RELEASE_TIMEOUT_MS), headers: { accept: 'application/vnd.github+json' } })
-  if (!response.ok)
+  if (!response.ok) {
+    const fallback = Object.values(ASSETS).find(entry => entry.asset === asset)
+    if ((response.status === 403 || response.status === 429) && (version === undefined || version === '' || version === FALLBACK_VERSION) && fallback !== undefined)
+      return { tag: FALLBACK_VERSION, digest: fallback.digest }
     throw new Error(`发布元数据不可用（HTTP ${response.status}）`)
+  }
   const body = await response.json() as { tag_name?: unknown, assets?: unknown }
   const tag = typeof body.tag_name === 'string' ? body.tag_name : ''
   const entries = Array.isArray(body.assets) ? body.assets : []

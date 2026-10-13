@@ -14,25 +14,18 @@ const TUNNEL_PROGRESS_STAGES: readonly TunnelProgressStage[] = ['check', 'downlo
 
 const EMPTY_TUNNEL: AccessTunnel = { enabled: false, mode: 'quick', hostname: null, state: 'stopped', events: [] }
 
-let requests = 0
-let lastSaved = 0
-
 export async function load(): Promise<void> {
   store.access.beginLoad()
   await refresh()
 }
 
-/** 轮询用：不改状态机的 loading 档，避免面板在后台刷新时闪回加载态。 */
 export async function refresh(): Promise<void> {
-  const mine = ++requests
+  const mine = store.access.beginRequest()
   try {
-    const next = accessStatusOf(await request<unknown>(BASE, { method: 'get' }))
-    if (mine >= lastSaved)
-      store.access.commit(next)
+    store.access.commit(accessStatusOf(await request<unknown>(BASE, { method: 'get' })), mine)
   }
   catch (error) {
-    if (mine >= lastSaved)
-      store.access.fail(messageOf(error))
+    store.access.fail(messageOf(error), mine)
   }
 }
 
@@ -56,18 +49,22 @@ export async function stopTunnel(): Promise<ServiceResult> {
   return await mutate(async () => await request<unknown>(`${BASE}/tunnel`, { method: 'delete' }))
 }
 
-// --- internal ---
 async function mutate(run: () => Promise<unknown>): Promise<ServiceResult> {
-  const mine = ++requests
+  const mine = store.access.invalidateRequests()
   store.access.beginBusy()
   try {
     const next = accessStatusOf(await run())
-    lastSaved = Math.max(lastSaved, mine)
-    store.access.commit(next)
+    const refreshed = store.access.savedSeq > mine
+    store.access.invalidateRequests()
+    if (refreshed)
+      await refresh()
+    else
+      store.access.commit(next)
     return { ok: true }
   }
   catch (error) {
     const message = messageOf(error)
+    store.access.invalidateRequests()
     store.access.fail(message)
     return { ok: false, error: message }
   }
@@ -93,7 +90,6 @@ function accessStatusOf(value: unknown): AccessStatus {
     events: listOf(raw.events).map(eventOf).filter(entry => entry !== undefined),
     ...textField('recommended', raw.recommended),
     ...linkSourceField(raw.linkSource),
-    ...textField('generatedPassword', raw.generatedPassword),
     ...textField('link', raw.link),
     ...textField('maskLink', raw.maskLink),
     ...textField('qr', raw.qr),
@@ -128,7 +124,6 @@ function authOf(value: unknown): AccessStatus['auth'] {
   return {
     enabled: booleanOf(raw.enabled) ?? false,
     scope: scopeOf(raw.scope) ?? 'public_only',
-    ...booleanField('hasPassword', raw.hasPassword),
     ...booleanField('hasToken', raw.hasToken),
     ...textField('token', raw.token),
   }

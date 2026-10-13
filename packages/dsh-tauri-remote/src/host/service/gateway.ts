@@ -7,8 +7,8 @@ import { pipeline } from 'node:stream'
 import { defineService } from 'dsh-tauri'
 import { messageOf } from '../../shared/error'
 import { ensureSourceSession } from '../config/runtime'
-import { rateLimitAfterFailure, rateLimitBlockedMs, signSession, tokenMatches, verifyPassword, verifySession } from '../utils/auth'
-import { classifySource, decideSourceAccess, isAuthConfigured, isAuthStorageBroken, rateLimitKeyOf } from '../utils/source'
+import { rateLimitAfterFailure, rateLimitBlockedMs, signSession, tokenMatches, verifySession } from '../utils/auth'
+import { classifySource, decideSourceAccess, isAuthConfigured, rateLimitKeyOf } from '../utils/source'
 import { authorityFor, cookiePairsOf, createCompressor, createDecompressor, deniedHtml, entryUrlOf, forwardHeadersOf, isCrossSiteRequest, isNavigationRequest, isReplayable, isUpgradeOf, loginPageHtml, mergeCookieHeader, parseCookieHeader, parseFormField, responseHeadersOf, responsePlanOf, supportsZstd, tunnelClientIpOf, upstreamPortOf } from './gateway.utils'
 
 const LOOPBACK = '127.0.0.1'
@@ -23,7 +23,7 @@ const SESSION_COOKIE = 'dsh_remote_session'
 
 const AUTH_QUERY = 'auth'
 
-const LOGIN_FIELD = 'password'
+const LOGIN_FIELD = 'code'
 
 const FORM_BODY_LIMIT = 4096
 
@@ -35,9 +35,7 @@ const MINT_TIMEOUT_MS = 10_000
 
 const TOKEN_TIMEOUT_MS = 10_000
 
-const DENIED_REASON = '尚未配置访问认证（密码或链接 Token），公网与隧道来源一律拒绝。请在本机回环来源的「远程 → 访问入口」中设置访问密码或链接 Token。'
-
-const BROKEN_AUTH_REASON = '认证存储损坏，已视为未配置访问认证：公网与隧道来源一律拒绝。请在本机回环来源的「远程 → 访问入口」中重新设置访问密码。'
+const DENIED_REASON = '尚未启用配对认证，公网与隧道来源一律拒绝。请在本机回环来源的「远程 → 访问入口」中启用认证并获取配对码。'
 
 const CROSS_SITE_REASON = '跨站来源的请求被拒绝：请用访问链接里的同一域名打开页面后重试；若你是在别的站点里嵌入访问地址，改成本机回环来源或带 ?auth= 的链接。'
 
@@ -275,20 +273,25 @@ function handleRequest(entry: GatewayEntry, request: IncomingMessage, response: 
 }
 
 async function dispatchRequest(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  if (isCrossSiteRequest(entry.kind, request.headers, entry.publicHost?.())) {
+  const url = new URL(request.url ?? '/', 'http://gateway.invalid')
+  const manifest = url.pathname === '/manifest.webmanifest' && (request.method === 'GET' || request.method === 'HEAD')
+  if (isCrossSiteRequest(entry.kind, request.headers, entry.publicHost?.(), manifest)) {
     writeDenied(request, response, CROSS_SITE_REASON)
     emit(entry, 'source', `已拦下跨站来源请求：${request.method ?? 'GET'} ${request.url ?? '/'}`)
     return
   }
   const session = ensureSourceSession()
   const source = sourceOf(entry, request, session)
+  if (manifest) {
+    await forward(entry, request, response, source, session, false)
+    return
+  }
   const policy = entry.auth?.()
   const decision = decideSourceAccess(source, policy)
   if (decision === 'deny') {
-    writeDenied(request, response, denyReasonOf(policy))
+    writeDenied(request, response, DENIED_REASON)
     return
   }
-  const url = new URL(request.url ?? '/', 'http://gateway.invalid')
   const exchange = entry.kind !== 'outbound' && source !== 'loopback' && isAuthConfigured(policy) && url.pathname === '/' && ((request.method === 'GET' && url.searchParams.has(AUTH_QUERY)) || isLoginSubmission(request))
   if (decision === 'authenticate' || exchange) {
     if (policy === undefined || !await admitAuthenticated(entry, request, response, source, policy))
@@ -300,10 +303,6 @@ async function dispatchRequest(entry: GatewayEntry, request: IncomingMessage, re
 /** 隧道入口的物理对端恒为回环，来源分类恒为 tunnel：不得采信任何请求头，否则 §7.2 门禁可被自报头绕过（S2 §7.1、§9）。 */
 function sourceOf(entry: GatewayEntry, request: IncomingMessage, session: string): RemoteSourceClass {
   return entry.kind === 'tunnel' ? 'tunnel' : classifySource(request.headers, request.socket.remoteAddress, session)
-}
-
-function denyReasonOf(policy: RemoteAuthPolicy | undefined): string {
-  return isAuthStorageBroken(policy) ? BROKEN_AUTH_REASON : DENIED_REASON
 }
 
 async function admitAuthenticated(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse, source: RemoteSourceClass, policy: RemoteAuthPolicy): Promise<boolean> {
@@ -324,26 +323,25 @@ async function admitAuthenticated(entry: GatewayEntry, request: IncomingMessage,
       writeSessionRedirect(response, policy, url.pathname, now)
       return false
     }
-    failAuth(bucket, now, request, response, '链接已失效，请输入访问密码。')
+    failAuth(bucket, now, request, response, '链接已失效，请输入新的配对码。')
     return false
   }
   if (isLoginSubmission(request)) {
     const submitted = parseFormField(await readFormBody(request), LOGIN_FIELD)
     const latest = entry.auth?.()
     const completedAt = Date.now()
-    if (submitted !== undefined && isAuthConfigured(latest) && (verifyPassword(submitted, latest.password) || tokenMatches(submitted, latest.linkToken) || (latest.consumePairingCode?.(submitted) ?? tokenMatches(submitted, latest.pairingCode ?? null)))) {
+    if (submitted !== undefined && isAuthConfigured(latest) && (tokenMatches(submitted, latest.linkToken) || (latest.consumePairingCode?.(submitted) ?? tokenMatches(submitted, latest.pairingCode ?? null)))) {
       authFailures.delete(bucket)
       writeSessionRedirect(response, latest, `${url.pathname}${url.search}`, completedAt)
       return false
     }
-    failAuth(bucket, completedAt, request, response, '密码不正确。')
+    failAuth(bucket, completedAt, request, response, '配对码不正确或已失效。')
     return false
   }
   writeAuthChallenge(request, response, undefined, 401, 0)
   return false
 }
 
-/** 登录表单是导航形态的 urlencoded POST：API 客户端带 password 字段的 POST 不得被当成登录（S2 §7.3）。 */
 function isLoginSubmission(request: IncomingMessage): boolean {
   if (request.method !== 'POST' || !isNavigationRequest(request.headers))
     return false
@@ -421,7 +419,7 @@ function writeJson(response: ServerResponse, status: number, message: string, re
   response.end(body)
 }
 
-async function forward(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse, source: RemoteSourceClass, session: string): Promise<void> {
+async function forward(entry: GatewayEntry, request: IncomingMessage, response: ServerResponse, source: RemoteSourceClass, session: string, mint = true): Promise<void> {
   const inject = entry.kind !== 'outbound'
   const headers = forwardHeadersOf(request.headers, {
     authority: entry.authority,
@@ -429,7 +427,7 @@ async function forward(entry: GatewayEntry, request: IncomingMessage, response: 
     ...inject ? { source, session } : { source: 'public', session: 'outbound' },
     ...entry.kind === 'outbound' ? { identity: true } : {},
   })
-  const cookie = await ensureMintedCookie(entry)
+  const cookie = mint ? await ensureMintedCookie(entry) : undefined
   if (cookie !== undefined)
     headers.cookie = mergeCookieHeader(cookieHeaderOf(headers.cookie), [cookie])
   await sendUpstream(entry, request, response, headers, { retryable: true, credential: cookie !== undefined }, source)
@@ -626,7 +624,7 @@ async function dispatchUpgrade(entry: GatewayEntry, request: IncomingMessage, so
   const admitted = decision === 'allow'
     || (decision === 'authenticate' && policy !== undefined && verifySession(parseCookieHeader(cookieHeaderOf(request.headers.cookie)).get(SESSION_COOKIE), policy.sessionSecret, Date.now()))
   if (!admitted) {
-    rejectUpgrade(socket, decision === 'deny' ? 403 : 401, decision === 'deny' ? denyReasonOf(policy) : '需要认证后才能访问。')
+    rejectUpgrade(socket, decision === 'deny' ? 403 : 401, decision === 'deny' ? DENIED_REASON : '需要认证后才能访问。')
     return
   }
   const inject = entry.kind !== 'outbound'

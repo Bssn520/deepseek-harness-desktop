@@ -1,7 +1,8 @@
 import type { ClientContext } from 'dsh-tauri/client'
-import type { MachineRow } from '../types/index'
+import type { AccessStatus, MachineRow } from '../types/index'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import * as accessService from '../service/access'
 import { store } from '../store/index'
 import { answer, replies, resetWire, sent } from '../test-utils/client-mock'
 import { pollFeature } from './poll'
@@ -29,12 +30,14 @@ beforeEach(() => {
   resetWire()
   store.machines.reset()
   store.sync.reset()
+  store.access.reset()
   answer(call => call.url === `${baseURL}/machines`
     ? replies.ok({ items: [{ ...machineA, state: 'connecting', progress: { phase: 'handshake' } }] })
     : replies.ok({ items: [] }))
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.useRealTimers()
 })
 
@@ -75,6 +78,75 @@ describe('pollFeature', () => {
     expect(sent.length).toBe(idle)
 
     stop()
+  })
+
+  it('polls access during the first long tunnel mutation even when the saved snapshot is still stopped', async () => {
+    vi.useFakeTimers()
+    const mutation = Promise.withResolvers<ReturnType<typeof replies.ok>>()
+    const downloading = { enabled: true, tunnel: { enabled: true, mode: 'quick', state: 'starting', progress: { stage: 'download', received: 1, total: 2 } } }
+    answer(call => call.http === 'POST' ? mutation.promise : replies.ok(downloading))
+    store.access.snapshot = {
+      version: 1,
+      enabled: false,
+      state: 'stopped',
+      listening: false,
+      listen: { address: '127.0.0.1', port: 3088 },
+      port: 3088,
+      auth: { enabled: true, scope: 'all' },
+      addresses: [],
+      events: [],
+      tunnel: { enabled: false, mode: 'quick', hostname: null, state: 'stopped', events: [] },
+    }
+    const stop = pollFeature.call({} as unknown as ClientContext)
+    const pending = accessService.startTunnel({ mode: 'quick' })
+    try {
+      await vi.advanceTimersByTimeAsync(MACHINES_INTERVAL_MS)
+      expect(sent.map(call => [call.http, call.url])).toEqual([
+        ['POST', `${baseURL}/access/tunnel`],
+        ['GET', `${baseURL}/access`],
+      ])
+      expect(store.access.busy).toBe(true)
+      expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+      mutation.resolve(replies.ok(downloading))
+      await pending
+    }
+    finally {
+      stop()
+      mutation.resolve(replies.ok(downloading))
+      await pending
+    }
+  })
+
+  it('polls starting tunnels while busy and stops access polling when ready', async () => {
+    vi.useFakeTimers()
+    const snapshot: AccessStatus = {
+      version: 1,
+      enabled: false,
+      state: 'stopped',
+      listening: false,
+      listen: { address: '127.0.0.1', port: 3088 },
+      port: 3088,
+      auth: { enabled: true, scope: 'all' },
+      addresses: [],
+      events: [],
+      tunnel: { enabled: true, mode: 'quick', hostname: null, state: 'starting', events: [], progress: { stage: 'download', received: 1, total: 2 } },
+    }
+    store.access.commit(snapshot)
+    store.access.beginBusy()
+    answer(() => replies.ok(snapshot))
+    const stop = pollFeature.call({} as unknown as ClientContext)
+    try {
+      await vi.advanceTimersByTimeAsync(MACHINES_INTERVAL_MS)
+      expect(urls()).toEqual([`${baseURL}/access`])
+      expect(store.access.busy).toBe(true)
+      store.access.endBusy()
+      store.access.commit({ ...snapshot, tunnel: { ...snapshot.tunnel, state: 'running' } })
+      await vi.advanceTimersByTimeAsync(MACHINES_INTERVAL_MS * 2)
+      expect(urls()).toEqual([`${baseURL}/access`])
+    }
+    finally {
+      stop()
+    }
   })
 
   it('disposes the interval when the feature unloads', async () => {

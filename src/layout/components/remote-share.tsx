@@ -1,6 +1,7 @@
 import { ArrowUpRightFromSquare, Copy, Gear, Smartphone, TriangleExclamation } from '@gravity-ui/icons'
 import { Button, Description, Label, Popover, ProgressBar, Spinner, Tabs } from '@heroui/react'
 import { useIntervalFn, useUnmount, useUnmountedRef, useWatch } from '@reause/core'
+import { useMutation } from '@tanstack/react-query'
 import { invoke } from '@tauri-apps/api/core'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -46,7 +47,6 @@ interface AccessStatus {
   error?: string
   warnings?: string[]
   pairing?: AccessPairing
-  generatedPassword?: string
   tunnel?: AccessTunnel
 }
 
@@ -83,11 +83,9 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
   const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<AccessStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [generatedPassword, setGeneratedPassword] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const requestSeqRef = useRef(0)
-  const mutationSeqRef = useRef(0)
+  const savedSeqRef = useRef(0)
   const busyRef = useRef(false)
   const refreshedExpiryRef = useRef<number | null>(null)
   const openRef = useRef(false)
@@ -122,49 +120,54 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
   }
 
   async function load(consumed = false) {
-    if (busyRef.current || !openRef.current || unmountedRef.current)
+    if (!openRef.current || unmountedRef.current)
       return
     const seq = ++requestSeqRef.current
     try {
       const raw = await getAccess() as unknown as AccessStatus
       if (seq !== requestSeqRef.current || unmountedRef.current)
         return
+      savedSeqRef.current = seq
       updateStatus(raw, consumed)
     }
     catch (err) {
       if (seq !== requestSeqRef.current || unmountedRef.current)
         return
+      savedSeqRef.current = seq
       setError(String(err))
     }
   }
 
-  async function run(action: () => Promise<unknown>) {
+  const { mutate, isPending: busy } = useMutation({
+    mutationFn: async ({ action }: { action: () => Promise<unknown>, session: number, seq: number }) => await action() as AccessStatus,
+    onSuccess: async (raw, { session, seq }) => {
+      if (session !== sessionRef.current || !openRef.current || unmountedRef.current)
+        return
+      const refreshed = savedSeqRef.current > seq
+      requestSeqRef.current += 1
+      if (refreshed)
+        await load()
+      else
+        updateStatus(raw)
+    },
+    onError: (err, { session }) => {
+      if (session !== sessionRef.current || !openRef.current || unmountedRef.current)
+        return
+      requestSeqRef.current += 1
+      setError(String(err))
+    },
+    onSettled: () => {
+      busyRef.current = false
+    },
+  })
+
+  function run(action: () => Promise<unknown>) {
     if (busyRef.current || !openRef.current || unmountedRef.current)
       return
     const seq = ++requestSeqRef.current
-    const mutation = ++mutationSeqRef.current
     busyRef.current = true
-    setBusy(true)
     setError(null)
-    try {
-      const raw = await action() as AccessStatus
-      if (seq !== requestSeqRef.current || unmountedRef.current)
-        return
-      updateStatus(raw)
-      if (typeof raw?.generatedPassword === 'string' && raw.generatedPassword !== '')
-        setGeneratedPassword(raw.generatedPassword)
-    }
-    catch (err) {
-      if (seq !== requestSeqRef.current || unmountedRef.current)
-        return
-      setError(String(err))
-    }
-    finally {
-      if (mutation === mutationSeqRef.current && !unmountedRef.current) {
-        busyRef.current = false
-        setBusy(false)
-      }
-    }
+    mutate({ action, session: sessionRef.current, seq })
   }
 
   async function watchPairingUse(session: number, baseline: number) {
@@ -259,6 +262,12 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
   const stage = tunnel?.progress?.stage
   const received = tunnel?.progress?.received
   const total = tunnel?.progress?.total
+  const downloading = stage === 'download'
+  const knownTotal = total !== undefined && Number.isFinite(total) && total > 0
+  const downloadPercent = knownTotal ? Math.max(0, Math.min(100, ((received ?? 0) / total) * 100)) : undefined
+  const downloadLabel = knownTotal
+    ? t('remote.share.download_progress', { received: megabytesOf(received), total: megabytesOf(total) })
+    : t('remote.share.download_received', { received: megabytesOf(received) })
   const pairingCode = (
     <div className="flex flex-col gap-1.5 rounded-lg border border-line/40 px-2.5 py-2">
       <span className="text-[11px] text-muted">{t('remote.share.pairing')}</span>
@@ -279,38 +288,6 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
           )}
     </div>
   )
-
-  const passwordBlock = generatedPassword === null
-    ? null
-    : (
-        <div className="flex flex-col gap-1.5 rounded-lg border border-warning/40 px-2.5 py-2">
-          <span className="text-[11px] text-muted">{t('remote.share.password')}</span>
-          <div className="flex items-center gap-2">
-            <span className="break-all font-mono text-xs text-ink" data-testid="remote-share-password">{generatedPassword}</span>
-            <Button
-              className="ml-auto size-7 shrink-0"
-              isIconOnly
-              size="sm"
-              variant="ghost"
-              aria-label={t('remote.share.copy')}
-              data-testid="remote-share-password-copy"
-              onPress={() => copyLink(generatedPassword)}
-            >
-              <Copy className="size-3.5" />
-            </Button>
-            <Button
-              className="h-7 shrink-0 text-[11px]"
-              size="sm"
-              variant="ghost"
-              data-testid="remote-share-password-dismiss"
-              onPress={() => setGeneratedPassword(null)}
-            >
-              {t('remote.share.password_dismiss')}
-            </Button>
-          </div>
-          <span className="text-[11px] leading-4 text-muted">{t('remote.share.password_hint')}</span>
-        </div>
-      )
 
   return (
     <Popover isOpen={open} onOpenChange={changeOpen}>
@@ -437,7 +414,6 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
                   </>
                 )}
                 {pairingCode}
-                {passwordBlock}
               </If>
             </Tabs.Panel>
 
@@ -464,31 +440,34 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
 
               <If cond={status !== null && tunnelState === 'starting'}>
                 <div className="flex flex-col gap-4 justify-center items-center">
-                  <Description className="flex items-center gap-1.5 text-xs">
-                    <Spinner className="size-3" />
-                    {t('remote.share.tunnel_starting')}
-                    <If cond={stage}>
-                      （
-                      {t(`remote.share.stage.${stage}`)}
-                      ）
-                    </If>
-                  </Description>
-                  {total !== undefined && (
-                    <>
-                      <ProgressBar
-                        size="sm"
-                        value={Math.min(100, ((received ?? 0) / (total || 1)) * 100)}
-                        className="w-full"
-                        valueLabel={t('remote.share.download_progress', { received: megabytesOf(received), total: megabytesOf(total) })}
-                      >
-                        <Label>{t('remote.share.stage.download')}</Label>
-                        <ProgressBar.Output className="text-xs text-muted tabular-nums" />
-                        <ProgressBar.Track>
-                          <ProgressBar.Fill className="bg-info" />
-                        </ProgressBar.Track>
-                      </ProgressBar>
-                    </>
-                  )}
+                  <If
+                    cond={downloading}
+                    else={(
+                      <Description className="flex items-center gap-1.5 text-xs">
+                        <Spinner className="size-3" />
+                        {t('remote.share.tunnel_starting')}
+                        <If cond={stage}>
+                          （
+                          {t(`remote.share.stage.${stage}`)}
+                          ）
+                        </If>
+                      </Description>
+                    )}
+                  >
+                    <ProgressBar
+                      size="sm"
+                      value={downloadPercent}
+                      isIndeterminate={!knownTotal}
+                      className="w-full"
+                      valueLabel={downloadLabel}
+                    >
+                      <Label>{t('remote.share.stage.download')}</Label>
+                      <ProgressBar.Output className="text-xs text-muted tabular-nums">{downloadLabel}</ProgressBar.Output>
+                      <ProgressBar.Track>
+                        <ProgressBar.Fill className="bg-info" />
+                      </ProgressBar.Track>
+                    </ProgressBar>
+                  </If>
                   <Button
                     className="h-8 w-full text-xs"
                     variant="tertiary"
@@ -545,7 +524,6 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
                 )}
 
                 {pairingCode}
-                {passwordBlock}
 
                 <Button
                   className="h-8 w-full text-xs"

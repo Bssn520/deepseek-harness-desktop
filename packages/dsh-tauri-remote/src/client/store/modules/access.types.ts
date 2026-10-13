@@ -6,5 +6,7 @@ export interface AccessViewState {
   status: AccessLoadStatus
   error: string | null
   busy: boolean
+  requestSeq: number
+  savedSeq: number
   snapshot: AccessStatus | null
 }

@@ -57,7 +57,7 @@ pnpm typecheck:native   # tsc --project tsconfig.native.json --noEmit
 ```
 src-native/
 ├── app/          # expo-router 路由：_layout.tsx / index.tsx / scan.tsx
-├── apis/         # HTTP 访问层：getAuthStatus / getManifest
+├── apis/         # HTTP 访问层：getManifest
 ├── components/   # 品牌与装饰组件（鲸鱼、字标、状态点、脉冲动画等）
 ├── config/       # 常量、React Query client 与 query key
 ├── hooks/        # 原生能力封装（通知、应用状态、主机健康轮询）
@@ -85,8 +85,8 @@ src-native/
 
 ### 3.2 apis
 
-* `src-native/apis/index.types.ts` 是宿主 HTTP 契约的类型 SSOT（`AuthStatus`、`BridgeManifest`、路径参数类型）。
-* `src-native/apis/index.ts` 提供 `getAuthStatus` / `getManifest`：内部 `fetch` + 校验，非 2xx、响应体不合法或校验失败一律返回 `null`（含义是「这个 origin 不是 DSH Mobile 宿主」）。
+* `src-native/apis/index.types.ts` 是宿主 HTTP 契约的类型 SSOT（`BridgeManifest`、路径参数类型）。
+* `src-native/apis/index.ts` 提供 `getManifest`：内部 `fetch` + 校验，非 2xx、响应体不合法或校验失败一律返回 `null`（未能确认这个 origin 的 DSH 服务身份）。
 * `src-native/utils/bridge-protocol.ts` 以 **type-only** 方式引用这些类型，避免协议工具与访问层耦合。
 
 ---
@@ -98,7 +98,8 @@ src-native/
 * **主动发现**由用户操作触发：点击「自动扫描局域网」，或断开连接后紧接的那轮扫描。
 * 探测成功由可信 DSH 文档就绪消息确认，不以原生 `onLoad` 或 HTTP 200 判定。
 * 超时与预算集中在 `src-native/config/constants.ts`：默认端口 `3088` / `3080`、并发 40、单次探测 600 ms、历史探测 3 s、整体扫描预算 20 s、前台健康检查间隔 15 s。
-* 服务识别走上游公开的 `/__dsh_bridge__/auth-status`，旧响应缺少身份字段时再校验 `/manifest.webmanifest`；不把任意 HTML 200 当作 DSH 服务。
+* 服务识别与健康检查只请求上游真实公开的 `/manifest.webmanifest`，严格校验 `name: 'DeepSeek Harness'` 与 `short_name: 'DSH'`；不请求不存在的认证状态端点，也不把任意 HTML 200 当作 DSH 服务。
+* 服务识别不代表登录成功。需要认证的主机由 WebView 完成配对，只有可信文档就绪消息才能确认连接成功；健康检查不读取或重放配对码。
 * 探测与扫描拆成两个模块：`src-native/services/probe-bridge.ts` 的 `probeBridge(address, signal, timeoutMs?)` 探测单个地址（超时、网络错误、非 2xx、响应体不合法一律返回 `null`），`src-native/services/scan-candidates.ts` 的 `scanCandidates(candidates, { signal, concurrency, timeoutMs, budgetMs, onFound })` 以有界并发遍历候选地址并受总预算约束（参数非法直接抛 `RangeError`）。
 * 断开会清空当前连接并保留历史，紧接着的扫描跳过刚断开的精确 origin。
 
@@ -131,7 +132,8 @@ src-native/
 * 局域网 HTTP 通过 `expo-build-properties` 的 `usesCleartextTraffic: true` 支持；HTTP 不提供传输保密性，仅用于可信局域网，公网优先 HTTPS。
 * 自动发现基于当前 IPv4 推导 `/24` 网段，不保证跨网段、VPN、访客 Wi-Fi 隔离或非默认端口；此时改用桌面端 / Bridge 生成的二维码，或在 `EXTRA_SCAN_PORTS` 追加端口。
 * 通知与 WebView 消息入口校验类型白名单、精确 scheme / host / port origin、原生事件 URL 与每个 WebView 的随机 nonce；外站顶层链接交由外部浏览器打开。
-* 密码登录保留在 WebView 内由 cookie jar 管理，**不**通过 RN `fetch` 登录。
+* 配对登录与会话保留在 WebView 内由 cookie jar 管理，**不**通过 RN `fetch` 登录。远程访问不再生成、保存或接受访问密码；SSH 密码与密钥口令不受影响。
+* 网关仅允许无凭据读取静态 `/manifest.webmanifest`，不为探测铸造上游会话。该例外只接受 `GET` / `HEAD`，拒绝跨源浏览器请求，不放行应用页面、API 或 WebSocket。
 * 上游没有独立的远程推送端点：系统挂起、进程被杀或关闭 App 后**不保证**继续收到新任务通知。
 
 ---

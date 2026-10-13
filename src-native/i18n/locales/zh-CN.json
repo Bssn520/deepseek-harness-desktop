@@ -26,7 +26,6 @@
   "connection.swipeAccessibility": "关闭滑动引导",
   "connection.closeDrawer": "关闭连接信息",
   "connection.hostOffline": "主机暂时不可用",
-  "connection.tokenRequired": "该主机需要访问令牌，请用桌面端二维码扫码连接，或在页面内登录。",
   "connection.available": "可用",
   "connection.unavailable": "不可用",
   "connection.checking": "正在检测",

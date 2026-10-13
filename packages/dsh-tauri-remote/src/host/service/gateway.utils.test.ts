@@ -195,6 +195,19 @@ describe('request shape predicates', () => {
     expect(isCrossSiteRequest('tunnel', { 'host': '127.0.0.1:38999', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' })).toBe(false)
   })
 
+  it('permits a public headerless probe only when explicitly allowed without weakening declared-source checks', () => {
+    const headers = { host: '127.0.0.1:38999' }
+    expect(isCrossSiteRequest('tunnel', headers)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', headers, undefined, true)).toBe(false)
+    expect(isCrossSiteRequest('tunnel', { ...headers, origin: 'https://evil.example' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { ...headers, referer: 'https://evil.example/' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { ...headers, origin: '' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { ...headers, 'sec-fetch-site': 'cross-site' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { ...headers, 'sec-fetch-site': 'same-site' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { ...headers, 'sec-fetch-mode': 'cors' }, undefined, true)).toBe(true)
+    expect(isCrossSiteRequest('tunnel', { host: 'trusted.example', origin: 'https://evil.example' }, 'trusted.example', true)).toBe(true)
+  })
+
   it('still compares Origin against Host on the tunnel leg while the tunnel domain survives', () => {
     expect(isCrossSiteRequest('tunnel', { host: 's2-probe.trycloudflare.com', origin: 'https://s2-probe.trycloudflare.com' })).toBe(false)
     expect(isCrossSiteRequest('tunnel', { host: 's2-probe.trycloudflare.com', origin: 'https://evil.example' })).toBe(true)
@@ -339,9 +352,9 @@ describe('cookie helpers', () => {
   })
 
   it('reads a urlencoded form field and ignores blanks', () => {
-    expect(parseFormField('password=s3cret&next=%2F', 'password')).toBe('s3cret')
-    expect(parseFormField('password=&next=%2F', 'password')).toBeUndefined()
-    expect(parseFormField('next=%2F', 'password')).toBeUndefined()
+    expect(parseFormField('code=AB23CD45&next=%2F', 'code')).toBe('AB23CD45')
+    expect(parseFormField('code=&next=%2F', 'code')).toBeUndefined()
+    expect(parseFormField('next=%2F', 'code')).toBeUndefined()
   })
 })
 
@@ -380,11 +393,11 @@ describe('compressors', () => {
 })
 
 describe('loginPageHtml', () => {
-  it('posts the password back to the current URL without inventing another route', () => {
+  it('posts the pairing code back to the current URL without a password field or another route', () => {
     const html = loginPageHtml()
-    expect(html).toContain('<form method="post">')
-    expect(html).toContain('name="password"')
-    expect(html).not.toContain('action=')
+    expect(html).toContain('<form id="loginForm" method="post">')
+    expect(html).toContain('name="code"')
+    expect(html).not.toMatch(/password|action=/i)
   })
 
   it('renders the official branding and accessible pairing form without client assets', () => {
@@ -392,8 +405,9 @@ describe('loginPageHtml', () => {
     expect(html).toContain('<h1>DeepSeek Harness</h1>')
     expect(html).toContain('<svg')
     expect(html).toContain('viewBox="0 0 23.16 17.04"')
-    expect(html).toContain('<label for="password">请输入配对码</label>')
-    expect(html).toMatch(/<input[^>]*id="password"[^>]*name="password"/)
+    expect(html).toContain('<label for="code">请输入配对码</label>')
+    expect(html).toMatch(/<input[^>]*id="code"[^>]*type="text"[^>]*name="code"/)
+    expect(html).toMatch(/autocomplete="one-time-code"/i)
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*>连接<\/button>/)
     expect(html).not.toMatch(/<script|<link|\bsrc=|maxlength=|__ModuleLoader__/i)
   })

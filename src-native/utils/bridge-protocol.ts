@@ -1,4 +1,4 @@
-import type { AuthStatus, BridgeManifest } from '@/apis/index.types'
+import type { BridgeManifest } from '@/apis/index.types'
 
 export interface BridgeAddress {
   id: string
@@ -11,21 +11,6 @@ export interface BridgeAddress {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-export function parseAuthStatus(value: unknown): AuthStatus | null {
-  if (!isRecord(value) || typeof value.enabled !== 'boolean')
-    return null
-  if (value.mode !== undefined && typeof value.mode !== 'string')
-    return null
-  if (value.allowLoopback !== undefined && typeof value.allowLoopback !== 'boolean')
-    return null
-  const status: AuthStatus = { enabled: value.enabled }
-  if (typeof value.mode === 'string')
-    status.mode = value.mode
-  if (typeof value.allowLoopback === 'boolean')
-    status.allowLoopback = value.allowLoopback
-  return status
 }
 
 export function isBridgeManifest(value: unknown): value is BridgeManifest {

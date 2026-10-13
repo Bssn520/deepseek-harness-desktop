@@ -25,7 +25,7 @@ export type GetApiTauriRemoteAccessResponse = {
   listening: false | true;
   listen: { address: string; port: number };
   port: number;
-  auth: { enabled: false | true; scope: "public_only" | "all"; hasPassword?: false | true; hasToken?: false | true; token?: string };
+  auth: { enabled: false | true; scope: "public_only" | "all"; hasToken?: false | true; token?: string };
   addresses: { address: string; family: "ipv4" | "ipv6"; interface: string; scope: "loopback" | "private" | "public" | "link-local"; score: number; recommended: false | true }[];
   recommended?: string;
   link?: string;
@@ -33,7 +33,6 @@ export type GetApiTauriRemoteAccessResponse = {
   qr?: string;
   linkSource?: "loopback" | "lan";
   pairing?: { code: string; expiresAt: number; usedSeq: number; link?: string; qr?: string; tunnelLink?: string; tunnelQr?: string };
-  generatedPassword?: string;
   tunnel?: { state: "error" | "starting" | "stopped" | "running"; events: { seq: number; ts: string; kind: "state" | "process" | "progress"; line: string }[]; token?: string; url?: string; port?: number; link?: string; qr?: string; progress?: { stage: "ready" | "spawn" | "download" | "verify" | "check" | "extract" | "domain"; url?: string; received?: number; total?: number }; error?: string; mode: "quick" | "token"; enabled: false | true; hostname: null | string };
   localPort?: number;
   error?: string;
@@ -49,7 +48,7 @@ export type PostApiTauriRemoteAccessResponse =
       listening: false | true;
       listen: { address: string; port: number };
       port: number;
-      auth: { enabled: false | true; scope: "public_only" | "all"; hasPassword?: false | true; hasToken?: false | true; token?: string };
+      auth: { enabled: false | true; scope: "public_only" | "all"; hasToken?: false | true; token?: string };
       addresses: { address: string; family: "ipv4" | "ipv6"; interface: string; scope: "loopback" | "private" | "public" | "link-local"; score: number; recommended: false | true }[];
       recommended?: string;
       link?: string;
@@ -57,7 +56,6 @@ export type PostApiTauriRemoteAccessResponse =
       qr?: string;
       linkSource?: "loopback" | "lan";
       pairing?: { code: string; expiresAt: number; usedSeq: number; link?: string; qr?: string; tunnelLink?: string; tunnelQr?: string };
-      generatedPassword?: string;
       tunnel?: { state: "error" | "starting" | "stopped" | "running"; events: { seq: number; ts: string; kind: "state" | "process" | "progress"; line: string }[]; token?: string; url?: string; port?: number; link?: string; qr?: string; progress?: { stage: "ready" | "spawn" | "download" | "verify" | "check" | "extract" | "domain"; url?: string; received?: number; total?: number }; error?: string; mode: "quick" | "token"; enabled: false | true; hostname: null | string };
       localPort?: number;
       error?: string;
@@ -73,7 +71,7 @@ export type PostApiTauriRemoteAccessTunnelResponse =
       listening: false | true;
       listen: { address: string; port: number };
       port: number;
-      auth: { enabled: false | true; scope: "public_only" | "all"; hasPassword?: false | true; hasToken?: false | true; token?: string };
+      auth: { enabled: false | true; scope: "public_only" | "all"; hasToken?: false | true; token?: string };
       addresses: { address: string; family: "ipv4" | "ipv6"; interface: string; scope: "loopback" | "private" | "public" | "link-local"; score: number; recommended: false | true }[];
       recommended?: string;
       link?: string;
@@ -81,7 +79,6 @@ export type PostApiTauriRemoteAccessTunnelResponse =
       qr?: string;
       linkSource?: "loopback" | "lan";
       pairing?: { code: string; expiresAt: number; usedSeq: number; link?: string; qr?: string; tunnelLink?: string; tunnelQr?: string };
-      generatedPassword?: string;
       tunnel?: { state: "error" | "starting" | "stopped" | "running"; events: { seq: number; ts: string; kind: "state" | "process" | "progress"; line: string }[]; token?: string; url?: string; port?: number; link?: string; qr?: string; progress?: { stage: "ready" | "spawn" | "download" | "verify" | "check" | "extract" | "domain"; url?: string; received?: number; total?: number }; error?: string; mode: "quick" | "token"; enabled: false | true; hostname: null | string };
       localPort?: number;
       error?: string;
@@ -97,7 +94,7 @@ export type DeleteApiTauriRemoteAccessTunnelResponse =
       listening: false | true;
       listen: { address: string; port: number };
       port: number;
-      auth: { enabled: false | true; scope: "public_only" | "all"; hasPassword?: false | true; hasToken?: false | true; token?: string };
+      auth: { enabled: false | true; scope: "public_only" | "all"; hasToken?: false | true; token?: string };
       addresses: { address: string; family: "ipv4" | "ipv6"; interface: string; scope: "loopback" | "private" | "public" | "link-local"; score: number; recommended: false | true }[];
       recommended?: string;
       link?: string;
@@ -105,7 +102,6 @@ export type DeleteApiTauriRemoteAccessTunnelResponse =
       qr?: string;
       linkSource?: "loopback" | "lan";
       pairing?: { code: string; expiresAt: number; usedSeq: number; link?: string; qr?: string; tunnelLink?: string; tunnelQr?: string };
-      generatedPassword?: string;
       tunnel?: { state: "error" | "starting" | "stopped" | "running"; events: { seq: number; ts: string; kind: "state" | "process" | "progress"; line: string }[]; token?: string; url?: string; port?: number; link?: string; qr?: string; progress?: { stage: "ready" | "spawn" | "download" | "verify" | "check" | "extract" | "domain"; url?: string; received?: number; total?: number }; error?: string; mode: "quick" | "token"; enabled: false | true; hostname: null | string };
       localPort?: number;
       error?: string;
@@ -148,7 +144,6 @@ export interface PostApiTauriRemoteAccessBody {
   port?: number;
   authEnabled?: false | true;
   scope?: "public_only" | "all";
-  password?: null | string;
 }
 export interface PostApiTauriRemoteAccessTunnelBody {
   mode?: "quick" | "token";

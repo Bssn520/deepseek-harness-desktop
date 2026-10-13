@@ -14,10 +14,9 @@ export default defineEventHandler<EventHandlerRequest, Promise<RemoteAccessStatu
     const credential = textOf(body.token, 'token')
     const host = textOf(body.hostname, 'hostname')
     tunnel.assertStartable(mode, credential, host)
-    const ensured = await access.ensureAuth()
+    await access.ensureAuth()
     await tunnel.start(mode, credential, host)
-    const status = await access.status()
-    return ensured.generatedPassword === undefined ? status : { ...status, generatedPassword: ensured.generatedPassword }
+    return await access.status()
   })
 })
 

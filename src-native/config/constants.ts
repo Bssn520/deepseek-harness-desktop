@@ -12,5 +12,4 @@ export const FOCUS_RETRY_INTERVAL_MS = 200
 export const FOCUS_TIMEOUT_MS = 15000
 export const NOTIFICATION_CHANNEL = 'dsh-bridge'
 export const CONNECTION_STORAGE_KEY = 'dsh-bridge/connections'
-export const AUTH_STATUS_PATH = '/__dsh_bridge__/auth-status'
 export const MANIFEST_PATH = '/manifest.webmanifest'

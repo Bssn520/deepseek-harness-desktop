@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildConnectUrl, connectionLabel, isBridgeManifest, isRecord, isTrustedOrigin, parseAuthStatus, parseQrPayload } from './bridge-protocol'
+import { buildConnectUrl, connectionLabel, isBridgeManifest, isRecord, isTrustedOrigin, parseQrPayload } from './bridge-protocol'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -126,25 +126,6 @@ describe('protocol response validation', () => {
 
   it('accepts plain records', () => {
     expect(isRecord({ enabled: false })).toBe(true)
-  })
-
-  it.each([
-    null,
-    [],
-    {},
-    { enabled: 'true' },
-    { enabled: 1 },
-    { enabled: false, mode: null },
-    { enabled: true, mode: 4 },
-    { enabled: true, allowLoopback: 'true' },
-    { enabled: true, allowLoopback: null },
-  ])('rejects malformed auth status %j', (value) => {
-    expect(parseAuthStatus(value)).toBeNull()
-  })
-
-  it('returns only validated auth fields', () => {
-    expect(parseAuthStatus({ enabled: true, mode: 'token_only', allowLoopback: false, token: 'secret', extra: true })).toEqual({ enabled: true, mode: 'token_only', allowLoopback: false })
-    expect(parseAuthStatus({ enabled: false })).toEqual({ enabled: false })
   })
 
   it.each([

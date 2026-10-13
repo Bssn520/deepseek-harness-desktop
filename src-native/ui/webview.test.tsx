@@ -230,7 +230,8 @@ class BrowserMessageEvent extends Event {
   }
 }
 
-function createPage(selectSession?: (sessionId: string) => void, kind: 'app' | 'login' | 'unverified' = 'app') {
+function createPage(selectSession?: (sessionId: string) => void, kind: 'app' | 'login' | 'unverified' = 'app', html?: string) {
+  const ids = new Set(Array.from(html?.matchAll(/\bid="([^"]+)"/g) ?? [], match => match[1]))
   const posts: string[] = []
   const events = new EventTarget()
   const documentEvents = new EventTarget()
@@ -253,7 +254,7 @@ function createPage(selectSession?: (sessionId: string) => void, kind: 'app' | '
     body: null,
     head: { appendChild: (style: { id: string, textContent: string }) => styles.set(style.id, style) },
     createElement: () => ({ id: '', textContent: '' }),
-    getElementById: (id: string) => styles.get(id) ?? (kind === 'login' && id === 'loginForm' ? {} : null),
+    getElementById: (id: string) => styles.get(id) ?? (ids.has(id) || (kind === 'login' && id === 'loginForm') ? {} : null),
     querySelectorAll: () => [],
     addEventListener: (type: string, listener: EventListener, options?: AddEventListenerOptions) => documentEvents.addEventListener(type, listener, options),
     removeEventListener: (type: string, listener: EventListener, options?: EventListenerOptions) => documentEvents.removeEventListener(type, listener, options),
@@ -322,6 +323,28 @@ afterEach(async () => {
 })
 
 describe('rendered Bridge WebView document lifecycle', () => {
+  it('reveals the real gateway pairing form after trusted SSR readiness instead of leaving it behind the fullscreen loader', async () => {
+    vi.useRealTimers()
+    const { loginPageHtml } = await vi.importActual<{ loginPageHtml: (message?: string) => string }>('../../packages/dsh-tauri-remote/src/host/service/gateway.utils')
+    vi.useFakeTimers()
+    await mount()
+    const page = createPage(undefined, 'unverified', loginPageHtml())
+
+    expect(page.posts).toHaveLength(1)
+    const raw = page.posts[0]!
+    expect(JSON.parse(raw)).toEqual({ channel: 'dsh-bridge', origin: alpha.id, nonce, payload: { type: 'dsh://bridge-ready' } })
+    await rawMessage(raw, 'https://foreign.test/')
+    expect(connection.loading).toBe(true)
+    await rawMessage(JSON.stringify({ ...JSON.parse(raw), nonce: 'stale-nonce' }))
+    expect(connection.loading).toBe(true)
+    await rawMessage(raw)
+
+    expect(connection.loading).toBe(false)
+    expect(connection.loadError).toBeNull()
+    const { i18n } = await import('@/i18n')
+    expect(texts()).not.toContain(i18n.t('connection.loading'))
+  })
+
   it.each(['android', 'ios'])('declares only the safe-area edges already padded natively on %s', async (platform) => {
     native.platform.OS = platform
     await mount()

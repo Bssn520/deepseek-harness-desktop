@@ -26,7 +26,6 @@
   "connection.swipeAccessibility": "Dismiss swipe guide",
   "connection.closeDrawer": "Close connection details",
   "connection.hostOffline": "Host temporarily unavailable",
-  "connection.tokenRequired": "This host requires an access token. Scan the desktop QR code or sign in inside the page.",
   "connection.available": "Available",
   "connection.unavailable": "Unavailable",
   "connection.checking": "Checking",

@@ -1,4 +1,4 @@
-import type { BridgeHost } from './probe-bridge'
+import type { BridgeAddress } from '@/utils/bridge-protocol'
 import type { ScanCandidate } from '@/utils/discovery'
 import { PROBE_TIMEOUT_MS, SCAN_BUDGET_MS, SCAN_CONCURRENCY } from '@/config/constants'
 import { parseQrPayload } from '@/utils/bridge-protocol'
@@ -9,7 +9,7 @@ export interface ScanOptions {
   concurrency?: number
   timeoutMs?: number
   budgetMs?: number
-  onFound?: (host: BridgeHost) => void
+  onFound?: (host: BridgeAddress) => void
 }
 
 /**
@@ -22,7 +22,7 @@ export async function scanCandidates(candidates: readonly ScanCandidate[], {
   timeoutMs = PROBE_TIMEOUT_MS,
   budgetMs = SCAN_BUDGET_MS,
   onFound,
-}: ScanOptions): Promise<BridgeHost[]> {
+}: ScanOptions): Promise<BridgeAddress[]> {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 256)
     throw new RangeError('Scan concurrency must be between 1 and 256')
   if (!Number.isFinite(budgetMs) || budgetMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0)
@@ -35,7 +35,7 @@ export async function scanCandidates(candidates: readonly ScanCandidate[], {
   }
   signal.addEventListener('abort', abort, { once: true })
   const deadline = setTimeout(abort, budgetMs)
-  const found: BridgeHost[] = []
+  const found: BridgeAddress[] = []
   let cursor = 0
   async function worker() {
     while (!controller.signal.aborted && cursor < candidates.length) {
