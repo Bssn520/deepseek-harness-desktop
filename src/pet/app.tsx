@@ -65,7 +65,7 @@ export function App() {
           size={width}
           dragging={draggable.dragging}
           onFling={onFling}
-          cache={true}
+          cache={source.cache}
           hidden={!visible}
           hitboxRef={hitboxRef}
           onHitboxPointerDown={draggable.onPointerDown}

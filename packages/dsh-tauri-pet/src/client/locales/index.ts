@@ -3,6 +3,14 @@ import { PLUGIN_ID } from '../../shared/constants'
 
 /** 桌宠设置分区的双语文案（`zh` 键集合为权威，`en` 缺键即编译错误）。 */
 const zh = {
+  cancel: '取消',
+  close: '关闭',
+  importRepository: '导入仓库',
+  repositoryLabel: 'GitHub 仓库',
+  repositoryHint: '输入 owner/repo 或 https://github.com/owner/repo。仅登记远端资源地址，不下载视频包；选择宠物后按需播放。',
+  repositoryInvalid: '请输入有效的 GitHub 仓库：owner/repo 或 https://github.com/owner/repo。',
+  repositoryImporting: '导入中…',
+  repositoryImportFailed: '仓库登记失败，请检查仓库是否公开、包含有效宠物配置，以及网络连接后重试。',
   clear: '取消选择',
   clearFailed: '取消选择失败',
   closePet: '关闭宠物',
@@ -10,6 +18,10 @@ const zh = {
   communityShareFailed: '打开社区分享页面失败',
   create: '创建',
   createFailed: '创建宠物会话失败',
+  delete: '删除',
+  deleteFailed: '删除宠物失败',
+  update: '更新',
+  updateFailed: '更新宠物失败，已保留原内容，请稍后重试。',
   emptyImported: '尚未导入宠物，点击右上角「导入」添加 .zip 资源包',
   enable: '启用',
   enablePet: '启用宠物',
@@ -38,6 +50,14 @@ const zh = {
 }
 
 const en: Record<keyof typeof zh, string> = {
+  cancel: 'Cancel',
+  close: 'Close',
+  importRepository: 'Import repository',
+  repositoryLabel: 'GitHub repository',
+  repositoryHint: 'Enter owner/repo or https://github.com/owner/repo. Only remote resource URLs are registered; no video package is downloaded. Select the pet to play it on demand.',
+  repositoryInvalid: 'Enter a valid GitHub repository: owner/repo or https://github.com/owner/repo.',
+  repositoryImporting: 'Importing…',
+  repositoryImportFailed: 'Could not register the repository. Check that it is public, contains valid pet configuration, and your connection is working, then retry.',
   clear: 'Clear selection',
   clearFailed: 'Failed to clear pet selection',
   closePet: 'Close pet',
@@ -45,6 +65,10 @@ const en: Record<keyof typeof zh, string> = {
   communityShareFailed: 'Failed to open the community share page',
   create: 'Create',
   createFailed: 'Failed to create a pet session',
+  delete: 'Delete',
+  deleteFailed: 'Failed to delete pet',
+  update: 'Update',
+  updateFailed: 'Failed to update pet. Previous content was kept; please retry later.',
   emptyImported: 'No pets imported yet. Click “Import” to add a .zip package',
   enable: 'Enable',
   enablePet: 'Enable pet',
