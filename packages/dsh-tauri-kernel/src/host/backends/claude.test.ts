@@ -1,5 +1,5 @@
 import type { Frame } from './process.fixture'
-import type { NativeAttachments, NativePermission, NativeSession, NativeSessionOpenOptions } from './types'
+import type { NativeAttachments, NativePermission, NativeSession, NativeSessionOpenOptions, NativeSink } from './types'
 import { spawn } from 'node:child_process'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -63,7 +63,7 @@ function claudeProcess(options: {
   return fixture
 }
 
-async function open(nativeId: string | null = null, sink = createSink(), options?: NativeSessionOpenOptions, attachments?: NativeAttachments) {
+async function open(nativeId: string | null = null, sink: NativeSink = createSink(), options?: NativeSessionOpenOptions, attachments?: NativeAttachments) {
   const session = await createClaudeSession(command, 'C:/fixture/workspace', nativeId, sink, new AbortController().signal, options, attachments)
   sessions.push(session)
   return session
@@ -77,6 +77,12 @@ const user = () => createUserMessage({ source: { kind: 'user' }, content: [{ typ
 const result = (fixture: ProcessFixture, id: string, extra: Frame = {}) => fixture.send({ type: 'result', subtype: 'success', is_error: false, session_id: id, result: 'final text, not another assistant message', ...extra })
 const stream = (fixture: ProcessFixture, event: Frame, extra: Frame = {}) => fixture.send({ type: 'stream_event', event, parent_tool_use_id: null, ...extra })
 
+async function dshHook(fixture: ProcessFixture, id: string, input: Frame) {
+  const replied = fixture.next(frame => frame.type === 'control_response' && (frame.response as Frame).request_id === `hook:${id}`)
+  fixture.send({ type: 'control_request', request_id: `hook:${id}`, request: { subtype: 'hook_callback', callback_id: 'dsh-native-tool-identity', input: { hook_event_name: 'PreToolUse', tool_name: 'mcp__dsh__execute', tool_use_id: id, tool_input: input } } })
+  return replied
+}
+
 beforeEach(() => vi.mocked(spawn).mockReset())
 afterEach(async () => {
   for (const session of sessions.splice(0))
@@ -86,6 +92,223 @@ afterEach(async () => {
 })
 
 describe('claude native stream-json control contract', () => {
+  it('advertises a fixed DSH dispatcher with the current catalog and disables native orchestration', async () => {
+    const fixture = claudeProcess()
+    const tools = vi.fn(() => [{ name: 'subagent', description: 'Delegate DSH work', parameters: { type: 'object' } }])
+    await open(null, { ...createSink(), tools, callTool: vi.fn() })
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[]
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{"dsh":{"type":"sdk","name":"dsh"}}}')
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Agent,Task,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,TaskStop,EnterPlanMode,ExitPlanMode')
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toContain('DSH')
+    expect((fixture.frames[0]!.request as Frame).sdkMcpServers).toEqual(['dsh'])
+    expect((fixture.frames[0]!.request as Frame).hooks).toEqual({ SessionStart: [{ hookCallbackIds: ['dsh-native-session-identity'] }], PreToolUse: [{ matcher: 'mcp__dsh__execute', hookCallbackIds: ['dsh-native-tool-identity'] }] })
+    async function request(message: Frame) {
+      const replied = fixture.next(frame => frame.type === 'control_response')
+      fixture.send({ type: 'control_request', request_id: 'mcp-list', request: { subtype: 'mcp_message', server_name: 'dsh', message } })
+      return ((await replied).response as Frame).response
+    }
+    expect(await request({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } })).toEqual({ mcp_response: { jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'dsh', version: '1.0.0' } } } })
+    expect(await request({ jsonrpc: '2.0', method: 'notifications/initialized' })).toEqual({ mcp_response: { jsonrpc: '2.0', result: {} } })
+    const schema = { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true }, native_tool_use_id: { type: 'string', description: 'Set by the native PreToolUse hook; do not supply this field.' } }, required: ['name', 'arguments'], additionalProperties: false }
+    expect(await request({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).toEqual({ mcp_response: { jsonrpc: '2.0', id: 2, result: { tools: [{ name: 'execute', description: 'Execute a DSH tool by name and arguments. Use activate_tools to load additional tools; use the returned schemas with this same dispatcher. Available tools: [{"name":"subagent","description":"Delegate DSH work","parameters":{"type":"object"}}]', inputSchema: schema }] } } })
+    tools.mockReturnValue([])
+    expect(await request({ jsonrpc: '2.0', id: 3, method: 'tools/list' })).toEqual({ mcp_response: { jsonrpc: '2.0', id: 3, result: { tools: [{ name: 'execute', description: 'Execute a DSH tool by name and arguments. Use activate_tools to load additional tools; use the returned schemas with this same dispatcher. Available tools: []', inputSchema: schema }] } } })
+  })
+
+  it.each(['read-only', 'workspace-write'] as const)('allows advertised DSH MCP tools under %s through official permissions but denies native orchestration', async (sandbox) => {
+    const fixture = claudeProcess()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn() }
+    const session = await open(null, sink)
+    const entered = fixture.next(frame => frame.type === 'user')
+    const submitted = session.submit([user()], new AbortController().signal, undefined, { sandbox, approval: 'never' })
+    await entered
+    async function permission(tool: string) {
+      const replied = fixture.next(frame => frame.type === 'control_response')
+      fixture.send({ type: 'control_request', request_id: 'dsh-permission', request: { subtype: 'can_use_tool', tool_name: tool, tool_use_id: 'permission-call', input: { prompt: 'inspect' } } })
+      return ((await replied).response as Frame).response
+    }
+    expect(await permission('mcp__dsh__execute')).toEqual({ behavior: 'allow', updatedInput: { prompt: 'inspect' } })
+    expect(await permission('Agent')).toMatchObject({ behavior: 'deny' })
+    expect(await permission('mcp__dsh__missing')).toMatchObject({ behavior: 'deny' })
+    expect(sink.approval).not.toHaveBeenCalled()
+    result(fixture, session.id)
+    await submitted
+  })
+
+  it.each(['before', 'after'] as const)('correlates identical reordered MCP calls through authoritative hooks %s assistant frames', async (timing) => {
+    const fixture = claudeProcess()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn().mockResolvedValue({ output: 'done', isError: false }) }
+    const session = await open(null, sink)
+    const submitted = session.submit([user()], new AbortController().signal)
+    const input = { name: 'subagent', arguments: { prompt: 'same' }, native_tool_use_id: 'forged' }
+    async function hooks() {
+      for (const id of ['first', 'second'])
+        expect(await dshHook(fixture, id, input)).toEqual({ type: 'control_response', response: { subtype: 'success', request_id: `hook:${id}`, response: { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...input, native_tool_use_id: id } } } } })
+    }
+    if (timing === 'before')
+      await hooks()
+    fixture.send({ type: 'assistant', message: { id: 'same-msg', content: ['first', 'second'].map(id => ({ type: 'tool_use', id, name: 'mcp__dsh__execute', input: { ...input, native_tool_use_id: id } })) } })
+    if (timing === 'after')
+      await hooks()
+    for (const id of ['second', 'first']) {
+      const replied = fixture.next(frame => frame.type === 'control_response')
+      fixture.send({ type: 'control_request', request_id: id, request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'execute', arguments: { ...input, native_tool_use_id: id } } } } })
+      expect(await replied).toMatchObject({ response: { subtype: 'success' } })
+    }
+    expect(sink.callTool.mock.calls.map(call => call.slice(0, 3))).toEqual([['second', 'subagent', '{"prompt":"same"}'], ['first', 'subagent', '{"prompt":"same"}']])
+    expect(sink.assistant.mock.calls.map(call => call[1])).toEqual(['first', 'second'].map(id => [{ type: 'tool-call', id, name: 'subagent', arguments: '{"prompt":"same"}', dispatch: 'dsh' }]))
+    result(fixture, session.id)
+    await submitted
+  })
+
+  it('does not replay a late native assistant call already synthesized by the official dispatcher', async () => {
+    const fixture = claudeProcess()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn().mockResolvedValue({ output: 'done', isError: false }) }
+    const session = await open(null, sink)
+    const submitted = session.submit([user()], new AbortController().signal)
+    const input = { name: 'subagent', arguments: { prompt: 'review' } }
+    await dshHook(fixture, 'early-call', input)
+    const replied = fixture.next(frame => frame.type === 'control_response')
+    fixture.send({ type: 'control_request', request_id: 'early-mcp', request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'execute', arguments: { ...input, native_tool_use_id: 'early-call' } } } } })
+    expect(await replied).toMatchObject({ response: { subtype: 'success' } })
+    fixture.send({ type: 'assistant', message: { id: 'late-msg', content: [{ type: 'tool_use', id: 'early-call', name: 'mcp__dsh__execute', input }, { type: 'text', text: 'finished' }] } })
+    expect(sink.callTool).toHaveBeenCalledWith('early-call', 'subagent', '{"prompt":"review"}', expect.any(AbortSignal))
+    expect(sink.assistant.mock.calls).toEqual([['late-msg:block:1', [{ type: 'text', text: 'finished' }]]])
+    result(fixture, session.id)
+    await submitted
+  })
+
+  it.each(['invalid-wrapper', 'changed-arguments'] as const)('fails closed when a DSH identity hook carries %s', async (mode) => {
+    const fixture = claudeProcess()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn() }
+    const session = await open(null, sink)
+    const submitted = session.submit([user()], new AbortController().signal)
+    const rejected = expect(submitted).rejects.toMatchObject({ code: 'BRIDGE_PROTOCOL' })
+    fixture.send({ type: 'assistant', message: { id: 'hook-invalid-msg', content: [{ type: 'tool_use', id: 'hook-invalid-call', name: 'mcp__dsh__execute', input: { name: 'subagent', arguments: { prompt: 'original' } } }] } })
+    expect(await dshHook(fixture, 'hook-invalid-call', mode === 'invalid-wrapper' ? { name: 'subagent', arguments: [], unexpected: true } : { name: 'subagent', arguments: { prompt: 'modified' } })).toMatchObject({ response: { subtype: 'error' } })
+    await rejected
+    expect(sink.callTool).not.toHaveBeenCalled()
+  })
+
+  it('routes an announced MCP call using its native id and waits for the official committed result', async () => {
+    const fixture = claudeProcess()
+    const committed = Promise.withResolvers<{ output: string, isError: boolean }>()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn().mockReturnValue(committed.promise) }
+    const session = await open(null, sink)
+    const submitted = session.submit([user()], new AbortController().signal)
+    const settled = vi.fn()
+    void submitted.then(settled, settled)
+    const frame = { type: 'assistant', uuid: 'dsh-call', message: { id: 'mcp-msg', content: [{ type: 'tool_use', id: 'native-dsh-id', name: 'mcp__dsh__execute', input: { name: 'subagent', arguments: { label: 'inspect', prompt: 'review' } } }] } }
+    fixture.send(frame)
+    fixture.send(frame)
+    await dshHook(fixture, 'native-dsh-id', { name: 'subagent', arguments: { label: 'inspect', prompt: 'review' } })
+    fixture.send({ type: 'control_request', request_id: 'mcp-call', request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'execute', arguments: { name: 'subagent', arguments: { prompt: 'review', label: 'inspect' }, native_tool_use_id: 'native-dsh-id' } } } } })
+    expect(sink.callTool).toHaveBeenCalledWith('native-dsh-id', 'subagent', '{"label":"inspect","prompt":"review"}', expect.any(AbortSignal))
+    expect(sink.assistant.mock.calls).toEqual([['mcp-msg:block:0', [{ type: 'tool-call', id: 'native-dsh-id', name: 'subagent', arguments: '{"label":"inspect","prompt":"review"}', dispatch: 'dsh' }]]])
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(fixture.frames.some(value => value.type === 'control_response' && !(String((value.response as Frame).request_id).startsWith('hook:')))).toBe(false)
+    result(fixture, session.id)
+    await Promise.resolve()
+    expect(settled).not.toHaveBeenCalled()
+    const replied = fixture.next(value => value.type === 'control_response')
+    committed.resolve({ output: 'official error', isError: true })
+    expect(await replied).toEqual({ type: 'control_response', response: { subtype: 'success', request_id: 'mcp-call', response: { mcp_response: { jsonrpc: '2.0', id: 4, result: { content: [{ type: 'text', text: 'official error' }], isError: true } } } } })
+    fixture.send({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'native-dsh-id', content: 'native echo' }] } })
+    await submitted
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it('executes tools activated after a cached MCP list without requesting that list again', async () => {
+    const fixture = claudeProcess()
+    const tools = vi.fn(() => [{ name: 'activate_tools', description: 'Load tool schemas', parameters: { type: 'object' } }])
+    const sink = { ...createSink(), tools, callTool: vi.fn().mockImplementation(async (_id: string, name: string) => {
+      if (name === 'activate_tools') {
+        tools.mockReturnValue([{ name: 'subagent', description: 'Delegate', parameters: { type: 'object' } }])
+        return { output: '{"tools":[{"name":"subagent","parameters":{"type":"object"}}]}', isError: false }
+      }
+      return { output: 'delegated', isError: false }
+    }) }
+    const session = await open(null, sink)
+    const listed = fixture.next(frame => frame.type === 'control_response')
+    fixture.send({ type: 'control_request', request_id: 'cached-list', request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id: 1, method: 'tools/list' } } })
+    expect(await listed).toMatchObject({ response: { response: { mcp_response: { result: { tools: [{ name: 'execute', description: expect.stringContaining('activate_tools') }] } } } } })
+    const submitted = session.submit([user()], new AbortController().signal)
+    for (const [id, name, arguments_] of [['activate-call', 'activate_tools', { identifiers: ['subagent'] }], ['new-call', 'subagent', { prompt: 'review' }]] as const) {
+      fixture.send({ type: 'assistant', message: { id, content: [{ type: 'tool_use', id, name: 'mcp__dsh__execute', input: { name, arguments: arguments_ } }] } })
+      await dshHook(fixture, id, { name, arguments: arguments_ })
+      const replied = fixture.next(frame => frame.type === 'control_response')
+      fixture.send({ type: 'control_request', request_id: id, request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'execute', arguments: { name, arguments: arguments_, native_tool_use_id: id } } } } })
+      expect(await replied).toMatchObject({ response: { subtype: 'success', response: { mcp_response: { result: { isError: false } } } } })
+    }
+    expect(sink.callTool.mock.calls.map(call => call.slice(0, 3))).toEqual([['activate-call', 'activate_tools', '{"identifiers":["subagent"]}'], ['new-call', 'subagent', '{"prompt":"review"}']])
+    expect(sink.assistant.mock.calls.map(call => call[1])).toEqual([
+      [{ type: 'tool-call', id: 'activate-call', name: 'activate_tools', arguments: '{"identifiers":["subagent"]}', dispatch: 'dsh' }],
+      [{ type: 'tool-call', id: 'new-call', name: 'subagent', arguments: '{"prompt":"review"}', dispatch: 'dsh' }],
+    ])
+    result(fixture, session.id)
+    await submitted
+  })
+
+  it.each(['unknown-server', 'unknown-dispatcher', 'unknown-tool', 'unannounced', 'unhooked', 'forged-id', 'invalid-arguments', 'outside-turn', 'duplicate'] as const)('rejects %s MCP calls without dispatching another DSH tool', async (mode) => {
+    const fixture = claudeProcess()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn().mockResolvedValue({ output: 'done', isError: false }) }
+    const session = await open(null, sink)
+    const submitted = mode === 'outside-turn' ? undefined : session.submit([user()], new AbortController().signal)
+    if (submitted && mode !== 'unannounced')
+      fixture.send({ type: 'assistant', message: { id: 'invalid-msg', content: [{ type: 'tool_use', id: 'invalid-call', name: 'mcp__dsh__execute', input: { name: 'subagent', arguments: {} } }] } })
+    if (submitted && mode !== 'unannounced' && mode !== 'unhooked')
+      await dshHook(fixture, 'invalid-call', { name: 'subagent', arguments: {} })
+    async function request() {
+      const replied = fixture.next(value => value.type === 'control_response')
+      fixture.send({ type: 'control_request', request_id: 'invalid-request', request: { subtype: 'mcp_message', server_name: mode === 'unknown-server' ? 'other' : 'dsh', message: { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: mode === 'unknown-dispatcher' ? 'subagent' : 'execute', arguments: { name: mode === 'unknown-tool' ? 'missing' : 'subagent', arguments: mode === 'invalid-arguments' ? [] : {}, native_tool_use_id: mode === 'forged-id' ? 'other-id' : 'invalid-call' } } } } })
+      return replied
+    }
+    if (mode === 'duplicate')
+      await request()
+    expect(await request()).toMatchObject({ response: { subtype: 'error', error: expect.any(String) } })
+    expect(sink.callTool).toHaveBeenCalledTimes(mode === 'duplicate' ? 1 : 0)
+    if (submitted) {
+      result(fixture, session.id)
+      await submitted
+    }
+  })
+
+  it.each(['turn', 'control', 'dispose'] as const)('aborts a pending DSH MCP call on %s cancellation without a late response', async (mode) => {
+    const fixture = claudeProcess()
+    const committed = Promise.withResolvers<{ output: string, isError: boolean }>()
+    const sink = { ...createSink(), tools: () => [{ name: 'subagent', description: '', parameters: { type: 'object' } }], callTool: vi.fn().mockReturnValue(committed.promise) }
+    const session = await open(null, sink)
+    const controller = new AbortController()
+    const submitted = session.submit([user()], controller.signal)
+    const rejected = mode === 'control' ? undefined : expect(submitted).rejects.toThrow()
+    fixture.send({ type: 'assistant', message: { id: 'cancel-msg', content: [{ type: 'tool_use', id: 'cancel-call', name: 'mcp__dsh__execute', input: { name: 'subagent', arguments: {} } }] } })
+    await dshHook(fixture, 'cancel-call', { name: 'subagent', arguments: {} })
+    fixture.send({ type: 'control_request', request_id: 'cancel-request', request: { subtype: 'mcp_message', server_name: 'dsh', message: { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'execute', arguments: { name: 'subagent', arguments: {}, native_tool_use_id: 'cancel-call' } } } } })
+    expect(sink.callTool).toHaveBeenCalledOnce()
+    const signal = sink.callTool.mock.calls[0]![3] as AbortSignal
+    if (mode === 'dispose')
+      await session.dispose()
+    else if (mode === 'turn')
+      controller.abort(new Error('cancel DSH call'))
+    else
+      fixture.send({ type: 'control_cancel_request', request_id: 'cancel-request' })
+    expect(signal.aborted).toBe(true)
+    if (mode !== 'dispose')
+      result(fixture, session.id)
+    if (rejected)
+      await rejected
+    else
+      await submitted
+    committed.resolve({ output: 'late output', isError: false })
+    await committed.promise
+    expect(fixture.frames.some(value => value.type === 'control_response' && !(String((value.response as Frame).request_id).startsWith('hook:')))).toBe(false)
+    if (mode === 'turn') {
+      const next = session.submit([user()], new AbortController().signal)
+      result(fixture, session.id)
+      await next
+    }
+  })
+
   it('requires a native id acknowledgement before returning a newly reserved session', async () => {
     const fixture = claudeProcess({ useSnapshot: false })
     const session = await open()

@@ -157,6 +157,29 @@ export const session = defineService({
     return bindFork(agent, binding, signal, source)
   },
 
+  async bindFreshChild(agent: Agent, signal: AbortSignal): Promise<void> {
+    const ctx = getServerContext<HostContext>(server)
+    const state = ctx.sessionProjections.stateOf(agent.session, 'bridgeKernel')
+    const id = agent.options.model
+    if (state?.binding != null || state?.inheritedBinding != null || agent.options.provider !== BRIDGE_PROVIDER || (id !== 'codex' && id !== 'claude') || agent.session.header.parentSession === undefined || agent.session.header.origin !== 'subagent' || (agent.session.header.delegationDepth ?? 0) <= 0 || agent.session.header.isSeeded || agent.session.inheritedEventCount !== 0 || agent.session.requestHeader() !== undefined || agent.session.deriveMessages().length > 0 || agent.session.snapshotEvents().some(event => event.type === 'turn/end'))
+      return
+    const scoped = AbortSignal.any([signal, runtime.lifetime.signal])
+    try {
+      scoped.throwIfAborted()
+      session.validateComposition(agent)
+      const entry = await open(agent, id, null, scoped)
+      scoped.throwIfAborted()
+      agent.ctx.fiber.assertActive()
+      if (!runtime.ready || ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== agent.session)
+        throw new Error('BRIDGE_AGENT_REPLACED: 子会话已关闭或被替换。')
+      await identity.append(agent, entry.binding)
+    }
+    catch (error) {
+      await session.remove(agent.id, agent)
+      throw error
+    }
+  },
+
   async repairInherited(agent: Agent, signal: AbortSignal): Promise<void> {
     const ctx = getServerContext<HostContext>(server)
     const state = ctx.sessionProjections.stateOf(agent.session, 'bridgeKernel')
@@ -167,6 +190,8 @@ export const session = defineService({
     if (!inherited)
       return
     const parent = await resolveParent(inherited.sessionId, scoped)
+    if ((agent.session.header.delegationDepth ?? 0) > 0 && parent.status === 'running')
+      throw new Error('BRIDGE_SUBAGENT_FORK_UNSUPPORTED: 运行中的原生父会话不能派生已完成回合前缀；请使用 fresh subagent 或明确选择 DSH 模型。')
     await waitFor(parent.whenIdle(), scoped)
     const cursor = agent.session.inheritedEventCount
     await waitFor(parent.runMaintenance(async (maintenance) => {
@@ -324,7 +349,10 @@ export const session = defineService({
 
 async function drainTurn(official: OfficialSink): Promise<void> {
   const state = official.state
-  const complete = state.done && state.finalConsumed && !state.signal.aborted && state.failure === undefined && [...state.tools.values()].every(tool => tool.committed)
+  const concluded = !state.signal.aborted && state.failure === undefined && [...state.tools.values()].every(tool => tool.committed) && [...state.tools.values()].some(tool => tool.dispatch === 'dsh' && tool.officialResult?.concludesTurn === true)
+  const complete = concluded || (state.done && state.finalConsumed && !state.signal.aborted && state.failure === undefined && [...state.tools.values()].every(tool => tool.committed))
+  if (concluded)
+    state.controller.abort(new Error('BRIDGE_TOOL_CONCLUDED: 官方工具已完成回合。'))
   if (!complete)
     state.controller.abort(state.failure ?? new Error('BRIDGE_PREMATURE_TURN_END: 官方回合提前结束，已停止原生内核。'))
   try {
@@ -334,7 +362,7 @@ async function drainTurn(official: OfficialSink): Promise<void> {
   }
   finally {
     try {
-      if (!complete)
+      if (!complete || concluded)
         await session.remove(state.input.agent.id, state.input.agent)
     }
     finally {
@@ -480,6 +508,8 @@ async function connect(agent: Agent, id: KernelBinding['backend'], storedId: str
   if (!resolved.detection.installed || !resolved.command || resolved.detection.auth === 'missing')
     throw new Error(resolved.detection.hint ?? 'BRIDGE_BACKEND_UNAVAILABLE: 本机内核不可用。')
   const nativeSink: NativeSink = {
+    tools: () => sink.tools(agent),
+    callTool: (...args) => activeSink(agent, controller).callTool!(...args),
     text: (...args) => activeSink(agent, controller).text(...args),
     thinking: (...args) => activeSink(agent, controller).thinking(...args),
     assistant: (...args) => activeSink(agent, controller).assistant(...args),

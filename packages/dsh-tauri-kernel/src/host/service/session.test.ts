@@ -259,6 +259,162 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
+describe('fresh native-route delegation', () => {
+  it.each(['codex', 'claude'] as const)('binds a fresh %s child without waiting for its running parent', async (id) => {
+    const parent = await conversation(id)
+    const wait = deferred<void>()
+    releases.push(() => wait.resolve())
+    parent.connection.submit.mockImplementationOnce(() => wait.promise)
+    const parentIdle = followup(parent.handle.agent, 'keep parent running while delegating')
+    await vi.waitFor(() => expect(parent.connection.submit).toHaveBeenCalledTimes(2))
+    const whenIdle = vi.spyOn(parent.handle.agent, 'whenIdle')
+    const connection = native(`fresh-child-${id}`)
+    const factory = vi.mocked(id === 'codex' ? createCodexSession : createClaudeSession)
+    factory.mockImplementationOnce(async (_command, _cwd, _storedId, output) => {
+      connection.submit.mockImplementation(async () => output.assistant('fresh-child-answer', [{ type: 'text', text: 'independent answer' }]))
+      return connection
+    })
+    const child = await agents.create({
+      sessionId: sessionModule.SessionId(`fresh-official-${id}`),
+      parentAgent: parent.handle.agent,
+      meta: { cwd, parentSession: parent.handle.agent.id, origin: 'subagent', delegationDepth: 1 },
+      agentOptions: { provider: BRIDGE_PROVIDER, model: id },
+    })
+    await followup(child.agent, 'run fresh delegated task')
+    expect(errors).toEqual([])
+    expect(identity.resolve(child.agent)).toEqual({ backend: id, nativeSessionId: `fresh-child-${id}`, sessionId: child.agent.id })
+    expect(connection.submit).toHaveBeenCalledOnce()
+    expect(factory.mock.calls[1]![2]).toBeNull()
+    expect(factory.mock.calls[1]![5]).toBeUndefined()
+    expect(whenIdle).not.toHaveBeenCalled()
+    wait.resolve()
+    await parentIdle
+  })
+
+  it('rejects a seeded native subagent before waiting for its running parent', async () => {
+    const parent = await conversation()
+    const seed = parent.handle.agent.session.snapshotEvents()
+    const wait = deferred<void>()
+    releases.push(() => wait.resolve())
+    parent.connection.submit.mockImplementationOnce(() => wait.promise)
+    const parentIdle = followup(parent.handle.agent, 'keep running')
+    await vi.waitFor(() => expect(parent.connection.submit).toHaveBeenCalledTimes(2))
+    const whenIdle = vi.spyOn(parent.handle.agent, 'whenIdle')
+    const child = await agents.create({
+      sessionId: sessionModule.SessionId('active-fork-child'),
+      parentAgent: parent.handle.agent,
+      seed,
+      inheritedEventCount: sessionModule.SessionLogOffset(seed.length),
+      meta: { cwd, parentSession: parent.handle.agent.id, origin: 'subagent', delegationDepth: 1, isSeeded: true },
+      agentOptions: { provider: BRIDGE_PROVIDER, model: 'codex' },
+    })
+    await expect(session.repairInherited(child.agent, new AbortController().signal)).rejects.toThrow('BRIDGE_SUBAGENT_FORK_UNSUPPORTED')
+    expect(whenIdle).not.toHaveBeenCalled()
+    expect(createCodexSession).toHaveBeenCalledOnce()
+    wait.resolve()
+    await parentIdle
+  })
+
+  it('allows only committed DSH deferred context to continue a native turn', async () => {
+    const additional = llmModule.createUserMessage({ source: { kind: 'tool', callId: llmModule.ToolCallId('deferred-context-call') }, content: [{ type: 'text', text: 'wrap up committed goal' }] })
+    context.tools.register({ name: 'deferred_goal', description: 'Finish goal', parameters: {}, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }, execute: async (_args, exec) => {
+      exec.deferContext(additional)
+      return 'goal done'
+    } })
+    const connection = native('deferred-context-native')
+    vi.mocked(createCodexSession).mockImplementationOnce(async (_command, _cwd, _storedId, output) => {
+      connection.submit.mockImplementation(async () => {
+        const result = await output.callTool!('deferred-context-call', 'deferred_goal', '{}')
+        expect(result.output).toContain('wrap up committed goal')
+        output.assistant('deferred-context-answer', [{ type: 'text', text: 'wrapped up' }])
+      })
+      return connection
+    })
+    await creating()
+    await followup(officialHandle!.agent, 'complete the goal')
+    expect(errors).toEqual([])
+    expect(connection.submit).toHaveBeenCalledOnce()
+    expect(officialHandle!.agent.session.deriveMessages().some(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text === 'wrapped up'))).toBe(true)
+  })
+
+  it.each([true, false])('allows changed instructions only after approved plan exit: %s', async (approved) => {
+    const source = { kind: 'agent-instructions', form: 'instruction', summary: 'session rules' } as unknown as Parameters<typeof llmModule.createUserMessage>[0]['source']
+    const initial = llmModule.createUserMessage({ source, content: [{ type: 'text', text: 'planning only' }] })
+    const changed = llmModule.createUserMessage({ source, content: [{ type: 'text', text: 'carry out approved plan' }] })
+    let selected = initial
+    context.on('agent/pre-step', async (_payload, next) => {
+      const decision = await next()
+      return decision.kind === 'enter' ? { ...decision, messages: [...decision.messages, selected] } : decision
+    })
+    context.tools.register({ name: 'exit_plan_mode', description: 'Review plan', parameters: {}, output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: 'Plan approved' }] }, execute: async () => {
+      selected = changed
+      return { approved }
+    } })
+    context.tools.register({ name: 'approved_work', description: 'Carry out plan', parameters: {}, output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'work done' }] }, execute: async () => 'work done' })
+    const connection = native(`plan-exit-native-${approved}`)
+    vi.mocked(createCodexSession).mockImplementationOnce(async (_command, _cwd, _storedId, output) => {
+      connection.submit.mockImplementation(async () => {
+        const result = await output.callTool!('plan-exit-call', 'exit_plan_mode', '{}')
+        if (approved) {
+          expect(result.output).toContain('carry out approved plan')
+          await output.callTool!('approved-work-call', 'approved_work', '{}')
+        }
+        output.assistant('plan-exit-answer', [{ type: 'text', text: 'approved work finished' }])
+      })
+      return connection
+    })
+    await creating()
+    await followup(officialHandle!.agent, 'review then execute plan')
+    if (approved) {
+      expect(errors).toEqual([])
+      expect(connection.submit).toHaveBeenCalledOnce()
+    }
+    else {
+      expect(errors).toEqual([expect.objectContaining({ message: expect.stringContaining('BRIDGE_STEERING_UNSUPPORTED') })])
+    }
+  })
+
+  it('accepts a committed DSH concluding tool without a premature native failure', async () => {
+    context.tools.register({ name: 'structured_result', description: 'Finish task', parameters: {}, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }, execute: async (_args, exec) => {
+      exec.concludeTurn()
+      return 'structured answer'
+    } })
+    const connection = native('concluding-native')
+    vi.mocked(createCodexSession).mockImplementationOnce(async (_command, _cwd, _storedId, output) => {
+      connection.submit.mockImplementation(async (_messages, signal) => {
+        await output.callTool!('concluding-call', 'structured_result', '{}')
+        await new Promise<void>((_resolve, reject) => {
+          if (signal.aborted)
+            reject(signal.reason)
+          else
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      })
+      return connection
+    })
+    await creating()
+    await followup(officialHandle!.agent, 'report the structured answer')
+    expect(errors).toEqual([])
+    expect(connection.dispose).toHaveBeenCalledOnce()
+    expect(officialHandle!.agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason).toEqual({ kind: 'completed' })
+    expect(officialHandle!.agent.session.deriveMessages().findLast(message => message.role === 'tool')?.content).toEqual([{ type: 'text', text: 'structured answer' }])
+  })
+
+  it('does not recreate a missing binding after a child already made a request', async () => {
+    const parent = await conversation()
+    const child = await agents.create({
+      sessionId: sessionModule.SessionId('broken-native-child'),
+      parentAgent: parent.handle.agent,
+      meta: { cwd, parentSession: parent.handle.agent.id, origin: 'subagent', delegationDepth: 1 },
+      agentOptions: { provider: BRIDGE_PROVIDER, model: 'codex' },
+    })
+    child.agent.session.append('request/header', { header: parent.handle.agent.session.requestHeader()!, reason: 'initial' })
+    const signal = new AbortController().signal
+    await expect(adapter.request({ agent: child.agent, signal }, async () => ({ provider: BRIDGE_PROVIDER, model: 'codex' }))).rejects.toThrow('BRIDGE_BINDING_MISSING')
+    expect(createCodexSession).toHaveBeenCalledOnce()
+  })
+})
+
 function creating(id: 'codex' | 'claude' = 'codex', workspace?: string) {
   const task = workspace === undefined ? session.create(id, undefined, cwd) : session.create(id, workspace)
   const observed = task.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }))
@@ -1377,7 +1533,7 @@ describe('official native session lifecycle', () => {
     expect(body).not.toHaveBeenCalled()
     expect(connection.submit).toHaveBeenCalledOnce()
     expect(events.filter(event => event.type === 'tool/result')).toEqual([])
-    expect(agent.ctx.tools.get('native_file', agent)?.description).toBe('等待本机内核已经发起的工具结果；不执行 DSH 工具。')
+    expect(agent.ctx.tools.get('native_file', agent)?.description).toBe('a real globally registered DSH body')
     delivered.resolve()
     await turn
     expect(errors).toEqual([])

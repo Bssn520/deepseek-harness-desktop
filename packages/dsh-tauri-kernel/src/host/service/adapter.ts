@@ -3,6 +3,7 @@ import type { GenerateOptions, LlmAdapter, LlmCallConfig, LlmModelInfo, LlmResol
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AdmittedStep, HostContext } from '../types'
 import { Buffer } from 'node:buffer'
+import { isDeepStrictEqual } from 'node:util'
 import { getServerContext } from 'dsh-h3/utils'
 import { defineService } from 'dsh-tauri'
 import { BRIDGE_PROVIDER, SESSION_TITLE_PURPOSE } from '../config/constants'
@@ -70,11 +71,18 @@ export const adapter = defineService({
       const current = runtime.exchanges.get(payload.agent.id)
       if (current) {
         const state = current.state
-        if (decision.kind !== 'enter' || payload.signal.aborted || state.failure !== undefined || state.input.agent !== payload.agent || state.input.turn !== payload.turn || state.input.signal !== payload.signal || payload.messages.some(message => continuationMessage(message, state.input.messages)) || decision.messages.some(message => continuationMessage(message, state.input.messages) && !payload.messages.includes(message)) || state.finalConsumed) {
+        const contexts = [...state.tools.values()].filter(tool => tool.dispatch === 'dsh' && tool.committed).flatMap(tool => tool.officialResult?.additionalContexts ?? [])
+        const plans = [...state.tools.values()].filter(tool => tool.dispatch === 'dsh' && tool.committed && tool.name === 'exit_plan_mode' && tool.pendingRelease && tool.officialResult?.isError === false && !tool.officialResult.concludesTurn && isDeepStrictEqual(tool.officialResult.value, { approved: true }))
+        const instructions = plans.length === 0 || decision.kind !== 'enter' ? [] : decision.messages.filter(message => (message.source.kind as string) === 'agent-instructions' && state.input.messages.some(previous => (previous.source.kind as string) === 'agent-instructions' && isDeepStrictEqual(previous.source, message.source)))
+        const continuation = (message: UserMessage): boolean => ![...contexts, ...instructions].some(context => isDeepStrictEqual(context, message)) && continuationMessage(message, state.input.messages)
+        if (decision.kind !== 'enter' || payload.signal.aborted || state.failure !== undefined || state.input.agent !== payload.agent || state.input.turn !== payload.turn || state.input.signal !== payload.signal || payload.messages.some(continuation) || decision.messages.some(message => continuation(message) && !payload.messages.includes(message)) || state.finalConsumed) {
           state.controller.abort(state.failure ?? new Error('BRIDGE_STEERING_UNSUPPORTED: 原生回合不支持中途追加指令或提前结束。'))
           await session.finish(payload.agent, state.input.turn)
           throw state.signal.reason
         }
+        sink.releasePlan(payload.agent, instructions)
+        if (instructions.length > 0)
+          state.input.messages = [...state.input.messages.filter(previous => !instructions.some(message => isDeepStrictEqual(previous.source, message.source))), ...instructions]
       }
     }
     catch (error) {
@@ -88,6 +96,7 @@ export const adapter = defineService({
     if (decision.kind !== 'enter' || payload.signal.aborted)
       return decision
     const ctx = getServerContext<HostContext>(server)
+    await session.bindFreshChild(payload.agent, payload.signal)
     await session.repairInherited(payload.agent, payload.signal)
     const binding = ctx.sessionProjections.stateOf(payload.agent.session, 'bridgeKernel')?.binding
     if (binding === null || binding === undefined) {

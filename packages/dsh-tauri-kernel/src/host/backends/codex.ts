@@ -8,6 +8,8 @@ const INITIALIZATION = {
   capabilities: { experimentalApi: true },
 }
 
+const CODEX_ORCHESTRATION_INSTRUCTIONS = 'Use dsh for all DSH tasks, plans (todo_write), subagents, schedules, and activated tools. Do not use native update_plan or native agent orchestration. After activate_tools, use the returned tool schemas through dsh. Native file and shell tools remain available.'
+
 const CODEX_REASONING_EFFORT_NAMES = new Map([
   ['none', 'Off'],
   ['minimal', 'Minimal'],
@@ -141,7 +143,7 @@ class CodexSession implements NativeSession {
   private effortOverridden = false
 
   constructor(private readonly command: NativeCommand, private readonly sink: NativeSink, private readonly cwd: string, private readonly attachments?: NativeAttachments) {
-    this.transport = new JsonLinesProcess(command, ['app-server', '--listen', 'stdio://'], cwd)
+    this.transport = new JsonLinesProcess(command, ['app-server', '--listen', 'stdio://', '-c', 'features.multi_agent=false'], cwd)
     this.requests = new PendingRequests(value => this.transport.write(value))
     this.transport.onFailure((error) => {
       this.failure = error
@@ -170,6 +172,20 @@ class CodexSession implements NativeSession {
       const response = record(await this.request(forkFrom ? 'thread/fork' : storedId === null ? 'thread/start' : 'thread/resume', {
         ...forkFrom ? { threadId: forkFrom } : storedId === null ? {} : { threadId: storedId },
         cwd,
+        developerInstructions: CODEX_ORCHESTRATION_INSTRUCTIONS,
+        ...storedId === null && !forkFrom
+          ? { dynamicTools: [{
+              type: 'function',
+              name: 'dsh',
+              description: `${CODEX_ORCHESTRATION_INSTRUCTIONS}\nAvailable DSH tools: ${JSON.stringify(this.sink.tools?.())}`,
+              inputSchema: {
+                type: 'object',
+                properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } },
+                required: ['name', 'arguments'],
+                additionalProperties: false,
+              },
+            }] }
+          : {},
         ...permission?.approval === undefined ? {} : { approvalPolicy: permission.approval === 'never' ? 'never' : 'on-request' },
         ...permission?.sandbox === undefined ? {} : { sandbox: permission.sandbox },
       }, signal))
@@ -652,6 +668,8 @@ class CodexSession implements NativeSession {
   private item(turn: CodexTurn, item: Record<string, unknown>, completed: boolean): void {
     const id = stringField(item, 'id')
     const type = stringField(item, 'type')
+    if (type === 'dynamicToolCall' && item.tool === 'dsh')
+      return
     if (item.type === 'commandExecution') {
       turn.commandItems.add(id)
       this.commandItems.add(id)
@@ -767,8 +785,23 @@ class CodexSession implements NativeSession {
         const answers = await this.sink.questions(itemId, questions, signal)
         result = { answers: Object.fromEntries(questions.map(question => [question.id, { answers: Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id] ?? ''] }])) }
       }
+      else if (method === 'item/tool/call') {
+        if (!belongs)
+          throw new NativeBridgeError('BRIDGE_REQUEST_CLOSED', 'No active turn for the native tool request')
+        if (params.tool !== 'dsh' || (params.namespace !== undefined && params.namespace !== null))
+          throw new NativeBridgeError('BRIDGE_TOOL_UNSUPPORTED', 'Only the dsh dynamic tool is supported')
+        if (!this.sink.callTool)
+          throw new NativeBridgeError('BRIDGE_TOOL_UNAVAILABLE', 'DSH tool routing is unavailable; create a new DSH native session')
+        const arguments_ = record(params.arguments)
+        if (Object.keys(arguments_).some(key => key !== 'name' && key !== 'arguments'))
+          throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Unexpected dsh dynamic tool argument')
+        const callId = stringField(params, 'callId')
+        const name = stringField(arguments_, 'name')
+        const output = await this.sink.callTool(callId, name, JSON.stringify(record(arguments_.arguments)), signal)
+        signal.throwIfAborted()
+        result = { contentItems: [{ type: 'inputText', text: output.output }], success: !output.isError }
+      }
       else {
-        // In particular item/tool/call is not an invitation to run DSH tools.
         this.transport.write({ id, error: { code: -32601, message: `Unsupported native server request: ${method}` } })
         return
       }

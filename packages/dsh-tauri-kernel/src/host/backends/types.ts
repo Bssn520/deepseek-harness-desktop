@@ -44,7 +44,7 @@ export interface NativeAttachments {
 export type NativeContent
   = | { type: 'text', text: string }
     | { type: 'thinking', text: string }
-    | { type: 'tool-call', id: string, name: string, arguments: string }
+    | { type: 'tool-call', id: string, name: string, arguments: string, dispatch?: 'dsh' }
 
 export interface NativeQuestion {
   id: string
@@ -54,6 +54,8 @@ export interface NativeQuestion {
 }
 
 export interface NativeSink {
+  tools?: () => { name: string, description: string, parameters: Record<string, unknown> }[]
+  callTool?: (id: string, name: string, arguments_: string, signal?: AbortSignal) => Promise<{ output: string, isError: boolean }>
   text: (id: string, delta: string) => void
   thinking: (id: string, delta: string) => void
   assistant: (id: string, content: readonly NativeContent[]) => void

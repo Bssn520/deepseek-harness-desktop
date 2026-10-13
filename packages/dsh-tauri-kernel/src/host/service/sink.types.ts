@@ -1,4 +1,5 @@
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { NativeContent, NativeSink } from '../backends/types'
 import type { NativeExecution } from '../types'
 
@@ -15,13 +16,17 @@ export interface NativeToolResult {
 }
 
 export interface ToolTrack {
+  dispatch?: 'dsh'
+  officialResult?: Readonly<ToolExecutionResult>
   name: string
+  nativeName?: string
   arguments: string
   started: boolean
   dispatched: boolean
   step?: number
   accepted: boolean
   committed: boolean
+  pendingRelease?: boolean
   result?: NativeToolResult
   wait: Promise<NativeToolResult>
   resolve: (result: NativeToolResult) => void

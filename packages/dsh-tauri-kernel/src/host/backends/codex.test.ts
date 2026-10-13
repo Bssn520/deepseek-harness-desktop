@@ -10,6 +10,18 @@ vi.mock('node:child_process', () => ({ spawn: vi.fn() }))
 
 const command = { file: 'C:/fixture/codex.exe', args: [], env: {} }
 const sessions: NativeSession[] = []
+const orchestrationInstructions = 'Use dsh for all DSH tasks, plans (todo_write), subagents, schedules, and activated tools. Do not use native update_plan or native agent orchestration. After activate_tools, use the returned tool schemas through dsh. Native file and shell tools remain available.'
+const dynamicTools = [{
+  type: 'function',
+  name: 'dsh',
+  description: `${orchestrationInstructions}\nAvailable DSH tools: undefined`,
+  inputSchema: {
+    type: 'object',
+    properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } },
+    required: ['name', 'arguments'],
+    additionalProperties: false,
+  },
+}]
 
 interface Terminal {
   itemId: string
@@ -103,11 +115,118 @@ afterEach(async () => {
 })
 
 describe('codex native app-server contract', () => {
-  it('creates one native thread without a prompt or DSH tool injection', async () => {
+  it.each([false, true])('routes dsh dynamic tool requests through the official sink with isError %s', async (isError) => {
+    const { fixture } = codexProcess()
+    const sink = { ...createSink(), callTool: vi.fn().mockResolvedValue({ output: 'official committed result', isError }) }
+    const session = await open(null, sink)
+    const signal = new AbortController().signal
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], signal)
+    await started
+    const answered = fixture.next(frame => frame.id === 'rpc-tool')
+    fixture.send({ id: 'rpc-tool', method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-dsh', tool: 'dsh', arguments: { name: 'todo_write', arguments: { todos: [] } } } })
+    const response = await answered
+    completed(fixture)
+    await submitted
+    expect(response).toEqual({ id: 'rpc-tool', result: { contentItems: [{ type: 'inputText', text: 'official committed result' }], success: !isError } })
+    expect(sink.callTool).toHaveBeenCalledExactlyOnceWith('call-dsh', 'todo_write', '{"todos":[]}', expect.any(AbortSignal))
+    expect(sink.callTool.mock.calls[0]![3].aborted).toBe(false)
+    expect(sink.assistant).not.toHaveBeenCalled()
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it('withdraws a resolved dsh request without sending a late tool result', async () => {
+    const { fixture } = codexProcess()
+    const parked = Promise.withResolvers<{ output: string, isError: boolean }>()
+    const sink = { ...createSink(), callTool: vi.fn().mockReturnValue(parked.promise) }
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    fixture.send({ id: 'resolved-tool', method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-resolved', tool: 'dsh', arguments: { name: 'subagent', arguments: {} } } })
+    const signal = sink.callTool.mock.calls[0]![3] as AbortSignal
+    fixture.send({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'resolved-tool' } })
+    expect(signal.aborted).toBe(true)
+    parked.resolve({ output: 'late result', isError: false })
+    await parked.promise
+    completed(fixture)
+    await submitted
+    expect(fixture.frames.some(frame => frame.id === 'resolved-tool')).toBe(false)
+  })
+
+  it.each([
+    { tool: 'unknown', arguments: { name: 'todo_write', arguments: {} }, message: 'Only the dsh dynamic tool is supported' },
+    { tool: 'dsh', namespace: 'unknown', arguments: { name: 'todo_write', arguments: {} }, message: 'Only the dsh dynamic tool is supported' },
+    { tool: 'dsh', arguments: { name: 'todo_write', arguments: [] }, message: 'Expected a native protocol object' },
+    { tool: 'dsh', arguments: { name: 'todo_write', arguments: {}, unexpected: true }, message: 'Unexpected dsh dynamic tool argument' },
+  ])('fails closed for invalid dynamic tool requests: $message', async ({ message, ...params }) => {
+    const { fixture } = codexProcess()
+    const sink = { ...createSink(), callTool: vi.fn() }
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const answered = fixture.next(frame => frame.id === 'invalid-tool')
+    fixture.send({ id: 'invalid-tool', method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-invalid', ...params } })
+    const response = await answered
+    completed(fixture)
+    await submitted
+    expect(response).toEqual({ id: 'invalid-tool', error: { code: -32603, message } })
+    expect(sink.callTool).not.toHaveBeenCalled()
+  })
+
+  it('routes newly activated tools through the same cached dsh dispatcher', async () => {
+    const { fixture } = codexProcess()
+    const tools = [{ name: 'activate_tools', description: 'Activate DSH tools', parameters: { type: 'object' } }]
+    const sink = { ...createSink(), tools: () => tools, callTool: vi.fn().mockImplementation(async (_id, name) => {
+      if (name === 'activate_tools') {
+        tools.push({ name: 'subagent', description: 'Delegate tasks', parameters: { type: 'object' } })
+        return { output: JSON.stringify(tools), isError: false }
+      }
+      return { output: 'child created', isError: false }
+    }) }
+    const session = await open(null, sink)
+    const start = fixture.frames[2]!.params as Frame
+    expect(start.dynamicTools).toEqual([{ ...dynamicTools[0], description: `${orchestrationInstructions}\nAvailable DSH tools: [{"name":"activate_tools","description":"Activate DSH tools","parameters":{"type":"object"}}]` }])
+    expect(fixture.frames[0]!.params).toEqual({ clientInfo: { name: 'dsh-tauri-kernel', title: 'DSH native session bridge', version: '1.0.0' }, capabilities: { experimentalApi: true } })
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    for (const [index, name] of ['activate_tools', 'subagent'].entries()) {
+      const answered = fixture.next(frame => frame.id === `rpc-${index}`)
+      fixture.send({ id: `rpc-${index}`, method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: `call-${index}`, tool: 'dsh', arguments: { name, arguments: {} } } })
+      expect(await answered).toEqual({ id: `rpc-${index}`, result: { contentItems: [{ type: 'inputText', text: index === 0 ? '[{"name":"activate_tools","description":"Activate DSH tools","parameters":{"type":"object"}},{"name":"subagent","description":"Delegate tasks","parameters":{"type":"object"}}]' : 'child created' }], success: true } })
+    }
+    completed(fixture)
+    await submitted
+    expect(sink.callTool.mock.calls.map(call => call.slice(0, 3))).toEqual([['call-0', 'activate_tools', '{}'], ['call-1', 'subagent', '{}']])
+    expect(fixture.frames.filter(frame => frame.method === 'thread/start')).toHaveLength(1)
+    expect(spawn).toHaveBeenCalledOnce()
+  })
+
+  it('does not replay dsh dynamic tool notifications owned by the official sink', async () => {
+    const { fixture } = codexProcess()
+    const sink = createSink()
+    const session = await open(null, sink)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const item = { id: 'call-dsh', type: 'dynamicToolCall', tool: 'dsh', arguments: { name: 'todo_write', arguments: { todos: [] } }, status: 'inProgress' }
+    notify(fixture, 'item/started', { item })
+    notify(fixture, 'item/completed', { item: { ...item, status: 'completed', contentItems: [{ type: 'inputText', text: 'done' }], success: true } })
+    completed(fixture)
+    await submitted
+    expect(sink.assistant).not.toHaveBeenCalled()
+    expect(sink.toolStart).not.toHaveBeenCalled()
+    expect(sink.toolEnd).not.toHaveBeenCalled()
+  })
+
+  it('creates one native thread with a dsh dispatcher while disabling native multi-agent', async () => {
     const { fixture } = codexProcess()
     const session = await open()
     expect(session.id).toBe('thread-1')
-    expect(spawn).toHaveBeenCalledWith('C:/fixture/codex.exe', ['app-server', '--listen', 'stdio://'], {
+    expect(spawn).toHaveBeenCalledWith('C:/fixture/codex.exe', ['app-server', '--listen', 'stdio://', '-c', 'features.multi_agent=false'], {
       cwd: 'C:/fixture/workspace',
       env: {},
       shell: false,
@@ -115,7 +234,7 @@ describe('codex native app-server contract', () => {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     expect(fixture.frames.map(frame => frame.method)).toEqual(['initialize', 'initialized', 'thread/start', 'thread/backgroundTerminals/list'])
-    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/start', params: { cwd: 'C:/fixture/workspace' } })
+    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/start', params: { cwd: 'C:/fixture/workspace', developerInstructions: orchestrationInstructions, dynamicTools } })
   })
 
   describe.each(['start', 'resume', 'fork'] as const)('thread/%s permissions', (mode) => {
@@ -125,6 +244,8 @@ describe('codex native app-server contract', () => {
       expect(fixture.frames[2]).toEqual({ id: 2, method: `thread/${mode}`, params: {
         ...mode === 'start' ? {} : { threadId: mode === 'resume' ? 'thread-1' : 'source-thread' },
         cwd: 'C:/fixture/workspace',
+        developerInstructions: orchestrationInstructions,
+        ...mode === 'start' ? { dynamicTools } : {},
         approvalPolicy: permission.approval === 'ask' ? 'on-request' : 'never',
         sandbox: permission.sandbox,
       } })
@@ -162,7 +283,7 @@ describe('codex native app-server contract', () => {
   ])('leaves missing permission fields to the native defaults: $permission', async ({ permission, policy }) => {
     const { fixture } = codexProcess()
     const session = await open(null, createSink(), { permission })
-    expect(fixture.frames[2]?.params).toEqual({ cwd: 'C:/fixture/workspace', ...permission.approval ? { approvalPolicy: 'never' } : {}, ...permission.sandbox ? { sandbox: 'read-only' } : {} })
+    expect(fixture.frames[2]?.params).toEqual({ cwd: 'C:/fixture/workspace', developerInstructions: orchestrationInstructions, dynamicTools, ...permission.approval ? { approvalPolicy: 'never' } : {}, ...permission.sandbox ? { sandbox: 'read-only' } : {} })
     const started = fixture.next(frame => frame.method === 'turn/start')
     const submitted = session.submit([user()], new AbortController().signal, undefined, permission)
     const request = await started
@@ -206,7 +327,7 @@ describe('codex native app-server contract', () => {
     const { fixture } = codexProcess({ threadId: 'stored-thread' })
     const session = await open('stored-thread')
     expect(session.id).toBe('stored-thread')
-    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/resume', params: { threadId: 'stored-thread', cwd: 'C:/fixture/workspace' } })
+    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/resume', params: { threadId: 'stored-thread', cwd: 'C:/fixture/workspace', developerInstructions: orchestrationInstructions } })
     expect(fixture.frames.some(frame => frame.method === 'thread/start')).toBe(false)
   })
 
@@ -233,7 +354,7 @@ describe('codex native app-server contract', () => {
     const { fixture } = codexProcess({ threadId: 'child-thread' })
     const session = await open(null, createSink(), { forkFrom: 'source-thread' })
     expect(session.id).toBe('child-thread')
-    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/fork', params: { threadId: 'source-thread', cwd: 'C:/fixture/workspace' } })
+    expect(fixture.frames[2]).toEqual({ id: 2, method: 'thread/fork', params: { threadId: 'source-thread', cwd: 'C:/fixture/workspace', developerInstructions: orchestrationInstructions } })
     expect(fixture.frames.some(frame => frame.method === 'thread/start' || frame.method === 'thread/resume' || frame.method === 'turn/start')).toBe(false)
   })
 

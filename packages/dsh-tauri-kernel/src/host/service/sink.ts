@@ -1,3 +1,4 @@
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { PostToolDecision, PreToolDecision, ToolDispatchExecution, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { HostContext, NativeExecution } from '../types'
@@ -16,6 +17,17 @@ const MAX_TURN_BYTES = 64 * 1_024 * 1_024
 const MAX_TURN_TOOLS = 1_024
 
 export const sink = defineService({
+  tools(agent: NativeExecution['agent']): { name: string, description: string, parameters: Record<string, unknown> }[] {
+    const state = runtime.exchanges.get(agent.id)?.state
+    const restore = state === undefined ? agent.ctx.tools.presentAs('native') : undefined
+    try {
+      return agent.ctx.tools.schemas(agent).filter(tool => !state?.registrations.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }))
+    }
+    finally {
+      restore?.()
+    }
+  },
+
   async create(input: NativeExecution): Promise<OfficialSink> {
     const ctx = getServerContext<HostContext>(server)
     const modules = await loadRuntimeModules(ctx.loader)
@@ -44,6 +56,33 @@ export const sink = defineService({
       done: false,
       finalConsumed: false,
       native: {
+        tools: () => sink.tools(agent),
+        async callTool(id, name, arguments_, requestSignal): Promise<NativeToolResult> {
+          assertActive()
+          const scoped = requestSignal === undefined ? state.signal : AbortSignal.any([state.signal, requestSignal])
+          scoped.throwIfAborted()
+          if (!state.tools.has(id))
+            state.native.assistant(`dsh:${id}`, [{ type: 'tool-call', id, name, arguments: arguments_, dispatch: 'dsh' }])
+          const tool = state.tools.get(id)!
+          if (tool.dispatch !== 'dsh' || tool.name !== name || !sameArguments(tool.arguments, JSON.parse(arguments_)))
+            throw new Error('BRIDGE_TOOL_NOT_PRESENTED: DSH 调用与官方工具消息不一致。')
+          state.native.toolStart(id, name, tool.arguments)
+          const abort = (): void => {
+            agent.cancel({ kind: 'user' }, { keepInbox: true })
+            tool.reject(scoped.reason)
+          }
+          scoped.addEventListener('abort', abort, { once: true })
+          if (scoped.aborted)
+            abort()
+          try {
+            const result = await tool.wait
+            scoped.throwIfAborted()
+            return result
+          }
+          finally {
+            scoped.removeEventListener('abort', abort)
+          }
+        },
         text(id, text): void { delta(id, 'text', text) },
         thinking(id, text): void { delta(id, 'reasoning', text) },
         assistant(id, content): void {
@@ -62,10 +101,22 @@ export const sink = defineService({
             if (block.type === 'tool-call') {
               if (state.tools.has(block.id) || state.tools.size >= MAX_TURN_TOOLS)
                 throw new Error('BRIDGE_TOOL_CONFLICT: 原生工具身份重复或超过回合限制。')
-              const name = toolName(block.name)
+              const nativeName = toolName(block.name)
+              let name = block.name
+              if (block.dispatch !== 'dsh') {
+                const previous = [...state.tools.values()].find(tool => tool.dispatch !== 'dsh' && tool.nativeName === nativeName)
+                name = previous?.name ?? nativeName
+                if (!previous) {
+                  while (agent.ctx.tools.get(name, agent))
+                    name = `native_${name}`
+                }
+              }
               const tool = createTool(name, block.arguments)
+              tool.nativeName = block.dispatch === 'dsh' ? block.name : nativeName
+              tool.dispatch = block.dispatch
               state.tools.set(block.id, tool)
-              register(name)
+              if (block.dispatch !== 'dsh')
+                register(name)
               calls.push({ index: state.nextIndex++, call: { ...block, name } })
               continue
             }
@@ -89,7 +140,8 @@ export const sink = defineService({
             if ([...state.streams.values()].some(value => value.segment === state.segment && value.content === undefined))
               throw new Error('BRIDGE_ASSISTANT_UNSETTLED: 原生工具边界前仍有未确认消息。')
             for (const { index, call } of calls) {
-              const block = { ...call, id: modules.ToolCallId(call.id) }
+              const { dispatch: _dispatch, ...content } = call
+              const block = { ...content, id: modules.ToolCallId(call.id) }
               push({ type: 'block-start', index, blockType: 'tool-call' })
               push({ type: 'tool-call-delta', index, id: block.id, name: block.name, argumentsDelta: block.arguments })
               push({ type: 'block-end', index, block })
@@ -102,7 +154,7 @@ export const sink = defineService({
         toolStart(id, name, arguments_): void {
           assertActive()
           const current = state.tools.get(id)
-          if (!current || current.name !== toolName(name) || current.arguments !== arguments_)
+          if (!current || current.nativeName !== (current.dispatch === 'dsh' ? name : toolName(name)) || current.arguments !== arguments_)
             throw new Error('BRIDGE_TOOL_NOT_PRESENTED: 工具开始前没有对应的官方工具消息。')
           current.started = true
         },
@@ -288,10 +340,12 @@ export const sink = defineService({
 
   async admitTool(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
-    if (!official)
+    if (!official || (exec.parent !== undefined && official.state.tools.get(exec.rootCallId)?.dispatch === 'dsh'))
       return next()
     try {
-      expectedTool(official.state, exec)
+      const tool = expectedTool(official.state, exec)
+      if (tool.dispatch === 'dsh')
+        return next()
       official.state.signal.throwIfAborted()
       exec.signal.throwIfAborted()
       // ponytail: 核心单调 guard 仍生效；上游公开原生结果回放接口后再消除这层差异。
@@ -306,7 +360,7 @@ export const sink = defineService({
 
   async executeTool(exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult> {
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
-    if (!official)
+    if (!official || (exec.parent !== undefined && official.state.tools.get(exec.rootCallId)?.dispatch === 'dsh'))
       return next()
     const state = official.state
     const abort = (): void => state.controller.abort(exec.signal.reason)
@@ -315,6 +369,16 @@ export const sink = defineService({
       if (tool.dispatched)
         throw new Error('BRIDGE_TOOL_ALREADY_DISPATCHED: 不能重复派发原生工具调用。')
       tool.dispatched = true
+      if (tool.dispatch === 'dsh') {
+        const originalSignal = exec.signal
+        exec.signal = AbortSignal.any([originalSignal, state.signal])
+        try {
+          return await next()
+        }
+        finally {
+          exec.signal = originalSignal
+        }
+      }
       exec.signal.addEventListener('abort', abort, { once: true })
       if (exec.signal.aborted)
         abort()
@@ -339,11 +403,11 @@ export const sink = defineService({
 
   async finishTool(exec: ToolExecution, _result: Readonly<ToolExecutionResult>, next: () => Promise<PostToolDecision>): Promise<PostToolDecision> {
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
-    if (!official)
+    if (!official || (exec.parent !== undefined && official.state.tools.get(exec.rootCallId)?.dispatch === 'dsh'))
       return next()
     try {
-      expectedTool(official.state, exec)
-      return { kind: 'accept' }
+      const tool = expectedTool(official.state, exec)
+      return tool.dispatch === 'dsh' ? next() : { kind: 'accept' }
     }
     catch (error) {
       official.state.controller.abort(error)
@@ -360,6 +424,23 @@ export const sink = defineService({
       return
     const state = official.state
     const tool = state.tools.get(event.data.message.toolCallId)
+    if (tool?.dispatch === 'dsh' && tool.accepted && !tool.committed && tool.step === event.data.step && tool.officialResult && tool.officialResult.isError === (event.data.message.isError === true) && isDeepStrictEqual(tool.officialResult.content, event.data.message.content) && isDeepStrictEqual(tool.officialResult.meta, event.data.meta) && isDeepStrictEqual(tool.officialResult.error?.info, event.data.error)) {
+      tool.committed = true
+      const content = [...event.data.message.content, ...(tool.officialResult.additionalContexts ?? []).flatMap(message => message.content)]
+      tool.result = { output: content.map(block => block.type === 'text' ? block.text : JSON.stringify(block)).join('\n'), isError: tool.officialResult.isError }
+      state.outputBytes += Buffer.byteLength(tool.result.output)
+      if (state.outputBytes > MAX_TURN_BYTES) {
+        state.failure = new Error('BRIDGE_STREAM_OVERFLOW: 原生回合超过输出限制。')
+        state.controller.abort(state.failure)
+        tool.reject(state.failure)
+        return
+      }
+      if (tool.name === 'exit_plan_mode' && !tool.officialResult.isError && !tool.officialResult.concludesTurn && isDeepStrictEqual(tool.officialResult.value, { approved: true }))
+        tool.pendingRelease = true
+      else
+        tool.resolve(tool.result)
+      return
+    }
     if (!tool || tool.step !== event.data.step || !tool.accepted || tool.committed || !tool.result || tool.result.isError !== (event.data.message.isError === true) || !isDeepStrictEqual(event.data.message.content, [{ type: 'text', text: tool.result.output }]) || (tool.result.isError && event.data.error?.code !== 'BRIDGE_NATIVE_TOOL_ERROR') || event.data.meta !== undefined) {
       state.failure = new Error('BRIDGE_TOOL_RESULT_REJECTED: 官方日志没有完整保留原生工具结果。')
       state.controller.abort(state.failure)
@@ -368,12 +449,40 @@ export const sink = defineService({
     tool.committed = true
   },
 
+  releasePlan(agent: NativeExecution['agent'], messages: readonly UserMessage[]): void {
+    const state = runtime.exchanges.get(agent.id)?.state
+    if (!state || state.input.agent !== agent)
+      return
+    for (const tool of state.tools.values()) {
+      if (!tool.pendingRelease || !tool.committed || !tool.result)
+        continue
+      tool.pendingRelease = false
+      const context = messages.flatMap(message => message.content).map(block => block.type === 'text' ? block.text : JSON.stringify(block)).join('\n')
+      if (context !== '') {
+        state.outputBytes += Buffer.byteLength(`\n${context}`)
+        if (state.outputBytes > MAX_TURN_BYTES) {
+          state.failure = new Error('BRIDGE_STREAM_OVERFLOW: 原生回合超过输出限制。')
+          state.controller.abort(state.failure)
+          tool.reject(state.failure)
+          throw state.failure
+        }
+        tool.result = { ...tool.result, output: `${tool.result.output}\n${context}` }
+      }
+      tool.resolve(tool.result)
+    }
+  },
+
   acceptTool(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): undefined {
     const official = exec.agent === undefined ? undefined : runtime.exchanges.get(exec.agent.id)
-    if (!official)
+    if (!official || (exec.parent !== undefined && official.state.tools.get(exec.rootCallId)?.dispatch === 'dsh'))
       return undefined
     try {
       const tool = expectedTool(official.state, exec)
+      if (tool.dispatch === 'dsh') {
+        tool.officialResult = result
+        tool.accepted = true
+        return undefined
+      }
       if (!tool.dispatched || !tool.result || result.isError !== tool.result.isError || result.additionalContexts?.length || result.concludesTurn || !isDeepStrictEqual(result.content, [{ type: 'text', text: tool.result.output }]) || (!result.isError && result.value !== tool.result.output) || (result.isError && result.error.info?.code !== 'BRIDGE_NATIVE_TOOL_ERROR'))
         throw new Error('BRIDGE_TOOL_RESULT_REJECTED: 官方工具结果与原生结果不一致，不能继续原生回合。')
       tool.accepted = true

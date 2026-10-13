@@ -99,7 +99,8 @@ function runTurn(): Promise<void> {
 }
 
 function execute(id: string, signal: AbortSignal, arguments_: unknown = {}, name = 'shell_command') {
-  const task = context.tools.execute({ agent, callId: llmModule.ToolCallId(id), name, arguments: arguments_, signal })
+  const presentedName = runtime.exchanges.get(agent.id)?.state.tools.get(id)?.name ?? name
+  const task = context.tools.execute({ agent, callId: llmModule.ToolCallId(id), name: presentedName, arguments: arguments_, signal })
   background.push(task)
   return task
 }
@@ -215,6 +216,236 @@ afterEach(async () => {
 })
 
 describe('real official cross-step native sink', () => {
+  it('executes DSH orchestration through official policy and commits structured results before native continuation', async () => {
+    const body = vi.fn(async () => ({ tasks: [{ id: 'task-1', status: 'in_progress' }] }))
+    context.tools.register({
+      name: 'todo_write',
+      description: 'DSH task list',
+      parameters: { type: 'object', additionalProperties: true },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      execute: body,
+    })
+    const policy = vi.fn(async (_exec, next) => next())
+    context.on('tools/pre-execute', policy)
+    nativeScript = async (native, _messages, signal) => {
+      const result = await native.callTool!('dsh-task', 'todo_write', '{"todos":[]}', signal)
+      expect(result).toEqual({ output: '{"tasks":[{"id":"task-1","status":"in_progress"}]}', isError: false })
+      expect(toolResults().map(event => event.data.message.toolCallId)).toEqual(['dsh-task'])
+      timeline.push('native:continued')
+      native.assistant('final', [{ type: 'text', text: 'tasks registered' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(body).toHaveBeenCalledOnce()
+    expect(policy).toHaveBeenCalledOnce()
+    expect(timeline.indexOf('commit:dsh-task')).toBeLessThan(timeline.indexOf('native:continued'))
+    expect(results[0]?.result).toMatchObject({ isError: false, value: { tasks: [{ id: 'task-1', status: 'in_progress' }] } })
+    expect(agent.ctx.tools.get('todo_write', agent)?.execute).toBe(body)
+  }, 10_000)
+
+  it.each(['request', 'bridge'] as const)('cancels the executing official DSH body when its native %s signal aborts', async (source) => {
+    const cancellation = new AbortController()
+    const failure = new Error('native tool request cancelled')
+    const sideEffect = vi.fn()
+    let bodySignal: AbortSignal | undefined
+    let release!: () => void
+    const fallback = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    releases.push(release)
+    const body = vi.fn(async (_args: unknown, exec: import('@deepseek-ai/dsh-tools').ToolRunContext) => {
+      bodySignal = exec.signal
+      const aborted = new Promise<void>((resolve) => {
+        if (exec.signal.aborted)
+          resolve()
+        else
+          exec.signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      if (source === 'request')
+        cancellation.abort(failure)
+      else
+        runtime.exchanges.get(agent.id)!.state.controller.abort(failure)
+      await Promise.race([aborted, fallback])
+      if (!exec.signal.aborted)
+        sideEffect()
+      timeline.push('official:body-drained')
+      return 'cancelled body settled'
+    })
+    context.tools.register({
+      name: 'dsh_cancel',
+      description: 'cooperative official cancellation',
+      parameters: { type: 'object', additionalProperties: true },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      execute: body,
+    })
+    nativeScript = async (native) => {
+      await expect(native.callTool!('dsh-cancel', 'dsh_cancel', '{}', cancellation.signal)).rejects.toBe(failure)
+      expect(bodySignal?.aborted).toBe(true)
+      timeline.push('native:cancelled')
+    }
+    await runTurn()
+    expect(body).toHaveBeenCalledOnce()
+    expect(errors).toEqual([])
+    expect(sideEffect).not.toHaveBeenCalled()
+    expect(results.find(({ exec }) => exec.callId === 'dsh-cancel')?.result).toMatchObject({ isError: true, error: { info: { code: 'ABORTED' } } })
+    expect(toolResults().map(event => event.data.message)).toMatchObject([{ toolCallId: 'dsh-cancel', isError: true }])
+    expect(timeline.indexOf('official:body-drained')).toBeLessThan(timeline.indexOf('commit:dsh-cancel'))
+    expect(agent.status).toBe('idle')
+    await vi.waitFor(() => expect(runtime.exchanges.size).toBe(0))
+  }, 2_000)
+
+  it('keeps DSH guards authoritative and returns denials after official commit', async () => {
+    const body = inheritedTool('todo_write')
+    agent.ctx.tools.guard(exec => exec.name === 'todo_write' ? 'TASK_DENIED' : undefined)
+    nativeScript = async (native, _messages, signal) => {
+      const result = await native.callTool!('denied-task', 'todo_write', '{}', signal)
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('TASK_DENIED')
+      expect(toolResults()[0]?.data.message.isError).toBe(true)
+      native.assistant('final', [{ type: 'text', text: 'denied' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(body).not.toHaveBeenCalled()
+  }, 10_000)
+
+  it('preserves Claude-presented DSH ids without registering a native replay shadow', async () => {
+    const body = inheritedTool('todo_write')
+    nativeScript = async (native, _messages, signal) => {
+      native.assistant('claude-dsh', [{ type: 'tool-call', id: 'claude-task', name: 'todo_write', arguments: '{}', dispatch: 'dsh' }])
+      const result = await native.callTool!('claude-task', 'todo_write', '{}', signal)
+      expect(result).toEqual({ output: 'inherited DSH body must not run', isError: false })
+      native.assistant('final', [{ type: 'text', text: 'done' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(body).toHaveBeenCalledOnce()
+    expect(assistants().flatMap(event => event.data.message.content).filter(block => block.type === 'tool-call')).toEqual([{ type: 'tool-call', id: 'claude-task', name: 'todo_write', arguments: '{}' }])
+  }, 10_000)
+
+  it('dispatches a nested DSH leaf after a same-name native replay without retaining its shadow', async () => {
+    const leaf = inheritedTool()
+    const prefixed = inheritedTool('native_shell_command')
+    const nested = vi.fn(async (_exec: ToolExecution, next: () => Promise<import('@deepseek-ai/dsh-tools').PreToolDecision>) => next())
+    context.on('tools/pre-execute', nested)
+    context.tools.register({
+      name: 'dsh_composite',
+      description: 'DSH nested dispatcher',
+      parameters: { type: 'object', additionalProperties: true },
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+      async execute(_args, exec) {
+        const result = await context.tools.execute({ agent: exec.agent, callId: llmModule.ToolCallId('nested-leaf'), rootCallId: exec.rootCallId, parent: exec.token, name: 'shell_command', arguments: {}, signal: exec.signal })
+        if (result.isError)
+          throw new Error(result.error.message)
+        return result.value
+      },
+    })
+    nativeScript = async (native, _messages, signal) => {
+      nativeCall(native, 'native-leaf')
+      native.toolEnd('native-leaf', 'native shell output')
+      const result = await native.callTool!('dsh-root', 'dsh_composite', '{}', signal)
+      expect(result).toEqual({ output: 'inherited DSH body must not run', isError: false })
+      expect(native.tools!().map(tool => tool.name)).toEqual(expect.arrayContaining(['shell_command', 'native_shell_command']))
+      expect(native.tools!().map(tool => tool.name)).not.toContain('native_native_shell_command')
+      expect(toolResults().map(event => event.data.message.toolCallId)).toEqual(['native-leaf', 'dsh-root'])
+      timeline.push('native:nested-continued')
+      native.assistant('final', [{ type: 'text', text: 'nested dispatch done' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(leaf).toHaveBeenCalledOnce()
+    expect(prefixed).not.toHaveBeenCalled()
+    expect(agent.ctx.tools.get('shell_command', agent)?.execute).toBe(leaf)
+    expect(agent.ctx.tools.get('native_shell_command', agent)?.execute).toBe(prefixed)
+    expect(agent.ctx.tools.get('native_native_shell_command', agent)).toBeUndefined()
+    expect(assistants()[0]?.data.message.content).toEqual([{ type: 'tool-call', id: 'native-leaf', name: 'native_native_shell_command', arguments: '{}' }])
+    expect(nested.mock.calls.map(([exec]) => ({ id: exec.callId, root: exec.rootCallId, nested: exec.parent !== undefined }))).toEqual([{ id: 'dsh-root', root: 'dsh-root', nested: false }, { id: 'nested-leaf', root: 'dsh-root', nested: true }])
+    expect(timeline.indexOf('commit:dsh-root')).toBeLessThan(timeline.indexOf('native:nested-continued'))
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('isolates native replay from DSH definition-owned project and finalize content callbacks', async () => {
+    const body = vi.fn(async () => ({ dsh: true }))
+    const project = vi.fn(() => [{ type: 'text' as const, text: 'DSH projected result' }])
+    const finalize = vi.fn(() => [{ type: 'text' as const, text: 'DSH final result' }])
+    context.tools.register({
+      name: 'shell_command',
+      description: 'DSH leaf with output transforms',
+      parameters: { type: 'object', required: ['command'], properties: { command: { type: 'string' } }, additionalProperties: false },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      projectContent: project,
+      finalizeContent: finalize,
+      execute: body,
+    })
+    nativeScript = async (native, _messages, signal) => {
+      nativeCall(native, 'native-transform', '{"nativeOnly":true}')
+      native.toolEnd('native-transform', 'unchanged native output')
+      const result = await native.callTool!('dsh-transform', 'shell_command', '{"command":"DSH task"}', signal)
+      expect(result).toEqual({ output: 'DSH final result', isError: false })
+      native.assistant('final', [{ type: 'text', text: 'output transforms isolated' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(body).toHaveBeenCalledOnce()
+    expect(project.mock.calls).toHaveLength(1)
+    expect(finalize.mock.calls).toHaveLength(1)
+    expect(toolResults().map(event => ({ id: event.data.message.toolCallId, content: event.data.message.content }))).toEqual([{ id: 'native-transform', content: [{ type: 'text', text: 'unchanged native output' }] }, { id: 'dsh-transform', content: [{ type: 'text', text: 'DSH final result' }] }])
+    expect(results.find(({ exec }) => exec.callId === 'dsh-transform')?.result).toMatchObject({ isError: false, value: { dsh: true } })
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('continues the native turn after DSH post policy adds official additional contexts', async () => {
+    inheritedTool('dsh_context')
+    const additional = llmModule.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'DSH deferred context' }] })
+    agent.ctx.on('tools/post-execute', async (): Promise<PostToolDecision> => ({ kind: 'accept', additionalContexts: [additional] }))
+    nativeScript = async (native, _messages, signal) => {
+      const result = await native.callTool!('dsh-context', 'dsh_context', '{}', signal)
+      expect(result).toEqual({ output: 'inherited DSH body must not run\nDSH deferred context', isError: false })
+      expect(toolResults()[0]?.data.message.toolCallId).toBe('dsh-context')
+      native.assistant('final', [{ type: 'text', text: 'continued with deferred context' }])
+    }
+    await runTurn()
+    expect(errors).toEqual([])
+    expect(results[0]?.result.additionalContexts).toEqual([additional])
+    expect(events.filter(event => event.type === 'user/message').map(event => event.data.id)).toContain(additional.id)
+    expect(assistants().map(event => event.data.step)).toEqual([1, 2])
+    expect(runtime.exchanges.size).toBe(0)
+  }, 10_000)
+
+  it('ends a native turn after DSH concludesTurn commits a structured success', async () => {
+    context.tools.register({
+      name: 'dsh_conclude',
+      description: 'DSH terminal result',
+      parameters: { type: 'object', additionalProperties: true },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute(_args, exec) {
+        exec.concludeTurn()
+        return { terminal: true }
+      },
+    })
+    nativeScript = async (native, _messages, signal) => {
+      const result = await native.callTool!('dsh-conclude', 'dsh_conclude', '{}', signal)
+      expect(result).toEqual({ output: '{"terminal":true}', isError: false })
+      expect(toolResults()[0]?.data.message.toolCallId).toBe('dsh-conclude')
+      await new Promise<void>((resolve) => {
+        if (signal.aborted)
+          resolve()
+        else
+          signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      timeline.push('native:terminal-drained')
+    }
+    await runTurn()
+    await vi.waitFor(() => expect(runtime.exchanges.size).toBe(0))
+    expect(errors).toEqual([])
+    expect(results[0]?.result).toMatchObject({ isError: false, value: { terminal: true }, concludesTurn: true })
+    expect(toolResults().map(event => event.data.message)).toMatchObject([{ toolCallId: 'dsh-conclude', isError: false, content: [{ type: 'text', text: '{"terminal":true}' }] }])
+    expect(assistants().map(event => event.data.step)).toEqual([1])
+    expect(events.filter(event => event.type === 'turn/end')).toHaveLength(1)
+    expect(timeline.indexOf('commit:dsh-conclude')).toBeLessThan(timeline.indexOf('native:terminal-drained'))
+    expect(agent.status).toBe('idle')
+  }, 10_000)
+
   it('settles a full terminal queue with done, one wake, and a retained overflow failure', async () => {
     const current = await exchange()
     const native = current.state.native
@@ -262,7 +493,7 @@ describe('real official cross-step native sink', () => {
     expect(connection.submit).toHaveBeenCalledOnce()
     expect(inherited).not.toHaveBeenCalled()
     expect(assistants().map(event => event.data.step)).toEqual(Array.from({ length: 33 }, (_, index) => index + 1))
-    expect(assistants().slice(0, 32).map(event => event.data.message.content)).toEqual(Array.from({ length: 32 }, (_, index) => [{ type: 'tool-call', id: `native-${index}`, name: 'shell_command', arguments: JSON.stringify({ command: `inspect-${index}` }) }]))
+    expect(assistants().slice(0, 32).map(event => event.data.message.content)).toEqual(Array.from({ length: 32 }, (_, index) => [{ type: 'tool-call', id: `native-${index}`, name: 'native_shell_command', arguments: JSON.stringify({ command: `inspect-${index}` }) }]))
     expect(assistants()[32]!.data.message.content).toEqual([{ type: 'text', text: 'all native tools settled' }])
     expect(toolResults().map(event => ({ id: event.data.message.toolCallId, step: event.data.step, content: event.data.message.content }))).toEqual(Array.from({ length: 32 }, (_, index) => ({ id: `native-${index}`, step: index + 1, content: [{ type: 'text', text: `native output ${index}` }] })))
     expect(toolResults().map(event => event.data.message.isError)).toEqual(Array.from({ length: 32 }).fill(false))
@@ -592,6 +823,19 @@ describe('real official cross-step native sink', () => {
     const current = await exchange()
     agent.ctx.on('user-questions/request', async () => ({ answers: [{ id: 'first', selected: ['yes'] }] }))
     await expect(current.state.native.questions('question-call', [{ id: 'first', question: 'First?' }, { id: 'second', question: 'Second?' }])).rejects.toThrow('BRIDGE_QUESTION_ANSWER_MISSING')
+  })
+
+  it('rejects a DSH call cancelled synchronously before its wait listener is registered', async () => {
+    const current = await exchange()
+    const cancellation = new AbortController()
+    const failure = new Error('cancelled during tool presentation')
+    const start = current.state.native.toolStart
+    vi.spyOn(current.state.native, 'toolStart').mockImplementation((...args) => {
+      start(...args)
+      cancellation.abort(failure)
+    })
+    await expect(current.state.native.callTool!('cancel-race', 'dsh_task', '{}', cancellation.signal)).rejects.toBe(failure)
+    expect(current.state.tools.get('cancel-race')?.committed).toBe(false)
   })
 
   it('refuses late callbacks after cancellation without adding queued chunks', async () => {

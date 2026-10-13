@@ -2,7 +2,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Deferred } from './transport'
 import type { NativeAttachments, NativeCommand, NativeContent, NativeModelCatalog, NativeModelInfo, NativePermission, NativeQuestion, NativeSession, NativeSessionOpenOptions, NativeSink, NativeTurnOptions } from './types'
 import { randomUUID } from 'node:crypto'
-import { stripVTControlCharacters } from 'node:util'
+import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util'
 import { nativeEnvironment } from '../utils/detection'
 import { abortError, deferred, errorFrom, INTERRUPT_TIMEOUT_MS, JsonLinesProcess, NativeBridgeError, nativeRuns, PendingRequests, record, REQUEST_TIMEOUT_MS, stringField } from './transport'
 
@@ -25,6 +25,8 @@ interface ClaudeRun {
   lanes: Map<string, string>
   tools: Set<string>
   endedTools: Set<string>
+  dshCalls: Map<string, { name: string, arguments: string, dispatched: boolean, hooked: boolean }>
+  pendingDshCalls: number
   tasks: Set<string>
   deferringTasks: Set<string>
   stoppedTasks: Set<string>
@@ -41,6 +43,10 @@ interface ClaudeRun {
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'stopped', 'killed'])
 const DEFERRING_TASK_TYPES = new Set(['local_agent', 'local_workflow'])
 const SESSION_START_HOOK_ID = 'dsh-native-session-identity'
+const DSH_TOOL_PREFIX = 'mcp__dsh__'
+const TOOL_IDENTITY_HOOK_ID = 'dsh-native-tool-identity'
+const DSH_DISPATCH_SCHEMA = { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object', additionalProperties: true }, native_tool_use_id: { type: 'string', description: 'Set by the native PreToolUse hook; do not supply this field.' } }, required: ['name', 'arguments'], additionalProperties: false }
+const NATIVE_ORCHESTRATION_TOOLS = 'Agent,Task,TodoWrite,TaskCreate,TaskUpdate,TaskList,TaskGet,TaskStop,EnterPlanMode,ExitPlanMode'
 
 function questionsOf(input: Record<string, unknown>): NativeQuestion[] {
   if (!Array.isArray(input.questions) || input.questions.length === 0)
@@ -117,6 +123,16 @@ class ClaudeSession implements NativeSession {
       '--allow-dangerously-skip-permissions',
       '--settings',
       '{"useAutoModeDuringPlan":false}',
+      ...sink.tools
+        ? [
+            '--mcp-config',
+            JSON.stringify({ mcpServers: { dsh: { type: 'sdk', name: 'dsh' } } }),
+            '--disallowedTools',
+            NATIVE_ORCHESTRATION_TOOLS,
+            '--append-system-prompt',
+            'Use DSH MCP tools for all agent delegation, task tracking, and planning. Native orchestration tools are disabled; never replace DSH orchestration with native agents or tasks.',
+          ]
+        : [],
       ...options?.permission ? ['--permission-mode', 'default'] : [],
       ...options?.forkFrom ? [`--resume=${options.forkFrom}`, '--fork-session'] : [storedId === null ? `--session-id=${this.id}` : `--resume=${this.id}`],
     ], cwd)
@@ -145,7 +161,7 @@ class ClaudeSession implements NativeSession {
         this.identity.reject(error)
         this.requests.failAll(error)
       }, REQUEST_TIMEOUT_MS)
-      const initialization = { subtype: 'initialize', hooks: { SessionStart: [{ hookCallbackIds: [SESSION_START_HOOK_ID] }] } }
+      const initialization = { subtype: 'initialize', hooks: { SessionStart: [{ hookCallbackIds: [SESSION_START_HOOK_ID] }], ...this.sink.tools ? { PreToolUse: [{ matcher: `${DSH_TOOL_PREFIX}execute`, hookCallbackIds: [TOOL_IDENTITY_HOOK_ID] }] } : {} }, ...this.sink.tools ? { sdkMcpServers: ['dsh'] } : {} }
       const response = record(await this.control(initialization, signal))
       this.checkIdentity(response)
       this.noteCapabilities(response)
@@ -293,6 +309,8 @@ class ClaudeSession implements NativeSession {
       lanes: new Map(),
       tools: new Set(),
       endedTools: new Set(),
+      dshCalls: new Map(),
+      pendingDshCalls: 0,
       tasks: new Set(),
       deferringTasks: new Set(),
       stoppedTasks: new Set(),
@@ -521,7 +539,7 @@ class ClaudeSession implements NativeSession {
   }
 
   private finish(run: ClaudeRun): void {
-    if (!run.resultReceived || (run.signal.aborted ? run.tasks.size : run.deferringTasks.size) !== 0 || run.interruptPending || (run.state !== undefined && run.state !== 'idle'))
+    if (!run.resultReceived || run.pendingDshCalls !== 0 || (run.signal.aborted ? run.tasks.size : run.deferringTasks.size) !== 0 || run.interruptPending || (run.state !== undefined && run.state !== 'idle'))
       return
     if (run.error && !run.signal.aborted)
       run.result.reject(run.error)
@@ -592,20 +610,38 @@ class ClaudeSession implements NativeSession {
       state.blocks.set(index, { type, final: serialized, ...typeof block.id === 'string' ? { callId: block.id } : {} })
       state.nextFinalIndex = Math.max(state.nextFinalIndex, index + 1)
       let content: NativeContent
-      if (type === 'text' && typeof block.text === 'string')
+      if (type === 'text' && typeof block.text === 'string') {
         content = { type: 'text', text: block.text }
-      else if (type === 'thinking' && typeof block.thinking === 'string')
+      }
+      else if (type === 'thinking' && typeof block.thinking === 'string') {
         content = { type: 'thinking', text: block.thinking }
-      else if (type === 'tool_use')
-        content = { type: 'tool-call', id: stringField(block, 'id'), name: stringField(block, 'name'), arguments: JSON.stringify(block.input ?? {}) }
-      else if (type === 'redacted_thinking')
+      }
+      else if (type === 'tool_use') {
+        const name = stringField(block, 'name')
+        const dsh = this.sink.tools && name === `${DSH_TOOL_PREFIX}execute`
+        const input = dsh ? record(block.input) : undefined
+        content = { type: 'tool-call', id: stringField(block, 'id'), name: input ? stringField(input, 'name') : name, arguments: JSON.stringify(input ? record(input.arguments) : block.input ?? {}), ...dsh ? { dispatch: 'dsh' as const } : {} }
+        if (dsh) {
+          const call = run.dshCalls.get(content.id)
+          if (call && (call.name !== content.name || !isDeepStrictEqual(JSON.parse(call.arguments), JSON.parse(content.arguments))))
+            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Claude tool hook disagrees with its announced native call')
+          if (!call)
+            run.dshCalls.set(content.id, { name: content.name, arguments: content.arguments, dispatched: false, hooked: false })
+        }
+      }
+      else if (type === 'redacted_thinking') {
         continue
-      else
+      }
+      else {
         throw new NativeBridgeError('BRIDGE_UNSUPPORTED_EVENT', `Unsupported Claude assistant content: ${type}`)
+      }
+      if (content.type === 'tool-call' && run.dshCalls.get(content.id)?.dispatched)
+        continue
       this.sink.assistant(`${id}:block:${index}`, [content])
       if (content.type === 'tool-call' && !run.tools.has(content.id)) {
         run.tools.add(content.id)
-        this.sink.toolStart(content.id, content.name, content.arguments)
+        if (!run.dshCalls.has(content.id))
+          this.sink.toolStart(content.id, content.name, content.arguments)
       }
     }
   }
@@ -618,6 +654,8 @@ class ClaudeSession implements NativeSession {
       if (block.type !== 'tool_result')
         continue
       const id = stringField(block, 'tool_use_id')
+      if (run.dshCalls.has(id))
+        continue
       if (run.endedTools.has(id))
         continue
       if (!run.tools.has(id))
@@ -670,9 +708,37 @@ class ClaudeSession implements NativeSession {
     this.approvals.set(id, controller)
     const run = this.active
     const signal = run ? AbortSignal.any([run.signal, controller.signal]) : controller.signal
+    const dshCall = request.subtype === 'mcp_message' && run
+    if (dshCall)
+      dshCall.pendingDshCalls++
     try {
+      if (request.subtype === 'mcp_message') {
+        const response = await this.mcp(request, signal, run)
+        if (!signal.aborted && !this.disposed)
+          this.transport.write({ type: 'control_response', response: { subtype: 'success', request_id: id, response: { mcp_response: response } } })
+        return
+      }
       if (request.subtype === 'hook_callback') {
         const input = record(request.input)
+        if (this.sink.tools && request.callback_id === TOOL_IDENTITY_HOOK_ID) {
+          if (!run || signal.aborted || this.disposed || input.hook_event_name !== 'PreToolUse' || input.tool_name !== `${DSH_TOOL_PREFIX}execute`)
+            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Invalid Claude DSH tool identity hook')
+          const callId = stringField(input, 'tool_use_id')
+          const wrapper = record(input.tool_input)
+          if (Object.keys(wrapper).some(key => !['name', 'arguments', 'native_tool_use_id'].includes(key)))
+            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Invalid Claude DSH dispatcher input')
+          const name = stringField(wrapper, 'name')
+          const arguments_ = record(wrapper.arguments)
+          const existing = run.dshCalls.get(callId)
+          if (existing && (existing.dispatched || existing.name !== name || !isDeepStrictEqual(JSON.parse(existing.arguments), arguments_)))
+            throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Claude tool hook disagrees with its announced native call')
+          if (existing)
+            existing.hooked = true
+          else
+            run.dshCalls.set(callId, { name, arguments: JSON.stringify(arguments_), dispatched: false, hooked: true })
+          this.transport.write({ type: 'control_response', response: { subtype: 'success', request_id: id, response: { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { name, arguments: arguments_, native_tool_use_id: callId } } } } })
+          return
+        }
         if (request.callback_id !== SESSION_START_HOOK_ID || input.hook_event_name !== 'SessionStart')
           throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Claude invoked an unregistered native identity hook')
         this.checkIdentity(input, true)
@@ -693,7 +759,14 @@ class ClaudeSession implements NativeSession {
       const callId = stringField(request, 'tool_use_id')
       let response: Record<string, unknown> = { behavior: 'deny', message: 'Native tool request is unavailable or cancelled' }
       if (run && !signal.aborted && !this.disposed) {
-        if (tool === 'AskUserQuestion') {
+        if (this.sink.tools && tool.startsWith(DSH_TOOL_PREFIX)) {
+          if (tool === `${DSH_TOOL_PREFIX}execute`)
+            response = { behavior: 'allow', updatedInput: input }
+        }
+        else if (this.sink.tools && NATIVE_ORCHESTRATION_TOOLS.split(',').includes(tool)) {
+          response = { behavior: 'deny', message: 'Use DSH MCP orchestration tools instead' }
+        }
+        else if (tool === 'AskUserQuestion') {
           const questions = questionsOf(input)
           const received = await this.sink.questions(callId, questions, signal)
           const answers = Object.fromEntries(questions.map((question) => {
@@ -726,14 +799,83 @@ class ClaudeSession implements NativeSession {
         this.transport.write({ type: 'control_response', response: { subtype: 'success', request_id: id, response } })
     }
     catch (error) {
-      if (!controller.signal.aborted)
+      if (!signal.aborted && !this.disposed)
         this.replyError(id, errorFrom(error).message)
       if (request.subtype === 'hook_callback')
         this.transport.fail(errorFrom(error))
     }
     finally {
       this.approvals.delete(id)
+      if (dshCall) {
+        dshCall.pendingDshCalls--
+        this.finish(dshCall)
+      }
     }
+  }
+
+  private async mcp(request: Record<string, unknown>, signal: AbortSignal, run?: ClaudeRun): Promise<Record<string, unknown>> {
+    if (!this.sink.tools || request.server_name !== 'dsh')
+      throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Unknown Claude SDK MCP server')
+    signal.throwIfAborted()
+    const message = record(request.message)
+    if (message.jsonrpc !== '2.0')
+      throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Invalid Claude MCP JSON-RPC message')
+    if (message.id === undefined) {
+      if (message.method !== 'notifications/initialized')
+        throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Unsupported Claude MCP notification')
+      return { jsonrpc: '2.0', result: {} }
+    }
+    if (typeof message.id !== 'string' && typeof message.id !== 'number')
+      throw new NativeBridgeError('BRIDGE_PROTOCOL', 'Invalid Claude MCP request id')
+    let result: Record<string, unknown>
+    const params = record(message.params ?? {})
+    switch (message.method) {
+      case 'initialize':
+        result = { protocolVersion: stringField(params, 'protocolVersion'), capabilities: { tools: {} }, serverInfo: { name: 'dsh', version: '1.0.0' } }
+        break
+      case 'ping':
+        result = {}
+        break
+      case 'tools/list':
+        result = { tools: [{ name: 'execute', description: `Execute a DSH tool by name and arguments. Use activate_tools to load additional tools; use the returned schemas with this same dispatcher. Available tools: ${JSON.stringify(this.sink.tools())}`, inputSchema: DSH_DISPATCH_SCHEMA }] }
+        break
+      case 'tools/call': {
+        if (!run || this.active !== run || this.disposed || !this.sink.callTool)
+          throw new NativeBridgeError('BRIDGE_REQUEST_CLOSED', 'No active DSH turn for the Claude MCP call')
+        if (params.name !== 'execute')
+          throw new NativeBridgeError('BRIDGE_TOOL_UNAVAILABLE', 'Unknown DSH MCP dispatcher')
+        const input = record(params.arguments)
+        const name = stringField(input, 'name')
+        const arguments_ = record(input.arguments)
+        if (!this.sink.tools().some(tool => tool.name === name))
+          throw new NativeBridgeError('BRIDGE_TOOL_UNAVAILABLE', `Unknown DSH MCP tool: ${name}`)
+        const id = stringField(input, 'native_tool_use_id')
+        const call = run.dshCalls.get(id)
+        if (!call?.hooked || call.dispatched || call.name !== name || !isDeepStrictEqual(JSON.parse(call.arguments), arguments_))
+          throw new NativeBridgeError('BRIDGE_TOOL_NOT_PRESENTED', 'Claude MCP call has no matching hook-authorized native tool identity')
+        call.dispatched = true
+        const pending = this.sink.callTool(id, name, call.arguments, signal)
+        let aborted!: () => void
+        const cancelled = new Promise<never>((_, reject) => {
+          aborted = () => reject(abortError(signal))
+          signal.addEventListener('abort', aborted, { once: true })
+          if (signal.aborted)
+            aborted()
+        })
+        let result: Awaited<typeof pending>
+        try {
+          result = await Promise.race([pending, cancelled])
+        }
+        finally {
+          signal.removeEventListener('abort', aborted)
+        }
+        signal.throwIfAborted()
+        return { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: result.output }], isError: result.isError } }
+      }
+      default:
+        throw new NativeBridgeError('BRIDGE_PROTOCOL', `Unsupported Claude MCP method: ${String(message.method)}`)
+    }
+    return { jsonrpc: '2.0', id: message.id, result }
   }
 
   private replyError(id: string, error: string): void {
