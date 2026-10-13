@@ -37,7 +37,7 @@ jobs:
       github.repository == 'dsh-tauri/deepseek-harness-desktop' &&
       (inputs.source_ref != '' || github.ref == 'refs/heads/main')
     name: Sign and upload iOS TestFlight
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 120
     defaults:
       run:
