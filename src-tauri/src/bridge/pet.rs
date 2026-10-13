@@ -1967,6 +1967,7 @@ pub async fn check_pet_updates(app: AppHandle) -> Result<Vec<String>, String> {
     )
     .buffer_unordered(4)
     .filter_map(|id| async { id })
+    .take_until(tokio::time::sleep(Duration::from_secs(12)))
     .collect()
     .await)
 }
