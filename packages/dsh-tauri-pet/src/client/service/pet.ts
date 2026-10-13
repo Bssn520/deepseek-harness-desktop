@@ -209,12 +209,15 @@ export async function importPetArchive(input: { name: string, data: string }): P
 /**
  * Action：删除用户导入的宠物（来源限定 id 删目录，预设 id 反注册远端条目）。
  *
- * 删完重装整份清单：被删条目散落在预设 / Chat / Codex 三份列表里，只有这里知道是哪一份。
+ * 先本地摘掉卡片再重装清单：删除已经落定，清单刷新失败不能把这次删除报成失败——
+ * 用户会重试一个已经不存在的 id，而卡片还留在列表里。
  */
 export async function deletePet(input: { id: string }): Promise<PetActionResult> {
   return guard('delete pet', async () => {
     store.pet.setStatus(await invoke<PetStatus>(CMD_DELETE_PET, { id: input.id }))
-    return loadPetCatalog()
+    store.pet.removePet(input.id)
+    await loadPetCatalog()
+    return { ok: true }
   })
 }
 

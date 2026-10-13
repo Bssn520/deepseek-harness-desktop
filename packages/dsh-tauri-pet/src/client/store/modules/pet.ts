@@ -62,6 +62,12 @@ export const pet = defineStore({
     setCodexPets(list: PetListItem[]): void {
       this.codexPets = list
     },
+    /** 摘掉已删除的条目；清单刷新失败时卡片不能继续留在列表里。 */
+    removePet(id: string): void {
+      this.presetPets = this.presetPets.filter(item => item.id !== id)
+      this.chatPets = this.chatPets.filter(item => item.id !== id)
+      this.codexPets = this.codexPets.filter(item => item.id !== id)
+    },
     setPrefill(sessionId: string, draft: string): void {
       this.prefills[sessionId] = draft
     },

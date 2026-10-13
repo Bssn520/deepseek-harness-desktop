@@ -177,6 +177,23 @@ describe('pet service native command contracts', () => {
     expect(store.pet.$state).toMatchObject({ status: cleared, catalogLoaded: true, chatPets: chat, codexPets: [], presetPets: presets })
   })
 
+  it('delete reports success and drops the card when the catalog refresh fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    store.pet.setCatalog({
+      presets: [{ id: 'builtin', name: 'Built in' }],
+      chat: [{ id: 'chat:chat-a', name: 'Chat', source: 'chat' }],
+      codex: [{ id: 'codex-a', name: 'Codex', source: 'codex' }],
+    })
+    invoke.mockResolvedValueOnce(status).mockRejectedValueOnce(new Error('catalog down'))
+    expect(await deletePet({ id: 'chat:chat-a' })).toEqual({ ok: true })
+    expect(store.pet.$state).toMatchObject({
+      status,
+      presetPets: [{ id: 'builtin', name: 'Built in' }],
+      chatPets: [],
+      codexPets: [{ id: 'codex-a', name: 'Codex', source: 'codex' }],
+    })
+  })
+
   it('import forwards archive strings before refreshing only the Codex list', async () => {
     const codex = [{ id: 'imported', name: 'Imported', source: 'codex' }]
     invoke.mockResolvedValueOnce(codex[0]).mockResolvedValueOnce(codex)
