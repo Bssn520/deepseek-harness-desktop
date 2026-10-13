@@ -129,6 +129,25 @@ jobs:
     with:
       source_ref: ${{ needs.prepare.outputs.source_ref }}
 
+  testflight:
+    name: Sign iOS IPA and upload TestFlight
+    needs: prepare
+    if: >-
+      github.repository == 'dsh-tauri/deepseek-harness-desktop' &&
+      vars.IOS_TESTFLIGHT_ENABLED == 'true' &&
+      needs.prepare.outputs.should_build == 'true'
+    uses: ./.github/workflows/release-testflight.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.source_ref }}
+    secrets:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      IOS_DISTRIBUTION_CERTIFICATE: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+      APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+
   publish:
     name: Publish Mobile Assets
     needs: [prepare, build, build-ios]

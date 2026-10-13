@@ -191,7 +191,9 @@ src-native/
 * 本仓库根依赖由共享 catalog 固定，`react` / `react-dom` / `typescript` 与 Expo 57 期望版本不一致，`expo install --check` 在本机与 CI 上必然非零退出，因此**不**把它当门禁；原生兼容性以 `prebuild` + Gradle 编译为准。
 * `build-ios.yml` 用 Expo prebuild、CocoaPods 与真机 Release 构建生成未签名 IPA，复用输入 `source_ref` 指向发布提交；`build-ios-test.yml` 仅手动调用，不随 CI 打包。
 * iOS 资产名为 `Deepseek.Harness.iOS_<version>_unsigned.ipa`，artifact 为 `ios-ipa-<version>`；`bundleIdentifier` 为 `com.dshtauri.dshbridge`。构建校验非空内嵌 JS bundle 与第三方声明，不依赖 Metro。
-* IPA 不含分发签名，不能直接安装或提交 App Store，需自行签名。预发布完整版本保留在资产名中，iOS `CFBundleShortVersionString` 使用三段数字核心版本。
+* 上述 unsigned IPA 不含分发签名，不能直接安装或提交 App Store，需自行签名。预发布完整版本保留在资产名中，iOS `CFBundleShortVersionString` 使用三段数字核心版本。
+* `release-testflight.yml` 为独立的官方仓库签名与自动上传任务，由 `release-native.yml` 的 `prepare` 成功后调用，仓库 Variable `IOS_TESTFLIGHT_ENABLED=true` 开启；不改变原有 APK / unsigned IPA 的发布依赖。也可从官方 `main` 手动运行，签名任务使用仓库级 Secrets，不依赖独立 Environment，仅构建官方 `main` 历史中的提交。
+* iOS 沿用 `APPLE_TEAM_ID`，新增 Apple Distribution 证书、App Store 描述文件和 App Store Connect 团队 API Key；不能拿 macOS Developer ID 证书替代。密钥清单、启用步骤及上传边界见 [TestFlight 签名发布](../TESTFLIGHT.zh.md)。
 
 ---
 

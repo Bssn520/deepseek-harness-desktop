@@ -56,6 +56,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Test iOS signing guards without credentials
+        run: python3 -m unittest discover -s .github/scripts -p 'test_ios_testflight.py' -v
+
       - name: Type check sources before generating declarations
         run: pnpm run typecheck
 

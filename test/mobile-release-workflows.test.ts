@@ -119,6 +119,29 @@ describe('mobile release workflow contracts', () => {
     expect(publish).toContain('gh release upload "$RELEASE_TAG"')
   })
 
+  it('isolates TestFlight signing from unsigned mobile release assets', () => {
+    const job = section(release, 'testflight', 2)
+    expect(job).toContain('github.repository == \'dsh-tauri/deepseek-harness-desktop\'')
+    expect(job).toContain('vars.IOS_TESTFLIGHT_ENABLED == \'true\'')
+    expect(job).toContain('needs.prepare.outputs.should_build == \'true\'')
+    expect(job).toContain('uses: ./.github/workflows/release-testflight.yml')
+    expect(job).toContain(`source_ref: \${{ needs.prepare.outputs.source_ref }}`)
+    const secrets = [
+      'APPLE_TEAM_ID',
+      'IOS_DISTRIBUTION_CERTIFICATE',
+      'IOS_DISTRIBUTION_CERTIFICATE_PASSWORD',
+      'IOS_PROVISIONING_PROFILE',
+      'APP_STORE_CONNECT_API_KEY',
+      'APP_STORE_CONNECT_KEY_ID',
+      'APP_STORE_CONNECT_ISSUER_ID',
+    ]
+    for (const name of secrets)
+      expect(job).toContain(`${name}: \${{ secrets.${name} }}`)
+    expect(section(release, 'publish', 2)).toContain('needs: [prepare, build, build-ios]')
+    expect(section(release, 'publish', 2)).not.toContain('needs.testflight')
+    expect(section(release, 'build-ios', 2)).not.toContain('secrets:')
+  })
+
   it('keeps the native version synchronized with the desktop version', () => {
     expect(JSON.parse(readSource('app.json')).expo.version).toBe(JSON.parse(readSource('package.json')).version)
     expect(bumpConfig.files).toContain('app.json')
