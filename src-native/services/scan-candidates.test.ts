@@ -1,3 +1,4 @@
+import { FetchError } from 'expo/src/winter/fetch/FetchErrors'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { deferredNetwork, jsonResponse } from './bridge.test-utils'
 import { scanCandidates } from './scan-candidates'
@@ -80,6 +81,30 @@ describe('scanCandidates scheduling', () => {
     network.requests[1]!.resolve(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     expect((await pending).map(host => host.id)).toEqual(['http://10.0.0.2:3080'])
     expect(network.maximum()).toBe(1)
+  })
+
+  it('continues past an Expo57 connection refusal and discovers the next LAN DSH', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(FetchError.createFromError(new Error('Failed to connect to /10.0.0.1:3080')))
+      .mockResolvedValueOnce(jsonResponse({ name: 'DeepSeek Harness', short_name: 'DSH' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const caller = new AbortController()
+    const onFound = vi.fn()
+
+    await expect(scanCandidates([
+      { host: '10.0.0.1', port: 3080 },
+      { host: '10.0.0.2', port: 3080 },
+    ], { signal: caller.signal, concurrency: 1, onFound })).resolves.toEqual([
+      { id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080 },
+    ])
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'http://10.0.0.1:3080/manifest.webmanifest',
+      'http://10.0.0.2:3080/manifest.webmanifest',
+    ])
+    expect(onFound).toHaveBeenCalledExactlyOnceWith({ id: 'http://10.0.0.2:3080', url: 'http://10.0.0.2:3080/', host: '10.0.0.2', port: 3080 })
+    expect(caller.signal.aborted).toBe(false)
+    expect(fetchMock.mock.calls.every(([, init]) => init?.signal?.aborted === false)).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('aborts all active requests at the scan budget and returns only prior discoveries', async () => {

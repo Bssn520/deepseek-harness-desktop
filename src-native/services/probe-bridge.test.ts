@@ -1,4 +1,5 @@
 import type { BridgeAddress } from '@/utils/bridge-protocol'
+import { FetchError } from 'expo/src/winter/fetch/FetchErrors'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { deferred, deferredNetwork, jsonResponse } from './bridge.test-utils'
 import { probeBridge } from './probe-bridge'
@@ -77,6 +78,16 @@ describe('probeBridge identity', () => {
   it('handles a rejected network request as an unavailable bridge', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Network unavailable')))
     expect(await probeBridge(address, new AbortController().signal)).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('handles the actual Expo57 FetchError without caller cancellation as an unavailable bridge', async () => {
+    const caller = new AbortController()
+    const error = FetchError.createFromError(new Error('Failed to connect to /10.0.0.1:3080'))
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockRejectedValue(error))
+
+    await expect(probeBridge(address, caller.signal)).resolves.toBeNull()
+    expect(caller.signal.aborted).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
   })
 

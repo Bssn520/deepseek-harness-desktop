@@ -1,4 +1,5 @@
 import type { BridgeAddress } from '@/utils/bridge-protocol'
+import { FetchError } from 'expo/src/winter/fetch/FetchErrors'
 import { getManifest } from '@/apis/index'
 import { PROBE_TIMEOUT_MS } from '@/config/constants'
 
@@ -16,7 +17,7 @@ export async function probeBridge(address: BridgeAddress, signal: AbortSignal, t
     return manifest && !controller.signal.aborted ? address : null
   }
   catch (error) {
-    if (controller.signal.aborted || error instanceof TypeError || error instanceof SyntaxError)
+    if (controller.signal.aborted || error instanceof TypeError || error instanceof SyntaxError || error instanceof FetchError)
       return null
     throw error
   }
