@@ -145,10 +145,10 @@
         "repo": "https://github.com/dsh-tauri-desk/dsh-tauri-plugins/tree/main/packages/dsh-tauri-model"
       },
       {
-        "id": "dsh-tauri-ssh",
-        "spec": "dsh-tauri-ssh",
-        "name": "DSH Tauri SSH",
-        "repo": "https://github.com/dsh-tauri-desk/deepseek-harness-desktop/tree/main/packages/dsh-tauri-ssh"
+        "id": "dsh-tauri-remote",
+        "spec": "dsh-tauri-remote",
+        "name": "DSH Tauri Remote",
+        "repo": "https://github.com/dsh-tauri-desk/deepseek-harness-desktop/tree/main/packages/dsh-tauri-remote"
       },
       {
         "id": "dsh-tauri-notification",
