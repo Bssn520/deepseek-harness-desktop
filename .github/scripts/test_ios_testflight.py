@@ -2,6 +2,8 @@ import copy
 import datetime as dt
 import hashlib
 import importlib.util
+import json
+import plistlib
 import os
 from pathlib import Path
 import random
@@ -126,6 +128,44 @@ class ProfileTests(unittest.TestCase):
         other = hashlib.sha1(b'another-certificate').hexdigest().upper()
         with self.assertRaisesRegex(ValueError, 'exactly one'):
             self.validate(identities={self.identity, other})
+
+
+class VerifyCommandTests(unittest.TestCase):
+    def test_certificate_extraction_prefix_is_attached_to_optional_argument(self):
+        class ExtractionReached(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'export').mkdir()
+            (root / 'export/fixture.ipa').write_bytes(b'fixture')
+            app = root / 'verified/Payload/Fixture.app'
+            app.mkdir(parents=True)
+            (app / 'Info.plist').write_bytes(plistlib.dumps({
+                'CFBundleIdentifier': helper.BUNDLE_ID,
+                'CFBundleShortVersionString': '0.24.0',
+                'CFBundleVersion': '2140.80.1',
+                'CFBundleSupportedPlatforms': ['iPhoneOS'],
+                'CFBundleExecutable': 'Fixture',
+            }))
+            (app / 'Fixture').write_bytes(b'executable')
+            (app / 'main.jsbundle').write_bytes(b'bundle')
+            (app / 'EXConstants.bundle').mkdir()
+            (app / 'EXConstants.bundle/app.config').write_text(json.dumps({
+                'version': '0.24.0',
+                'ios': {'bundleIdentifier': helper.BUNDLE_ID, 'buildNumber': '2140.80.1'},
+                'extra': {'thirdPartyNotices': Path('THIRD_PARTY_NOTICES.md').read_text()},
+            }))
+
+            def external_command(*args):
+                if args[:2] == ('codesign', '-d'):
+                    self.assertEqual(args, ('codesign', '-d', f'--extract-certificates={root / "signed-cert-"}', str(app)))
+                    raise ExtractionReached()
+                self.assertIn(args[0], ('ditto', 'codesign'))
+                return b''
+
+            with patch.dict(os.environ, {'SIGNING_ROOT': str(root), 'IOS_VERSION': '0.24.0', 'BUILD_NUMBER': '2140.80.1'}), patch.object(helper, 'run', side_effect=external_command), self.assertRaises(ExtractionReached):
+                helper.verify()
 
 
 class CleanupTests(unittest.TestCase):

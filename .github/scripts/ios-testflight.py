@@ -143,7 +143,7 @@ def verify():
     require(config['ios']['buildNumber'] == os.environ['BUILD_NUMBER'], 'Embedded Expo build number mismatch')
     require(config['extra']['thirdPartyNotices'] == Path('THIRD_PARTY_NOTICES.md').read_text(), 'Missing third-party notices')
     run('codesign', '--verify', '--deep', '--strict', str(app))
-    run('codesign', '-d', '--extract-certificates', str(root / 'signed-cert-'), str(app))
+    run('codesign', '-d', f'--extract-certificates={root / "signed-cert-"}', str(app))
     leaf_hash = hashlib.sha1((root / 'signed-cert-0').read_bytes()).hexdigest().upper()
     require(leaf_hash == os.environ['SIGNING_IDENTITY'], 'Exported signing certificate mismatch')
     profile = plistlib.loads(run('security', 'cms', '-D', '-i', str(app / 'embedded.mobileprovision')))
