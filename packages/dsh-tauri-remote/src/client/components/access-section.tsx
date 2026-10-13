@@ -120,6 +120,7 @@ export function AccessSection({ t }: AccessSectionProps): ReactElement {
   const token = status.auth.token
   const pairing = status.pairing
   const countdown = pairing === undefined ? '' : countdownOf(pairing.expiresAt, now)
+  const downloading = tunnel.state === 'starting' && tunnel.progress?.stage === 'download'
   const progressPercent = tunnel.progress === undefined ? null : progressPercentOf(tunnel.progress)
 
   async function setExposure(next: boolean): Promise<void> {
@@ -270,10 +271,14 @@ export function AccessSection({ t }: AccessSectionProps): ReactElement {
                   : null}
                 <Row title={t('access.tunnel.state')}>
                   <div className="flex flex-none items-center gap-[8px]" data-testid="access-tunnel-actions">
-                    <span className="inline-flex items-center gap-[6px] text-[12px] leading-[18px] text-secondary" data-testid="access-tunnel-state">
-                      {tunnelKeyOf(tunnel) === 'access.tunnel.state.running' ? <StateDot state="done" size={6} /> : null}
-                      {t(tunnelKeyOf(tunnel))}
-                    </span>
+                    {downloading
+                      ? null
+                      : (
+                          <span className="inline-flex items-center gap-[6px] text-[12px] leading-[18px] text-secondary" data-testid="access-tunnel-state">
+                            {tunnelKeyOf(tunnel) === 'access.tunnel.state.running' ? <StateDot state="done" size={6} /> : null}
+                            {t(tunnelKeyOf(tunnel))}
+                          </span>
+                        )}
                     {dirtyTunnel
                       ? (
                           <>
@@ -291,7 +296,7 @@ export function AccessSection({ t }: AccessSectionProps): ReactElement {
                         )}
                   </div>
                 </Row>
-                {tunnel.progress === undefined || tunnelKeyOf(tunnel) === 'access.tunnel.state.running'
+                {!downloading || tunnel.progress === undefined
                   ? null
                   : (
                       <div className="flex flex-col gap-[6px] pt-[12px] pb-[12px]" data-testid="access-tunnel-progress">

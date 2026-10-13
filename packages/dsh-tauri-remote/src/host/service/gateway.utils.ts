@@ -121,7 +121,9 @@ export function isNavigationRequest(headers: IncomingHttpHeaders): boolean {
  * 元数据缺失且又无 Origin / Referer 可对时一律拒绝。
  * 跨站的文档导航（壳层 iframe、外站链接）一律放行：落地文档的源随即变成入口自身，后续请求都同源。
  */
-export function isCrossSiteRequest(kind: RemoteGatewayEntryKind, headers: IncomingHttpHeaders, publicHost?: string | undefined): boolean {
+export function isCrossSiteRequest(kind: RemoteGatewayEntryKind, headers: IncomingHttpHeaders, publicHost?: string | undefined, allowHeaderless = false): boolean {
+  if (allowHeaderless && headers.origin === undefined && headers.referer === undefined && headers['sec-fetch-site'] === undefined && headers['sec-fetch-mode'] === undefined)
+    return false
   const rewritten = hostRewritten(kind, headers)
   const origin = headerText(headers.origin)
   if (origin !== undefined && origin !== '') {

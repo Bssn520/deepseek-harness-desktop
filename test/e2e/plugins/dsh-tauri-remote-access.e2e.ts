@@ -1,16 +1,3 @@
-/**
- * 批次 · `dsh-tauri-remote` 入站暴露（S4/S5）在真实 `dsh web` 宿主里的路由契约。
- *
- * 复用 globalSetup 的共享宿主（`DSH_E2E_PLUGIN=dsh-tauri-remote`），因此断言的是**打包产物**：
- * 插件从 `src-tauri/resources` 加载，`/access` 的二维码生成必须证明 qrcode 已被构建期内联。
- *
- * 三条边界都在外部世界：HTTP 状态码、真实监听端口上的转发响应、`<DSH_HOME>/remote/access.json`
- * 的落盘形态。每个改状态的用例都在 `finally` 里关掉暴露并清空凭据，绝不把端口与凭据留给后续用例。
- *
- * 隧道只覆盖**参数校验**：quick 模式会真的去下载 cloudflared（网络依赖），进程生命周期由
- * `service/tunnel.test.ts` 用注入的桩进程覆盖，不在共享宿主里起真进程。
- */
-
 import type { Server } from 'node:http'
 import { existsSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -19,7 +6,6 @@ import { afterEach, describe, expect, inject, it } from 'vitest'
 
 const BASE = '/api/tauri/remote'
 const ACCESS = `${BASE}/access`
-const TOKEN = `${ACCESS}/token`
 const TUNNEL = `${ACCESS}/tunnel`
 
 interface AccessStatus {
@@ -28,12 +14,12 @@ interface AccessStatus {
   listening: boolean
   listen: { address: string, port: number }
   port: number
-  auth: { enabled: boolean, scope: string, hasPassword?: boolean, hasToken?: boolean }
+  auth: { enabled: boolean, scope: string, hasToken?: boolean }
   link?: string
   maskLink?: string
   qr?: string
   linkSource?: string
-  generatedPassword?: string
+  pairing?: { code: string, expiresAt: number, usedSeq: number, link?: string, qr?: string }
   tunnel: { enabled: boolean, mode: string, state: string, url?: string, qr?: string, progress?: { stage: string, received?: number, total?: number } }
   localPort?: number
   error?: string
@@ -74,9 +60,8 @@ async function disable(): Promise<AccessStatus> {
   return response.body
 }
 
-/** 每个用例收尾：关暴露、关认证、清密码并把监听地址复位，乱序执行时不把状态留给下一个用例。 */
 afterEach(async () => {
-  await writeAccess({ enabled: false, authEnabled: false, password: null, address: '127.0.0.1' })
+  await writeAccess({ enabled: false, authEnabled: false, address: '127.0.0.1' })
 })
 
 describe('入站暴露路由（真实 dsh 宿主）', () => {
@@ -90,7 +75,8 @@ describe('入站暴露路由（真实 dsh 宿主）', () => {
     expect(status.tunnel.state).toBe('stopped')
     expect(status.tunnel.mode).toBe('quick')
     expect(status.auth.hasToken).toBe(false)
-    expect(status.auth.hasPassword).toBe(false)
+    expect(status.auth).not.toHaveProperty('hasPassword')
+    expect(status).not.toHaveProperty('generatedPassword')
   })
 
   it('开启回环监听：真实端口可转发，localPort 取自宿主 webserver 的实监听端口', async () => {
@@ -104,7 +90,9 @@ describe('入站暴露路由（真实 dsh 宿主）', () => {
     expect(started.body.linkSource).toBe('loopback')
     expect(started.body.qr, '面板需要本地核对用二维码，回环监听也生成').toMatch(/^data:image\/png;base64,/u)
     expect(started.body.auth.enabled, '开启暴露即自动带认证').toBe(true)
-    expect(started.body.auth.hasPassword, '没有凭据时自动生成密码').toBe(true)
+    expect(started.body.pairing?.code).toMatch(/^[2-9A-HJ-NP-Z]{8}$/u)
+    expect(started.body.auth).not.toHaveProperty('hasPassword')
+    expect(started.body).not.toHaveProperty('generatedPassword')
 
     const proxied = await fetch(`http://127.0.0.1:${port}/`)
     expect(proxied.status).toBe(200)
@@ -115,29 +103,51 @@ describe('入站暴露路由（真实 dsh 宿主）', () => {
     expect(stopped.link).toBeUndefined()
   }, 60_000)
 
-  it('链接 Token 可签发与作废，链接与二维码只在有 Token 时带 auth 参数', async () => {
+  it('配对码换会话后立即轮换，旧码不可重放且既有会话仍可访问', async () => {
     const port = await freePort()
-    await writeAccess({ enabled: true, address: '0.0.0.0', port, authEnabled: true, password: 'e2e-access-pass', scope: 'public_only' })
-    try {
-      const issued = await fetch(url(TOKEN), { method: 'POST', headers: apiHeaders() })
-      expect(issued.status).toBe(200)
-      const withToken = await issued.json() as AccessStatus
-      expect(withToken.auth.hasToken).toBe(true)
-      expect(withToken.auth.hasPassword).toBe(true)
-      expect(withToken.link).toMatch(/\?auth=/u)
-      expect(withToken.qr, '非回环监听给出二维码，证明打包产物里的二维码编码可用').toMatch(/^data:image\/png;base64,/u)
-      expect(withToken.maskLink).toContain('?auth=***')
-
-      const revoked = await fetch(url(TOKEN), { method: 'DELETE', headers: apiHeaders() })
-      expect(revoked.status).toBe(200)
-      const withoutToken = await revoked.json() as AccessStatus
-      expect(withoutToken.auth.hasToken).toBe(false)
-      expect(withoutToken.link).not.toContain('?auth=')
-    }
-    finally {
-      await disable()
-    }
+    const started = await writeAccess({ enabled: true, address: '0.0.0.0', port, authEnabled: true, scope: 'all' })
+    expect(started.status).toBe(200)
+    const pairing = started.body.pairing
+    expect(pairing?.link).toContain(`?auth=${pairing?.code}`)
+    expect(pairing?.qr).toMatch(/^data:image\/png;base64,/u)
+    const origin = `http://127.0.0.1:${started.body.port}`
+    const source = { 'x-dsh-remote-source': 'public', 'accept': 'application/json' }
+    const challenge = await fetch(`${origin}/`, { headers: { ...source, accept: 'text/html' } })
+    expect(challenge.status).toBe(401)
+    const html = await challenge.text()
+    expect(html).toContain('<form id="loginForm" method="post">')
+    expect(html).toContain('name="code"')
+    expect(html).not.toContain('name="password"')
+    const exchanged = await fetch(`${origin}/?auth=${pairing?.code}`, { headers: source, redirect: 'manual' })
+    expect(exchanged.status).toBe(302)
+    expect(exchanged.headers.get('location')).toBe('/')
+    const cookie = exchanged.headers.getSetCookie().map(value => value.split(';')[0] ?? '').find(value => value.startsWith('dsh_remote_session='))
+    expect(cookie).toBeTruthy()
+    const next = await readAccess()
+    expect(next.pairing?.usedSeq).toBe((pairing?.usedSeq ?? 0) + 1)
+    expect(next.pairing?.code).not.toBe(pairing?.code)
+    expect((await fetch(`${origin}/?auth=${pairing?.code}`, { headers: source, redirect: 'manual' })).status).toBe(401)
+    expect((await fetch(`${origin}/`, { headers: { ...source, cookie: cookie ?? '' } })).status).toBe(200)
   }, 60_000)
+
+  it('原生健康检查无需会话，只有 manifest 可匿名读取且不消费配对码', async () => {
+    const port = await freePort()
+    const started = await writeAccess({ enabled: true, address: '127.0.0.1', port, authEnabled: true, scope: 'all' })
+    expect(started.status).toBe(200)
+    const origin = `http://127.0.0.1:${port}`
+    const headers = { 'x-dsh-remote-source': 'public', 'accept': 'application/json' }
+    const manifest = await fetch(`${origin}/manifest.webmanifest`, { headers })
+    expect(manifest.status).toBe(200)
+    expect(await manifest.json()).toMatchObject({ name: 'DeepSeek Harness', short_name: 'DSH' })
+    expect(manifest.headers.get('set-cookie')).toBeNull()
+    const head = await fetch(`${origin}/manifest.webmanifest?auth=${started.body.pairing?.code}`, { method: 'HEAD', headers })
+    expect(head.status).toBe(200)
+    expect(await head.text()).toBe('')
+    expect((await readAccess()).pairing).toEqual(started.body.pairing)
+    expect((await fetch(`${origin}/`, { headers })).status).toBe(401)
+    expect((await fetch(`${origin}${ACCESS}`, { headers })).status).toBe(401)
+    expect((await fetch(`${origin}/manifest.webmanifest`, { headers: { ...headers, origin: 'https://evil.example' } })).status).toBe(403)
+  })
 
   it('隧道参数校验：具名模式缺凭据或主机名时 400，且不落盘', async () => {
     const missingCredential = await fetch(url(TUNNEL), { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ mode: 'token' }) })

@@ -1,5 +1,5 @@
 import type { WireCall, WireReply } from '../test-utils/client-mock'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { store } from '../store/index'
 import { answer, replies, resetWire, sent } from '../test-utils/client-mock'
 import * as service from './access'
@@ -9,7 +9,7 @@ vi.mock('dsh-tauri/client', async () => (await import('../test-utils/client-mock
 const BASE = '/api/tauri/remote/access'
 
 let queued: WireReply[] = []
-let route: (call: WireCall) => WireReply = () => replies.ok({})
+let route: (call: WireCall) => WireReply | Promise<WireReply> = () => replies.ok({})
 
 function once(...next: WireReply[]): void {
   queued.push(...next)
@@ -22,6 +22,14 @@ beforeEach(() => {
   route = () => replies.ok({})
   answer(call => queued.shift() ?? route(call))
 })
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+const DOWNLOADING = { enabled: true, tunnel: { enabled: true, mode: 'quick', state: 'starting', progress: { stage: 'download', received: 1, total: 2 } } }
+
+const RUNNING = { enabled: true, tunnel: { enabled: true, mode: 'quick', state: 'running' } }
 
 describe('接入面板数据层', () => {
   it('回包缺字段时按默认值收敛，绝不抛错', async () => {
@@ -80,12 +88,108 @@ describe('接入面板数据层', () => {
   })
 
   it('变更失败时保留错误文案并复位 busy', async () => {
-    once(replies.ok({}), replies.fail('访问密码太短', 400))
+    once(replies.ok({}), replies.fail('监听地址不可用', 400))
     await service.load()
-    const result = await service.apply({ password: 'x' })
-    expect(result.ok).toBe(false)
-    expect(result.error).toContain('访问密码太短')
+    const result = await service.apply({ address: 'missing' })
+    expect(result).toEqual({ ok: false, error: '请求失败 (400): 监听地址不可用' })
     expect(store.access.status).toBe('error')
+    expect(store.access.busy).toBe(false)
+  })
+
+  it('旧回包的访问密码字段被丢弃，配对码和永久码不受影响', async () => {
+    route = () => replies.ok({
+      auth: { enabled: true, scope: 'all', hasPassword: true, hasToken: true, token: '01234567' },
+      generatedPassword: 'legacy-secret',
+      pairing: { code: 'AB23CD45', expiresAt: 300000 },
+    })
+    await service.load()
+
+    expect(store.access.snapshot?.auth).toEqual({ enabled: true, scope: 'all', hasToken: true, token: '01234567' })
+    expect(store.access.snapshot).not.toHaveProperty('generatedPassword')
+    expect(store.access.snapshot?.pairing).toEqual({ code: 'AB23CD45', expiresAt: 300000 })
+  })
+
+  it('get 乱序返回时旧 stopped 快照不能覆盖已提交的下载进度', async () => {
+    const older = Promise.withResolvers<WireReply>()
+    const newer = Promise.withResolvers<WireReply>()
+    let reads = 0
+    route = () => (++reads === 1 ? older.promise : newer.promise)
+    const first = service.refresh()
+    const second = service.refresh()
+    newer.resolve(replies.ok(DOWNLOADING))
+    await second
+    expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+    older.resolve(replies.ok({}))
+    await first
+    expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+  })
+
+  it('get 乱序失败时不抹掉较新进度或新增旧错误', async () => {
+    const older = Promise.withResolvers<WireReply>()
+    const newer = Promise.withResolvers<WireReply>()
+    let reads = 0
+    route = () => (++reads === 1 ? older.promise : newer.promise)
+    const first = service.refresh()
+    const second = service.refresh()
+    newer.resolve(replies.ok(DOWNLOADING))
+    await second
+    older.resolve(replies.fail('stale failure'))
+    await first
+    expect(store.access.status).toBe('ready')
+    expect(store.access.error).toBeNull()
+    expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+  })
+
+  it('长启动回包较旧时保留期间轮询进度并释放 busy', async () => {
+    const mutation = Promise.withResolvers<WireReply>()
+    route = call => call.http === 'POST' ? mutation.promise : replies.ok(DOWNLOADING)
+    const pending = service.startTunnel({ mode: 'quick' })
+    await service.refresh()
+    expect(store.access.busy).toBe(true)
+    expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+
+    mutation.resolve(replies.ok({}))
+    await expect(pending).resolves.toEqual({ ok: true })
+    expect(store.access.snapshot?.tunnel.progress).toEqual({ stage: 'download', received: 1, total: 2 })
+    expect(store.access.busy).toBe(false)
+  })
+
+  it('长启动完成后读取权威最终状态，不停留于期间的下载进度', async () => {
+    const mutation = Promise.withResolvers<WireReply>()
+    let current: unknown = DOWNLOADING
+    route = call => call.http === 'POST' ? mutation.promise : replies.ok(current)
+    const pending = service.startTunnel({ mode: 'quick' })
+    await service.refresh()
+    expect(store.access.snapshot?.tunnel.state).toBe('starting')
+    current = RUNNING
+    mutation.resolve(replies.ok(RUNNING))
+    await pending
+    expect(store.access.snapshot?.tunnel.state).toBe('running')
+    expect(store.access.busy).toBe(false)
+  })
+
+  it('启动完成后迟到的 GET 不能覆盖动作最终快照', async () => {
+    const mutation = Promise.withResolvers<WireReply>()
+    const poll = Promise.withResolvers<WireReply>()
+    route = call => call.http === 'POST' ? mutation.promise : poll.promise
+    const pending = service.startTunnel({ mode: 'quick' })
+    const reading = service.refresh()
+    mutation.resolve(replies.ok(RUNNING))
+    await pending
+    expect(store.access.snapshot?.tunnel.state).toBe('running')
+    poll.resolve(replies.ok(DOWNLOADING))
+    await reading
+    expect(store.access.snapshot?.tunnel.state).toBe('running')
+  })
+
+  it('动作失败仍保留自身错误，期间 polling 不遮蔽失败且 busy 复位', async () => {
+    const mutation = Promise.withResolvers<WireReply>()
+    route = call => call.http === 'POST' ? mutation.promise : replies.ok(DOWNLOADING)
+    const pending = service.startTunnel({ mode: 'quick' })
+    await service.refresh()
+    mutation.resolve(replies.fail('download denied'))
+    await expect(pending).resolves.toEqual({ ok: false, error: '请求失败 (400): download denied' })
+    expect(store.access.error).toBe('请求失败 (400): download denied')
     expect(store.access.busy).toBe(false)
   })
 

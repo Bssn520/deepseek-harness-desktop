@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'pathe'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { verifyPassword } from '../utils/auth'
 import { ACCESS_DOCUMENT_VERSION, addressProblemOf, buildLink, DEFAULT_ACCESS_ADDRESS, DEFAULT_ACCESS_PORT, defaultAccessDocument, enumerateAddresses, isReachableAddress, isSelectableAddress, linkHostOf, maskLinkOf, pairingLinksOf, parseAccessDocument, patchAccessDocument, policyOf, rankAddresses, readAccessDocument, redactStatus, serializeAccessDocument, writeAccessDocument } from './access.utils'
 
 const homes: string[] = []
@@ -64,7 +63,7 @@ function statusFixture(): RemoteAccessStatus {
     listening: true,
     listen: { address: '192.168.1.5', port: 3088 },
     port: 3089,
-    auth: { enabled: true, scope: 'public_only', hasPassword: true, hasToken: true },
+    auth: { enabled: true, scope: 'public_only', hasToken: true },
     addresses: [entry('192.168.1.5', { recommended: true })],
     recommended: '192.168.1.5',
     link: 'http://192.168.1.5:3089/?auth=secret-token',
@@ -90,6 +89,15 @@ function statusFixture(): RemoteAccessStatus {
 }
 
 describe('parseAccessDocument', () => {
+  it('已删除的访问密码按未知键丢弃，不进入认证配置或再次落盘', () => {
+    const parsed = parseAccessDocument(JSON.stringify({
+      auth: { enabled: true, password: { algo: 'pbkdf2-sha256', salt: 'c2FsdA==', iterations: 1000, hash: 'aGFzaA==' }, token: 'keep-token', scope: 'all' },
+    }))
+    expect(parsed.document.auth).toEqual({ enabled: true, token: 'keep-token', scope: 'all' })
+    expect(parsed.warnings).toEqual(['access.json 丢弃未知键 auth.password'])
+    expect(serializeAccessDocument(parsed.document)).not.toContain('password')
+  })
+
   it('文件缺失或全为空白时回落默认文档且不算损坏', () => {
     const missing = parseAccessDocument(undefined)
     expect(missing.document).toEqual(defaultAccessDocument())
@@ -115,7 +123,7 @@ describe('parseAccessDocument', () => {
   })
 
   it('丢弃 listen / auth 段里的未知键并告警', () => {
-    const parsed = parseAccessDocument(JSON.stringify({ listen: { address: '10.0.0.2', port: 4000, extra: true }, auth: { enabled: true, password: null, token: null, scope: 'all', extra: 1 } }))
+    const parsed = parseAccessDocument(JSON.stringify({ listen: { address: '10.0.0.2', port: 4000, extra: true }, auth: { enabled: true, token: null, scope: 'all', extra: 1 } }))
     expect(parsed.warnings).toEqual(['access.json 丢弃未知键 listen.extra', 'access.json 丢弃未知键 auth.extra'])
     expect(parsed.document.auth.scope).toBe('all')
   })
@@ -133,7 +141,7 @@ describe('parseAccessDocument', () => {
     const parsed = parseAccessDocument('{}')
     expect(parsed.document.listen.address).toBe(DEFAULT_ACCESS_ADDRESS)
     expect(parsed.document.listen.port).toBe(DEFAULT_ACCESS_PORT)
-    expect(parsed.document.auth).toEqual({ enabled: false, password: null, token: null, scope: 'public_only' })
+    expect(parsed.document.auth).toEqual({ enabled: false, token: null, scope: 'public_only' })
   })
 
   it('非法 listen.port 与 listen.address 各自回落并告警', () => {
@@ -165,19 +173,6 @@ describe('parseAccessDocument', () => {
     expect(parsed.warnings).toEqual(['access.json 的 tunnel 非法，已回落默认'])
   })
 
-  it('形态合法但不可用的密码记录原样保留，供网关判定「认证存储损坏」', () => {
-    const password = { algo: 'pbkdf2-sha256', salt: 'not-base64!!', iterations: 600000, hash: 'short' }
-    const parsed = parseAccessDocument(JSON.stringify({ auth: { enabled: true, password } }))
-    expect(parsed.document.auth.password).toEqual(password)
-    expect(parsed.warnings).toEqual([])
-  })
-
-  it('形态非法的密码记录丢弃并告警', () => {
-    const parsed = parseAccessDocument(JSON.stringify({ auth: { password: { algo: 'sha1', salt: 'x', iterations: 1, hash: 'y' } } }))
-    expect(parsed.document.auth.password).toBeNull()
-    expect(parsed.warnings).toEqual(['access.json 的 auth.password 非法，已丢弃'])
-  })
-
   it('序列化结果可被原样解析回来', () => {
     const document = { ...defaultAccessDocument(), enabled: true, listen: { address: '10.0.0.2', port: 4000 } }
     expect(serializeAccessDocument(document).endsWith('\n')).toBe(true)
@@ -186,15 +181,15 @@ describe('parseAccessDocument', () => {
 })
 
 describe('readAccessDocument / writeAccessDocument', () => {
-  it('落盘为 0600 文件与 0700 目录，且不残留临时文件', () => {
+  it('按平台文件模式落盘，POSIX 限制为 0600 / 0700，且不残留临时文件', () => {
     writeAccessDocument({ ...defaultAccessDocument(), enabled: true })
-    expect(statSync(accessFile()).mode & 0o777).toBe(0o600)
-    expect(statSync(dirname(accessFile())).mode & 0o777).toBe(0o700)
+    expect(statSync(accessFile()).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o600)
+    expect(statSync(dirname(accessFile())).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o700)
     expect(readdirSync(dirname(accessFile()))).toEqual(['access.json'])
   })
 
   it('写入后读回同一份文档', () => {
-    const document = { ...defaultAccessDocument(), enabled: true, listen: { address: '192.168.1.5', port: 4100 }, auth: { enabled: true, password: null, token: 'tok', scope: 'all' as const } }
+    const document = { ...defaultAccessDocument(), enabled: true, listen: { address: '192.168.1.5', port: 4100 }, auth: { enabled: true, token: 'tok', scope: 'all' as const } }
     writeAccessDocument(document)
     expect(readAccessDocument().document).toEqual(document)
   })
@@ -328,28 +323,12 @@ describe('buildLink / maskLinkOf', () => {
 })
 
 describe('patchAccessDocument', () => {
-  it('password: null 清除已设密码，字符串则写入新哈希', () => {
-    const document = { ...defaultAccessDocument(), auth: { enabled: true, password: { algo: 'pbkdf2-sha256' as const, salt: 's', iterations: 1, hash: 'h' }, token: null, scope: 'public_only' as const } }
-    expect(patchAccessDocument(document, { password: null }, []).auth.password).toBeNull()
-    const written = patchAccessDocument(document, { password: 'next-pass' }, []).auth.password
-    expect(written?.algo).toBe('pbkdf2-sha256')
-    expect(written?.hash).not.toBe('h')
-  })
-
-  it('缺省字段保持原值，password 为只写字段', () => {
-    const document = { ...defaultAccessDocument(), enabled: true, auth: { enabled: true, password: null, token: 'keep', scope: 'all' as const } }
+  it('缺省字段保持原值', () => {
+    const document = { ...defaultAccessDocument(), enabled: true, auth: { enabled: true, token: 'keep', scope: 'all' as const } }
     const next = patchAccessDocument(document, { port: 4100 }, [entry('10.1.2.3')])
     expect(next.enabled).toBe(true)
     expect(next.listen).toEqual({ address: DEFAULT_ACCESS_ADDRESS, port: 4100 })
-    expect(next.auth).toEqual({ enabled: true, password: null, token: 'keep', scope: 'all' })
-  })
-
-  it('提交密码时只存哈希且可被校验通过', () => {
-    const next = patchAccessDocument(defaultAccessDocument(), { password: 'hunter2' }, [])
-    expect(next.auth.password?.algo).toBe('pbkdf2-sha256')
-    expect(next.auth.password?.hash).not.toContain('hunter2')
-    expect(verifyPassword('hunter2', next.auth.password)).toBe(true)
-    expect(verifyPassword('hunter3', next.auth.password)).toBe(false)
+    expect(next.auth).toEqual({ enabled: true, token: 'keep', scope: 'all' })
   })
 
   it('非法端口、作用域与开关类型一律抛错', () => {
@@ -357,7 +336,6 @@ describe('patchAccessDocument', () => {
     expect(() => patchAccessDocument(defaultAccessDocument(), { port: 65536 }, [])).toThrowError('invalid port')
     expect(() => patchAccessDocument(defaultAccessDocument(), { scope: 'lan_only' as never }, [])).toThrowError('invalid scope')
     expect(() => patchAccessDocument(defaultAccessDocument(), { enabled: 'yes' as never }, [])).toThrowError('invalid enabled')
-    expect(() => patchAccessDocument(defaultAccessDocument(), { password: '' }, [])).toThrowError('invalid password')
   })
 
   it('地址必须是当前存在的网卡、通配或回环之一', () => {
@@ -376,7 +354,7 @@ describe('redactStatus', () => {
     expect(redacted.link).toBeUndefined()
     expect(redacted.qr).toBeUndefined()
     expect(redacted.localPort).toBeUndefined()
-    expect(redacted.auth).toEqual({ enabled: true, scope: 'public_only', hasPassword: true, hasToken: true })
+    expect(redacted.auth).toEqual({ enabled: true, scope: 'public_only', hasToken: true })
     expect(redacted.maskLink).toBe('http://192.168.1.5:3089/?auth=***')
     expect(redacted.listen).toEqual({ address: '192.168.1.5', port: 3088 })
     expect(redacted.port).toBe(3089)
@@ -421,7 +399,7 @@ describe('pairingLinksOf', () => {
 
 describe('policyOf', () => {
   it('把文档映射为网关认证快照', () => {
-    const document = { ...defaultAccessDocument(), auth: { enabled: true, password: null, token: 'tok', scope: 'all' as const } }
-    expect(policyOf(document, 'secret')).toEqual({ enabled: true, scope: 'all', password: null, linkToken: 'tok', sessionSecret: 'secret' })
+    const document = { ...defaultAccessDocument(), auth: { enabled: true, token: 'tok', scope: 'all' as const } }
+    expect(policyOf(document, 'secret')).toEqual({ enabled: true, scope: 'all', linkToken: 'tok', sessionSecret: 'secret' })
   })
 })

@@ -1,4 +1,4 @@
-import type { RemoteAuthScope, RemotePasswordRecord, RemoteTunnelConfig, RemoteTunnelStatus } from '../types/index'
+import type { RemoteAuthScope, RemoteTunnelConfig, RemoteTunnelStatus } from '../types/index'
 
 export interface RemoteAccessListen {
   address: string
@@ -7,7 +7,6 @@ export interface RemoteAccessListen {
 
 export interface RemoteAccessAuthDocument {
   enabled: boolean
-  password: RemotePasswordRecord | null
   token: string | null
   scope: RemoteAuthScope
 }
@@ -20,14 +19,12 @@ export interface RemoteAccessDocument {
   tunnel: RemoteTunnelConfig
 }
 
-/** `POST /access` 请求体：字段缺省表示保持原值（`password` 只写，`null` 表示清除已设密码）。 */
 export interface RemoteAccessBody {
   enabled?: boolean
   address?: string
   port?: number
   authEnabled?: boolean
   scope?: RemoteAuthScope
-  password?: string | null
 }
 
 export type RemoteLinkSource = 'loopback' | 'lan'
@@ -78,7 +75,7 @@ export interface RemoteAccessStatus {
   listen: RemoteAccessListen
   /** 真实监听端口；未监听时为 0。 */
   port: number
-  auth: { enabled: boolean, scope: RemoteAuthScope, hasPassword?: boolean, hasToken?: boolean, token?: string }
+  auth: { enabled: boolean, scope: RemoteAuthScope, hasToken?: boolean, token?: string }
   addresses: RemoteAccessAddress[]
   recommended?: string
   /** 完整链接（含链接 Token）；仅回环来源可见。 */
@@ -91,8 +88,6 @@ export interface RemoteAccessStatus {
   linkSource?: RemoteLinkSource
   /** 临时配对码与其分享链接/二维码；仅回环来源可见。 */
   pairing?: RemoteAccessPairing
-  /** 本次请求刚自动生成的访问密码明文：只在响应里出现一次，不落盘、不进事件环。 */
-  generatedPassword?: string
   /** 公网隧道读面：配置 + 运行期状态（完整分支才带 Token 与链接二维码）。 */
   tunnel?: RemoteTunnelStatus
   localPort?: number

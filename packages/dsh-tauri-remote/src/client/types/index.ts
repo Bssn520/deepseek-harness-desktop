@@ -177,7 +177,7 @@ export interface AccessStatus {
   listening: boolean
   listen: { address: string, port: number }
   port: number
-  auth: { enabled: boolean, scope: AccessScope, hasPassword?: boolean, hasToken?: boolean, token?: string }
+  auth: { enabled: boolean, scope: AccessScope, hasToken?: boolean, token?: string }
   addresses: readonly AccessAddress[]
   recommended?: string
   link?: string
@@ -185,7 +185,6 @@ export interface AccessStatus {
   qr?: string
   linkSource?: AccessLinkSource
   pairing?: AccessPairing
-  generatedPassword?: string
   tunnel: AccessTunnel
   localPort?: number
   error?: string
@@ -199,8 +198,6 @@ export interface AccessBody {
   port?: number
   authEnabled?: boolean
   scope?: AccessScope
-  /** `null` 表示清除已设密码。 */
-  password?: string | null
 }
 
 export interface TunnelBody {

@@ -72,7 +72,6 @@ export const tunnel = defineService({
     }
   },
 
-  /** 纯校验：不合法的入参在改动认证状态之前就抛错，避免「启动失败却已经生成密码」。 */
   assertStartable(mode: RemoteTunnelMode, token?: string, hostname?: string): void {
     tunnelConfigOf(mode, token, hostname)
   },
@@ -316,7 +315,10 @@ function onLine(mode: RemoteTunnelMode, line: string, generation: number): void 
   }
   catch (error) {
     // access.json 损坏时写入会抛错：这里必须自己兜住，否则异常从子进程日志回调里冒出去。
-    void fail(`已拿到隧道域名但无法落盘：${messageOf(error)}`)
+    void enqueue(async () => {
+      if (generation === activation)
+        await fail(`已拿到隧道域名但无法落盘：${messageOf(error)}`)
+    })
     return
   }
   void ready(found)
@@ -333,7 +335,10 @@ function onExit(code: number | null, signal: NodeJS.Signals | null, generation: 
   url = undefined
   failure = `cloudflared 已退出（${signal ?? code ?? '未知原因'}）`
   note('state', failure)
-  void gateway.stop(ENTRY_ID)
+  void enqueue(async () => {
+    if (generation === activation)
+      await gateway.stop(ENTRY_ID)
+  })
 }
 
 function hostOf(value: string): string | null {

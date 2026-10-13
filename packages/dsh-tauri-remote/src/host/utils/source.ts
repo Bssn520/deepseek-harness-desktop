@@ -3,7 +3,6 @@ import type { RemoteAccessDecision, RemoteAuthPolicy, RemoteSourceClass } from '
 import { Buffer } from 'node:buffer'
 import { timingSafeEqual } from 'node:crypto'
 import { GATEWAY_SESSION_HEADER, GATEWAY_SOURCE_HEADER } from '../config/constants'
-import { isPasswordRecordUsable } from './auth'
 
 export type PeerSourceClass = Exclude<RemoteSourceClass, 'tunnel'>
 
@@ -42,16 +41,8 @@ export function isLoopbackSource(headers: IncomingHttpHeaders, peerAddress: stri
   return classifySource(headers, peerAddress, session) === 'loopback'
 }
 
-/** 认证配置是否成立：启用且至少存在一种**可用**凭据（未损坏的密码记录或非空链接 Token），否则等同未配置（S2 §7.4/§11）。 */
 export function isAuthConfigured(policy: RemoteAuthPolicy | undefined): policy is RemoteAuthPolicy {
-  if (policy === undefined || !policy.enabled)
-    return false
-  return isPasswordRecordUsable(policy.password) || (policy.linkToken !== null && policy.linkToken !== '')
-}
-
-/** 凭据存在但不可用（密码记录损坏且无链接 Token）→ 引导「重新设置密码」而不是空白的未配置拒绝（S2 §11）。 */
-export function isAuthStorageBroken(policy: RemoteAuthPolicy | undefined): boolean {
-  return policy !== undefined && policy.enabled && policy.password !== null && !isAuthConfigured(policy)
+  return policy?.enabled === true && ((typeof policy.linkToken === 'string' && policy.linkToken !== '') || (typeof policy.pairingCode === 'string' && policy.pairingCode !== ''))
 }
 
 /** 判定矩阵（S2 §7.2）：回环恒放行，不提供 lan_only 档位。 */

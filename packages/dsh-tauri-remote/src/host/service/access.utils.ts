@@ -1,12 +1,11 @@
 import type { NetworkInterfaceInfo } from 'node:os'
-import type { RemoteAuthPolicy, RemoteAuthScope, RemotePasswordRecord, RemoteTunnelStatus } from '../types/index'
+import type { RemoteAuthPolicy, RemoteAuthScope, RemoteTunnelStatus } from '../types/index'
 import type { RemoteAccessAddress, RemoteAccessBody, RemoteAccessDocument, RemoteAccessParse, RemoteAccessStatus, RemoteAddressFamily, RemoteAddressScope } from './access.types'
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { networkInterfaces } from 'node:os'
 import { dirname } from 'pathe'
 import { accessDocumentPath } from '../config/runtime'
-import { hashPassword } from '../utils/auth'
 import { classifyPeer } from '../utils/source'
 
 export const ACCESS_DOCUMENT_VERSION = 1
@@ -19,7 +18,7 @@ const DOCUMENT_KEYS = new Set(['version', 'enabled', 'listen', 'auth', 'tunnel']
 
 const LISTEN_KEYS = new Set(['address', 'port'])
 
-const AUTH_KEYS = new Set(['enabled', 'password', 'token', 'scope'])
+const AUTH_KEYS = new Set(['enabled', 'token', 'scope'])
 
 const TUNNEL_KEYS = new Set(['enabled', 'mode', 'token', 'hostname'])
 
@@ -43,7 +42,7 @@ export function defaultAccessDocument(): RemoteAccessDocument {
     version: ACCESS_DOCUMENT_VERSION,
     enabled: false,
     listen: { address: DEFAULT_ACCESS_ADDRESS, port: DEFAULT_ACCESS_PORT },
-    auth: { enabled: false, password: null, token: null, scope: 'public_only' },
+    auth: { enabled: false, token: null, scope: 'public_only' },
     tunnel: { enabled: false, mode: 'quick', token: null, hostname: null },
   }
 }
@@ -128,14 +127,6 @@ export function patchAccessDocument(document: RemoteAccessDocument, body: Remote
       throw new TypeError('invalid scope')
     next.auth.scope = body.scope
   }
-  if (body.password === null) {
-    next.auth.password = null
-  }
-  else if (body.password !== undefined) {
-    if (typeof body.password !== 'string' || body.password === '')
-      throw new TypeError('invalid password')
-    next.auth.password = hashPassword(body.password)
-  }
   return next
 }
 
@@ -149,7 +140,6 @@ export function policyOf(document: RemoteAccessDocument, sessionSecret: string):
   return {
     enabled: document.auth.enabled,
     scope: document.auth.scope,
-    password: document.auth.password,
     linkToken: document.auth.token,
     sessionSecret,
   }
@@ -250,7 +240,6 @@ export function redactStatus(status: RemoteAccessStatus): RemoteAccessStatus {
     auth: {
       enabled: status.auth.enabled,
       scope: status.auth.scope,
-      ...status.auth.hasPassword === undefined ? {} : { hasPassword: status.auth.hasPassword },
       ...status.auth.hasToken === undefined ? {} : { hasToken: status.auth.hasToken },
     },
     addresses: status.addresses,
@@ -333,13 +322,6 @@ function readAuth(value: unknown, document: RemoteAccessDocument, warnings: stri
     document.auth.scope = value.scope
   else if (value.scope !== undefined)
     warnings.push('access.json 的 auth.scope 非法，已回落 public_only')
-  if (value.password !== null && value.password !== undefined) {
-    const record = passwordRecordOf(value.password)
-    if (record === undefined)
-      warnings.push('access.json 的 auth.password 非法，已丢弃')
-    else
-      document.auth.password = record
-  }
   if (typeof value.token === 'string' && value.token !== '')
     document.auth.token = value.token
   else if (value.token !== undefined && value.token !== null)
@@ -373,18 +355,6 @@ function readTunnel(value: unknown, document: RemoteAccessDocument, warnings: st
     document.tunnel.hostname = value.hostname
   else if (value.hostname !== undefined && value.hostname !== null)
     warnings.push('access.json 的 tunnel.hostname 非法，已丢弃')
-}
-
-/** 只校验形态、不校验可用性：损坏的记录必须原样保留，才能让 S2 的「认证存储损坏」引导生效（S2 §11）。 */
-function passwordRecordOf(value: unknown): RemotePasswordRecord | undefined {
-  if (!isPlainObject(value))
-    return undefined
-  const iterations = value.iterations
-  if (value.algo !== 'pbkdf2-sha256' || typeof value.salt !== 'string' || typeof value.hash !== 'string')
-    return undefined
-  if (typeof iterations !== 'number' || !Number.isInteger(iterations) || iterations <= 0)
-    return undefined
-  return { algo: 'pbkdf2-sha256', salt: value.salt, iterations, hash: value.hash }
 }
 
 function plainObjectOf(text: string): Record<string, unknown> | undefined {

@@ -29,6 +29,7 @@ vi.mock('@/store', () => ({ store }))
 vi.mock('valtio-define', () => ({ useStore: (value: unknown) => value }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'macos' }))
 vi.mock('@tanstack/react-query', () => ({
+  useMutation: () => ({ mutate: vi.fn(), isPending: false }),
   useQuery: () => ({ data: [] }),
   useQueryClient: () => ({ ensureQueryData: () => Promise.resolve('dsh-tauri') }),
 }))

@@ -1,17 +1,13 @@
 import type { IncomingHttpHeaders } from 'node:http'
-import type { RemoteAccessDecision, RemoteAuthPolicy, RemotePasswordRecord, RemoteSourceClass } from '../types/index'
+import type { RemoteAccessDecision, RemoteAuthPolicy, RemoteSourceClass } from '../types/index'
 import { describe, expect, it } from 'vitest'
-import { classifyPeer, classifySource, decideSourceAccess, isAuthConfigured, isAuthStorageBroken, isIpAddress, isLoopbackPeer, isLoopbackSource, rateLimitKeyOf } from './source'
+import { classifyPeer, classifySource, decideSourceAccess, isAuthConfigured, isIpAddress, isLoopbackPeer, isLoopbackSource, rateLimitKeyOf } from './source'
 
 const SESSION = 'session-token'
 
-const PASSWORD: RemotePasswordRecord = { algo: 'pbkdf2-sha256', salt: 'c2FsdA==', iterations: 1, hash: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=' }
-
-const CORRUPT_PASSWORD: RemotePasswordRecord = { ...PASSWORD, hash: 'aGFzaA==' }
-
 const NO_AUTH: undefined = undefined
 
-const PUBLIC_ONLY: RemoteAuthPolicy = { enabled: true, scope: 'public_only', password: PASSWORD, linkToken: null, sessionSecret: SESSION }
+const PUBLIC_ONLY: RemoteAuthPolicy = { enabled: true, scope: 'public_only', linkToken: 'AB23CD45', sessionSecret: SESSION }
 
 const ALL_SOURCES: RemoteAuthPolicy = { ...PUBLIC_ONLY, scope: 'all' }
 
@@ -154,29 +150,28 @@ describe('isLoopbackSource', () => {
 })
 
 describe('isAuthConfigured', () => {
+  it('treats an enabled pairing-only policy as configured', () => {
+    const pairingOnly: RemoteAuthPolicy = { ...PUBLIC_ONLY, linkToken: null, pairingCode: 'AB23CD45' }
+    expect(isAuthConfigured(pairingOnly)).toBe(true)
+    expect(isAuthConfigured({ ...pairingOnly, enabled: false })).toBe(false)
+    expect(decideSourceAccess('public', pairingOnly)).toBe('authenticate')
+    expect(decideSourceAccess('tunnel', pairingOnly)).toBe('authenticate')
+    expect(decideSourceAccess('private', pairingOnly)).toBe('allow')
+    expect(decideSourceAccess('private', { ...pairingOnly, scope: 'all' })).toBe('authenticate')
+  })
+
   it('requires the switch plus at least one credential', () => {
     expect(isAuthConfigured(NO_AUTH)).toBe(false)
     expect(isAuthConfigured({ ...PUBLIC_ONLY, enabled: false })).toBe(false)
-    expect(isAuthConfigured({ ...PUBLIC_ONLY, password: null, linkToken: null })).toBe(false)
-    expect(isAuthConfigured({ ...PUBLIC_ONLY, password: null, linkToken: '' })).toBe(false)
+    expect(isAuthConfigured({ ...PUBLIC_ONLY, linkToken: null })).toBe(false)
+    expect(isAuthConfigured({ ...PUBLIC_ONLY, linkToken: '' })).toBe(false)
     expect(isAuthConfigured(PUBLIC_ONLY)).toBe(true)
-    expect(isAuthConfigured({ ...PUBLIC_ONLY, password: null, linkToken: 'token' })).toBe(true)
+    expect(isAuthConfigured({ ...PUBLIC_ONLY, linkToken: 'token' })).toBe(true)
   })
 
-  it('treats a corrupted password record without a link token as unconfigured', () => {
-    expect(isAuthConfigured({ ...PUBLIC_ONLY, password: CORRUPT_PASSWORD })).toBe(false)
-    expect(isAuthConfigured({ ...PUBLIC_ONLY, password: CORRUPT_PASSWORD, linkToken: 'token' })).toBe(true)
-  })
-})
-
-describe('isAuthStorageBroken', () => {
-  it('reports corruption only while no usable credential remains', () => {
-    expect(isAuthStorageBroken(NO_AUTH)).toBe(false)
-    expect(isAuthStorageBroken(PUBLIC_ONLY)).toBe(false)
-    expect(isAuthStorageBroken({ ...PUBLIC_ONLY, password: null, linkToken: null })).toBe(false)
-    expect(isAuthStorageBroken({ ...PUBLIC_ONLY, password: CORRUPT_PASSWORD })).toBe(true)
-    expect(isAuthStorageBroken({ ...PUBLIC_ONLY, password: CORRUPT_PASSWORD, linkToken: 'token' })).toBe(false)
-    expect(isAuthStorageBroken({ ...PUBLIC_ONLY, password: CORRUPT_PASSWORD, enabled: false })).toBe(false)
+  it.each([undefined, ''])('does not configure authentication with an empty pairing code %j', (pairingCode) => {
+    expect(isAuthConfigured({ ...PUBLIC_ONLY, linkToken: null, pairingCode })).toBe(false)
+    expect(isAuthConfigured({ ...PUBLIC_ONLY, linkToken: '', pairingCode })).toBe(false)
   })
 })
 
@@ -209,22 +204,22 @@ describe('decideSourceAccess', () => {
   }
 
   it('treats an enabled switch without any credential as unconfigured', () => {
-    const halfOpen: RemoteAuthPolicy = { ...PUBLIC_ONLY, password: null, linkToken: null }
+    const halfOpen: RemoteAuthPolicy = { ...PUBLIC_ONLY, linkToken: null }
     expect(decideSourceAccess('public', halfOpen)).toBe('deny')
     expect(decideSourceAccess('private', halfOpen)).toBe('allow')
   })
 
-  it('treats a corrupted password record without a link token as unconfigured', () => {
-    const corrupted: RemoteAuthPolicy = { ...PUBLIC_ONLY, password: CORRUPT_PASSWORD }
-    expect(decideSourceAccess('public', corrupted)).toBe('deny')
-    expect(decideSourceAccess('tunnel', corrupted)).toBe('deny')
-    expect(decideSourceAccess('private', corrupted)).toBe('allow')
-    expect(decideSourceAccess('loopback', corrupted)).toBe('allow')
+  it('does not open public or tunnel sources when pairing is disabled', () => {
+    const disabled: RemoteAuthPolicy = { ...PUBLIC_ONLY, enabled: false, pairingCode: 'EF67GH89' }
+    expect(decideSourceAccess('public', disabled)).toBe('deny')
+    expect(decideSourceAccess('tunnel', disabled)).toBe('deny')
+    expect(decideSourceAccess('private', disabled)).toBe('allow')
+    expect(decideSourceAccess('loopback', disabled)).toBe('allow')
   })
 
   it('keeps the physical loopback source free of authentication in every configuration', () => {
     expect(decideSourceAccess('loopback', ALL_SOURCES)).toBe('allow')
-    expect(decideSourceAccess('loopback', { ...ALL_SOURCES, password: null, linkToken: null })).toBe('allow')
+    expect(decideSourceAccess('loopback', { ...ALL_SOURCES, linkToken: null })).toBe('allow')
   })
 })
 

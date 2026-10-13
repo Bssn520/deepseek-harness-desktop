@@ -1,4 +1,3 @@
-import type { BridgeHost } from '@/services/probe-bridge'
 import type { BridgeAddress } from '@/utils/bridge-protocol'
 import * as Network from 'expo-network'
 import { EXTRA_SCAN_PORTS, HISTORY_PROBE_TIMEOUT_MS, SCAN_BUDGET_MS } from '@/config/constants'
@@ -54,19 +53,12 @@ export async function startAutoScan({ skipId, historyOnly = false }: { skipId?: 
     }))
     if (controller.signal.aborted || generation !== connection.scanGeneration)
       return
-    let needsToken = false
     for (const host of previous) {
-      if (!host)
-        continue
-      if (host.auth.enabled && host.auth.mode === 'token_only' && !host.token) {
-        needsToken = true
-        continue
-      }
-      if (connection.accept(host, generation))
+      if (host && connection.accept(host, generation))
         return
     }
     if (historyOnly) {
-      connection.finishScan(generation, needsToken ? i18n.t('connection.tokenRequired') : i18n.t('connection.noHistoryAvailable'))
+      connection.finishScan(generation, i18n.t('connection.noHistoryAvailable'))
       return
     }
     const selfIp = await Network.getIpAddressAsync()
@@ -87,18 +79,13 @@ export async function startAutoScan({ skipId, historyOnly = false }: { skipId?: 
       connection.finishScan(generation, i18n.t('connection.noNetwork'))
       return
     }
-    let chosen: BridgeHost | undefined
+    let chosen: BridgeAddress | undefined
     await scanCandidates(candidates, {
       signal: controller.signal,
       onFound(host) {
         if (expired || controller.signal.aborted || generation !== connection.scanGeneration)
           return
-        const saved = withSavedToken(host)
-        if (host.auth.enabled && host.auth.mode === 'token_only' && !saved.token) {
-          needsToken = true
-          return
-        }
-        chosen = { ...host, ...saved }
+        chosen = withSavedToken(host)
         controller.abort()
       },
     })
@@ -108,10 +95,7 @@ export async function startAutoScan({ skipId, historyOnly = false }: { skipId?: 
       connection.accept(chosen, generation)
     }
     else {
-      let notice: string = i18n.t('connection.noHosts')
-      if (needsToken)
-        notice = i18n.t('connection.tokenRequired')
-      connection.finishScan(generation, notice)
+      connection.finishScan(generation, i18n.t('connection.noHosts'))
     }
   }
   catch (error) {

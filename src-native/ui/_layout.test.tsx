@@ -401,7 +401,7 @@ beforeEach(async () => {
   native.readToken.mockResolvedValue(null)
   native.writeToken.mockResolvedValue(undefined)
   native.deleteToken.mockResolvedValue(undefined)
-  native.fetch.mockImplementation(async () => Response.json({ enabled: false, allowLoopback: true }))
+  native.fetch.mockImplementation(async () => Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' }))
   native.getIpAddressAsync.mockResolvedValue('0.0.0.0')
   native.getLastNotificationResponseAsync.mockResolvedValue(null)
   native.clearLastNotificationResponseAsync.mockResolvedValue(undefined)
@@ -545,12 +545,12 @@ describe('rendered root entry selection', () => {
     expect(texts()).toContain('寻找可用连接')
     // 只锁定探测到的主机集合与顺序：水合后的健康查询与历史自动接入各探一轮，重复轮次不是本用例的契约。
     expect([...new Set(native.fetch.mock.calls.map(([url]) => url))]).toEqual([
-      'http://bridge.local:3080/__dsh_bridge__/auth-status',
-      'https://second.local/__dsh_bridge__/auth-status',
+      'http://bridge.local:3080/manifest.webmanifest',
+      'https://second.local/manifest.webmanifest',
     ])
     expect(native.getIpAddressAsync).not.toHaveBeenCalled()
     await act(async () => {
-      older.resolve(Response.json({ enabled: false, allowLoopback: true }))
+      older.resolve(Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' }))
       await vi.advanceTimersByTimeAsync(0)
     })
     expect(connection.current).toBeNull()
@@ -754,6 +754,47 @@ describe('rendered root notification focus', () => {
 })
 
 describe('rendered root lifecycle resources', () => {
+  it('keeps QR pairing healthy through real fifteen-second checks without replaying its consumed code and still reports a real outage', async () => {
+    native.fetch.mockImplementation(async (input) => {
+      if (String(input) === `${alpha.id}/manifest.webmanifest`)
+        return Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' })
+      return new Response(null, { status: 404 })
+    })
+    await mount()
+    await press('扫码连接')
+    const camera = root().find(node => String(node.type) === 'CameraView')
+    await act(async () => {
+      camera.props.onBarcodeScanned({ data: `${alpha.url}?auth=once-only-code` })
+    })
+    expect(webView().props.source).toEqual({ uri: `${alpha.url}?auth=once-only-code` })
+    await ready(alpha.id)
+    const instance = await webViewInstance()
+    const generation = connection.viewGeneration
+
+    for (let interval = 0; interval < 3; interval++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000)
+      })
+      expect(connection.health[alpha.id]).toBe('available')
+      expect(connection.notice).toBeNull()
+      expect(native.scheduleNotificationAsync).not.toHaveBeenCalled()
+    }
+    expect(native.fetch).toHaveBeenCalledTimes(3)
+    expect(native.fetch.mock.calls.every(([url]) => String(url) === `${alpha.id}/manifest.webmanifest`)).toBe(true)
+    expect(await webViewInstance()).toBe(instance)
+    expect(connection.viewGeneration).toBe(generation)
+
+    native.fetch.mockResolvedValue(new Response(null, { status: 503 }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15000)
+    })
+    expect(connection.health[alpha.id]).toBe('unavailable')
+    const { i18n } = await import('@/i18n')
+    expect(connection.notice).toBe(i18n.t('connection.hostOffline'))
+    expect(native.scheduleNotificationAsync).not.toHaveBeenCalled()
+    expect(await webViewInstance()).toBe(instance)
+  })
+
   it('refreshes health on foreground return and active intervals, but not while backgrounded', async () => {
     // 客户端环境由文件顶部的 `vi.hoisted` 提供：`isServer` 在 query-core 模块加载时就已确定，
     // 测试内再补 `window` 不会生效，只会掩盖「前台按间隔轮询」这条设备行为。
@@ -777,7 +818,7 @@ describe('rendered root lifecycle resources', () => {
     expect(texts()).toContain('主机暂时不可用')
     expect(button('bridge.local:3080，不可用').props.accessibilityLabel).toBe('bridge.local:3080，不可用')
     native.fetch.mockClear()
-    native.fetch.mockImplementation(async () => Response.json({ enabled: false, allowLoopback: true }))
+    native.fetch.mockImplementation(async () => Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' }))
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000)
     })

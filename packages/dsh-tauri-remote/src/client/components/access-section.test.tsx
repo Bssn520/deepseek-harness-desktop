@@ -41,7 +41,7 @@ const REMOVED = [
 ]
 
 function authPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { enabled: true, scope: 'all', hasPassword: false, hasToken: true, ...overrides }
+  return { enabled: true, scope: 'all', hasToken: true, ...overrides }
 }
 
 function tunnelPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -99,6 +99,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('接入面板', () => {
@@ -290,15 +292,28 @@ describe('接入面板', () => {
     expect(screen.queryByText(en['access.tunnel.progress.ready'])).toBeNull()
   })
 
-  it('隧道启动期按阶段显示进度：下载阶段带百分比', async () => {
+  it('下载阶段只显示带百分比的下载进度，不叠加隧道启动中', async () => {
     route = () => replies.ok(statusPayload({
       tunnel: tunnelPayload({ enabled: true, state: 'starting', progress: { stage: 'download', url: 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz', received: 3_200_000, total: 6_400_000 } }),
     }))
     render(<AccessSection t={t} />)
     await screen.findByTestId('access-tunnel-progress')
     expect(screen.getByTestId('access-tunnel-progress-line').textContent).toBe(`${en['access.tunnel.progress.download']} 50%`)
+    expect(screen.queryByText(en['access.tunnel.state.starting'])).toBeNull()
     expect(screen.queryByTestId('state-dot')).toBeNull()
     expect(screen.getByTestId('access-tunnel-progress-bar').querySelector('div')?.getAttribute('style')).toContain('width: 50%')
+  })
+
+  it('非下载阶段只显示单一启动文案，不展示下载进度条', async () => {
+    route = () => replies.ok(statusPayload({
+      tunnel: tunnelPayload({ enabled: true, state: 'starting', progress: { stage: 'spawn', received: 6_400_000, total: 6_400_000 } }),
+    }))
+    render(<AccessSection t={t} />)
+    const state = await screen.findByTestId('access-tunnel-state')
+    expect(state.textContent).toBe(en['access.tunnel.state.starting'])
+    expect(screen.getAllByText(en['access.tunnel.state.starting'])).toHaveLength(1)
+    expect(screen.queryByTestId('access-tunnel-progress')).toBeNull()
+    expect(screen.queryByTestId('access-tunnel-progress-bar')).toBeNull()
   })
 
   it('隧道失败时错误、重试与停止都可见', async () => {

@@ -1,5 +1,4 @@
 import type { HistoryEntry } from './index'
-import type { BridgeHost } from '@/services/probe-bridge'
 import type { ScanOptions } from '@/services/scan-candidates'
 import type { BridgeAddress } from '@/utils/bridge-protocol'
 import type { ScanCandidate } from '@/utils/discovery'
@@ -48,7 +47,6 @@ const recentAlpha: HistoryEntry = { ...alpha, lastConnectedAt: 20 }
 const recentBeta: HistoryEntry = { ...beta, lastConnectedAt: 10 }
 const noHosts = i18n.t('connection.noHosts')
 const noNetwork = i18n.t('connection.noNetwork')
-const tokenRequired = i18n.t('connection.tokenRequired')
 const hostOffline = i18n.t('connection.hostOffline')
 const releases: (() => void)[] = []
 let runtime: typeof import('./runtime')
@@ -57,14 +55,6 @@ let connection: typeof import('./index')['connection']
 function hydrate(history: HistoryEntry[] = [], tokens: Record<string, string> = {}): void {
   connection.$patch({ version: 1, history, guidedHosts: [] })
   connection.markHydrated(tokens)
-}
-
-function openHost(address: BridgeAddress): BridgeHost {
-  return { ...address, auth: { enabled: false, allowLoopback: false } }
-}
-
-function lockedHost(address: BridgeAddress): BridgeHost {
-  return { ...address, auth: { enabled: true, mode: 'token_only', allowLoopback: false } }
 }
 
 function deferred<T>(fallback: T) {
@@ -91,7 +81,7 @@ function recordedScan(index = 0): Parameters<typeof import('@/services/scan-cand
   return call
 }
 
-function publish(host: BridgeHost, index = 0): void {
+function publish(host: BridgeAddress, index = 0): void {
   const options: ScanOptions = recordedScan(index)[1]
   if (!options.onFound)
     throw new Error('Expected a discovery callback at the bridge-client boundary')
@@ -183,7 +173,7 @@ function describeDirectConnections() {
 
   async function supersedeHistoryWithDirectConnection() {
     hydrate([recentAlpha])
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const scanning = runtime.startAutoScan()
     const signal = recordedProbe()[1]
@@ -192,7 +182,7 @@ function describeDirectConnections() {
     runtime.connectAddress(beta)
     expect(signal.aborted).toBe(true)
     const generation = connection.scanGeneration
-    probe.resolve(openHost(alpha))
+    probe.resolve(alpha)
     await scanning
 
     expect(connection.current).toEqual(beta)
@@ -209,7 +199,7 @@ function describeDirectConnections() {
 
   async function supersedeLanWithDirectConnection() {
     hydrate()
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
@@ -217,8 +207,8 @@ function describeDirectConnections() {
 
     runtime.connectAddress(beta)
     expect(signal.aborted).toBe(true)
-    publish(openHost(gamma))
-    scan.resolve([openHost(gamma)])
+    publish(gamma)
+    scan.resolve([gamma])
     await scanning
 
     expect(connection.current).toEqual(beta)
@@ -236,19 +226,19 @@ function describeDiscovery() {
 
   async function prioritizeHistoryOrder() {
     hydrate([recentAlpha, recentBeta])
-    const newest = deferred<BridgeHost | null>(null)
-    const older = deferred<BridgeHost | null>(null)
+    const newest = deferred<BridgeAddress | null>(null)
+    const older = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValueOnce(newest.promise).mockReturnValueOnce(older.promise)
     const scanning = runtime.startAutoScan()
     const signal = recordedProbe()[1]
 
     expect(boundary.probe.mock.calls).toEqual([[recentAlpha, signal, 3000], [recentBeta, signal, 3000]])
     expect(connection.health).toEqual({ 'http://10.0.0.20:4444': 'checking', 'http://10.0.0.2:3082': 'checking' })
-    older.resolve(openHost(beta))
+    older.resolve(beta)
     await vi.advanceTimersByTimeAsync(0)
     expect(connection.current).toBeNull()
     expect(boundary.ip).not.toHaveBeenCalled()
-    newest.resolve(openHost(alpha))
+    newest.resolve(alpha)
     await scanning
 
     expect(connection.current).toEqual(alpha)
@@ -266,7 +256,7 @@ function describeDiscovery() {
 
   async function fallBackWithinHistory() {
     hydrate([recentAlpha, recentBeta])
-    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(openHost(beta))
+    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(beta)
 
     await runtime.startAutoScan()
 
@@ -276,26 +266,26 @@ function describeDiscovery() {
     expect(boundary.scan).not.toHaveBeenCalled()
   }
 
-  it('skips reachable token-only history without credentials in favor of a usable history entry', filterLockedHistory)
-
-  async function filterLockedHistory() {
+  it('opens identified history without a saved code and waits for WebView pairing instead of claiming authentication', async () => {
     hydrate([recentAlpha, recentBeta])
-    boundary.probe.mockResolvedValueOnce(lockedHost(alpha)).mockResolvedValueOnce(openHost(beta))
+    boundary.probe.mockResolvedValueOnce(alpha).mockResolvedValueOnce(beta)
 
     await runtime.startAutoScan()
 
-    expect(connection.current).toEqual(beta)
+    expect(connection.current).toEqual(alpha)
     expect(connection.tokens).toEqual({})
     expect(connection.health[alpha.id]).toBe('available')
+    expect(connection.loading).toBe(true)
+    expect(connection.history).toEqual([recentAlpha, recentBeta])
     expect(boundary.scan).not.toHaveBeenCalled()
     expect(connection.notice).toBeNull()
-  }
+  })
 
-  it('reuses the exact saved origin token when probing token-only history', acceptAuthenticatedHistory)
+  it('reuses the exact saved origin token when probing identified history', acceptAuthenticatedHistory)
 
   async function acceptAuthenticatedHistory() {
     hydrate([recentAlpha], { 'http://10.0.0.20:4444': 'fixture-saved-token' })
-    boundary.probe.mockResolvedValue(lockedHost({ ...alpha, token: 'fixture-saved-token' }))
+    boundary.probe.mockResolvedValue({ ...alpha, token: 'fixture-saved-token' })
 
     await runtime.startAutoScan()
 
@@ -305,21 +295,6 @@ function describeDiscovery() {
     expect(connection.history).toEqual([recentAlpha])
     expect(boundary.ip).not.toHaveBeenCalled()
     expect(boundary.scan).not.toHaveBeenCalled()
-  }
-
-  it('retains the token-required notice from unusable history when the LAN has no usable host', retainHistoryTokenRequirement)
-
-  async function retainHistoryTokenRequirement() {
-    hydrate([recentAlpha])
-    boundary.probe.mockResolvedValue(lockedHost(alpha))
-
-    await runtime.startAutoScan()
-
-    expect(boundary.scan).toHaveBeenCalledTimes(1)
-    expect(connection.current).toBeNull()
-    expect(connection.stage).toBe('idle')
-    expect(connection.notice).toBe(tokenRequired)
-    expect(connection.tokens).toEqual({})
   }
 
   it('passes history custom ports into the real subnet candidate builder while excluding self and subnet boundaries', includeHistoryPorts)
@@ -378,65 +353,40 @@ function describeDiscovery() {
     expect(vi.getTimerCount()).toBe(0)
   }
 
-  it('keeps scanning after a token-only LAN host without a token and accepts the next usable discovery', filterLockedLanHost)
-
-  async function filterLockedLanHost() {
+  it('stops at the first identified LAN host without a saved code and waits for WebView pairing', async () => {
     hydrate()
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
-    const signal = recordedScan()[1].signal
 
-    publish(lockedHost(beta))
-    expect(signal.aborted).toBe(false)
-    expect(connection.current).toBeNull()
-    publish(openHost(gamma))
-    expect(signal.aborted).toBe(true)
-    scan.resolve([lockedHost(beta), openHost(gamma)])
+    publish(beta)
+    expect(recordedScan()[1].signal.aborted).toBe(true)
+    publish(gamma)
+    scan.resolve([beta, gamma])
     await scanning
 
-    expect(connection.current).toEqual(gamma)
+    expect(connection.current).toEqual(beta)
     expect(connection.stage).toBe('connected')
+    expect(connection.loading).toBe(true)
     expect(connection.notice).toBeNull()
     expect(connection.history).toEqual([])
     expect(connection.tokens).toEqual({})
     expect(vi.getTimerCount()).toBe(0)
-  }
+  })
 
-  it('reports token-required when every LAN discovery needs an unavailable token', reportLockedLanHosts)
-
-  async function reportLockedLanHosts() {
-    hydrate()
-    const scan = deferred<BridgeHost[]>([])
-    boundary.scan.mockReturnValue(scan.promise)
-    const scanning = runtime.startAutoScan()
-    await vi.advanceTimersByTimeAsync(0)
-
-    publish(lockedHost(beta))
-    publish(lockedHost(gamma))
-    expect(recordedScan()[1].signal.aborted).toBe(false)
-    scan.resolve([lockedHost(beta), lockedHost(gamma)])
-    await scanning
-
-    expect(connection.current).toBeNull()
-    expect(connection.stage).toBe('idle')
-    expect(connection.notice).toBe(tokenRequired)
-    expect(connection.tokens).toEqual({})
-  }
-
-  it('accepts a token-only LAN discovery using a saved token for the exact origin', acceptAuthenticatedLanHost)
+  it('accepts an identified LAN discovery using a saved token for the exact origin', acceptAuthenticatedLanHost)
 
   async function acceptAuthenticatedLanHost() {
     hydrate([], { 'http://10.0.0.2:3082': 'fixture-saved-token' })
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
 
-    publish(lockedHost(beta))
+    publish(beta)
     expect(recordedScan()[1].signal.aborted).toBe(true)
-    scan.resolve([lockedHost(beta)])
+    scan.resolve([beta])
     await scanning
 
     expect(connection.current).toEqual({ ...beta, token: 'fixture-saved-token' })
@@ -448,18 +398,19 @@ function describeDiscovery() {
 
   async function isolateLanTokensByOrigin() {
     hydrate([], { 'http://10.0.0.2:3080': 'fixture-sibling-token' })
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
 
-    publish(lockedHost(beta))
-    expect(recordedScan()[1].signal.aborted).toBe(false)
-    scan.resolve([lockedHost(beta)])
+    publish(beta)
+    expect(recordedScan()[1].signal.aborted).toBe(true)
+    scan.resolve([beta])
     await scanning
 
-    expect(connection.current).toBeNull()
-    expect(connection.notice).toBe(tokenRequired)
+    expect(connection.current).toEqual(beta)
+    expect(connection.loading).toBe(true)
+    expect(connection.notice).toBeNull()
     expect(connection.tokens).toEqual({ 'http://10.0.0.2:3080': 'fixture-sibling-token' })
   }
 
@@ -487,7 +438,7 @@ function describeDiscovery() {
 describe('history-only re-entry', () => {
   it('preserves history ordering and saved tokens without reading the LAN address', async () => {
     hydrate([recentAlpha, recentBeta], { 'http://10.0.0.20:4444': 'fixture-saved-token' })
-    boundary.probe.mockResolvedValueOnce(lockedHost({ ...alpha, token: 'fixture-saved-token' })).mockResolvedValueOnce(openHost(beta))
+    boundary.probe.mockResolvedValueOnce({ ...alpha, token: 'fixture-saved-token' }).mockResolvedValueOnce(beta)
 
     await runtime.startAutoScan({ historyOnly: true })
 
@@ -502,7 +453,7 @@ describe('history-only re-entry', () => {
 
   it('falls back within saved history rather than scanning new LAN hosts', async () => {
     hydrate([recentAlpha, recentBeta])
-    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(openHost(beta))
+    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(beta)
 
     await runtime.startAutoScan({ historyOnly: true })
 
@@ -528,15 +479,16 @@ describe('history-only re-entry', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('keeps unusable token-only history for QR login without silently searching the LAN', async () => {
+  it('opens identified history for WebView pairing without silently searching the LAN or recording success', async () => {
     hydrate([recentAlpha])
-    boundary.probe.mockResolvedValue(lockedHost(alpha))
+    boundary.probe.mockResolvedValue(alpha)
 
     await runtime.startAutoScan({ historyOnly: true })
 
-    expect(connection.current).toBeNull()
-    expect(connection.stage).toBe('idle')
-    expect(connection.notice).toBe(tokenRequired)
+    expect(connection.current).toEqual(alpha)
+    expect(connection.stage).toBe('connected')
+    expect(connection.loading).toBe(true)
+    expect(connection.notice).toBeNull()
     expect(connection.health[alpha.id]).toBe('available')
     expect(connection.history).toEqual([recentAlpha])
     expect(connection.tokens).toEqual({})
@@ -546,13 +498,13 @@ describe('history-only re-entry', () => {
 
   it('lets an explicit QR address cancel history reconnection and discard its late result', async () => {
     hydrate([recentAlpha])
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const reconnecting = runtime.startAutoScan({ historyOnly: true })
     const signal = recordedProbe()[1]
 
     runtime.connectAddress(beta)
-    probe.resolve(openHost(alpha))
+    probe.resolve(alpha)
     await reconnecting
 
     expect(signal.aborted).toBe(true)
@@ -571,7 +523,7 @@ function describeCancellation() {
 
   async function cancelHistoryProbe() {
     hydrate([recentAlpha])
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const scanning = runtime.startAutoScan()
     const signal = recordedProbe()[1]
@@ -580,7 +532,7 @@ function describeCancellation() {
     runtime.cancelAutoScan()
     expect(signal.aborted).toBe(true)
     expect(connection.scanGeneration).toBeGreaterThan(generation)
-    probe.resolve(openHost(alpha))
+    probe.resolve(alpha)
     await scanning
 
     expect(connection.current).toBeNull()
@@ -617,7 +569,7 @@ function describeCancellation() {
 
   async function cancelLanDiscovery() {
     hydrate()
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
@@ -625,8 +577,8 @@ function describeCancellation() {
 
     runtime.cancelAutoScan()
     expect(signal.aborted).toBe(true)
-    publish(openHost(gamma))
-    scan.resolve([openHost(gamma)])
+    publish(gamma)
+    scan.resolve([gamma])
     await scanning
 
     expect(connection.current).toBeNull()
@@ -640,8 +592,8 @@ function describeCancellation() {
 
   async function invalidateSupersededScan() {
     hydrate()
-    const older = deferred<BridgeHost[]>([])
-    const newer = deferred<BridgeHost[]>([])
+    const older = deferred<BridgeAddress[]>([])
+    const newer = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
     const first = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
@@ -650,12 +602,12 @@ function describeCancellation() {
     await vi.advanceTimersByTimeAsync(0)
     expect(oldSignal.aborted).toBe(true)
 
-    publish(openHost(gamma), 1)
-    newer.resolve([openHost(gamma)])
+    publish(gamma, 1)
+    newer.resolve([gamma])
     await second
     const generation = connection.scanGeneration
-    publish(openHost(beta), 0)
-    older.resolve([openHost(beta)])
+    publish(beta, 0)
+    older.resolve([beta])
     await first
 
     expect(connection.current).toEqual(gamma)
@@ -671,8 +623,8 @@ function describeCancellation() {
   async function stopAllRuntimeWork() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    const scanProbe = deferred<BridgeHost | null>(null)
-    const healthProbe = deferred<BridgeHost | null>(null)
+    const scanProbe = deferred<BridgeAddress | null>(null)
+    const healthProbe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValueOnce(scanProbe.promise).mockReturnValueOnce(healthProbe.promise)
     const scanning = runtime.startAutoScan()
     const refreshing = runtime.refreshHealth()
@@ -683,8 +635,8 @@ function describeCancellation() {
     runtime.stopConnectionRuntime()
     expect(scanSignal.aborted).toBe(true)
     expect(healthSignal.aborted).toBe(true)
-    scanProbe.resolve(openHost(alpha))
-    healthProbe.resolve(openHost(alpha))
+    scanProbe.resolve(alpha)
+    healthProbe.resolve(alpha)
     await Promise.all([scanning, refreshing])
 
     expect(connection.stage).toBe('idle')
@@ -704,7 +656,7 @@ function describeScanDeadlines() {
 
   async function enforceHistoryDeadline() {
     hydrate([recentAlpha])
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const scanning = runtime.startAutoScan()
     const signal = recordedProbe()[1]
@@ -716,7 +668,7 @@ function describeScanDeadlines() {
     expect(signal.aborted).toBe(true)
     expect(connection.stage).toBe('idle')
     expect(connection.notice).toBe(noHosts)
-    probe.resolve(openHost(alpha))
+    probe.resolve(alpha)
     await scanning
 
     expect(connection.current).toBeNull()
@@ -730,9 +682,9 @@ function describeScanDeadlines() {
 
   async function shareTotalDeadline() {
     hydrate([recentAlpha])
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     const ip = deferred('')
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.probe.mockReturnValue(probe.promise)
     boundary.ip.mockReturnValue(ip.promise)
     boundary.scan.mockReturnValue(scan.promise)
@@ -786,19 +738,19 @@ function describeScanDeadlines() {
 
   async function rejectExpiredChosenHost() {
     hydrate()
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
 
     await vi.advanceTimersByTimeAsync(19999)
-    publish(openHost(gamma))
+    publish(gamma)
     expect(recordedScan()[1].signal.aborted).toBe(true)
     expect(connection.stage).toBe('scanning')
     await vi.advanceTimersByTimeAsync(1)
     expect(connection.stage).toBe('idle')
     expect(connection.notice).toBe(noHosts)
-    scan.resolve([openHost(gamma)])
+    scan.resolve([gamma])
     await scanning
 
     expect(connection.current).toBeNull()
@@ -811,7 +763,7 @@ function describeScanDeadlines() {
 
   async function discardDiscoveryAfterDeadline() {
     hydrate()
-    const scan = deferred<BridgeHost[]>([])
+    const scan = deferred<BridgeAddress[]>([])
     boundary.scan.mockReturnValue(scan.promise)
     const scanning = runtime.startAutoScan()
     await vi.advanceTimersByTimeAsync(0)
@@ -819,8 +771,8 @@ function describeScanDeadlines() {
     await vi.advanceTimersByTimeAsync(20000)
     expect(recordedScan()[1].signal.aborted).toBe(true)
     expect(connection.stage).toBe('idle')
-    publish(openHost(gamma))
-    scan.resolve([openHost(gamma)])
+    publish(gamma)
+    scan.resolve([gamma])
     await scanning
 
     expect(connection.current).toBeNull()
@@ -839,7 +791,7 @@ function describeDisconnectDiscovery() {
   async function skipDisconnectedHistory() {
     hydrate([recentAlpha, recentBeta])
     runtime.connectAddress(alpha)
-    boundary.probe.mockResolvedValue(openHost(beta))
+    boundary.probe.mockResolvedValue(beta)
 
     runtime.disconnectAndScan()
     expect(connection.current).toBeNull()
@@ -899,15 +851,15 @@ function describeHealthRefresh() {
   async function preventOverlappingHealthWork() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    const probe = deferred<BridgeHost | null>(null)
-    boundary.probe.mockReturnValueOnce(probe.promise).mockResolvedValueOnce(openHost(alpha))
+    const probe = deferred<BridgeAddress | null>(null)
+    boundary.probe.mockReturnValueOnce(probe.promise).mockResolvedValueOnce(alpha)
     const first = runtime.refreshHealth()
 
     await runtime.refreshHealth()
     expect(boundary.probe).toHaveBeenCalledTimes(1)
     expect(recordedProbe()[0]).toEqual(alpha)
     expect(recordedProbe()[2]).toBe(3000)
-    probe.resolve(openHost(alpha))
+    probe.resolve(alpha)
     await first
     await runtime.refreshHealth()
 
@@ -961,7 +913,7 @@ function describeHealthRefresh() {
   async function isolatePreviousOriginHealth() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const refreshing = runtime.refreshHealth()
 
@@ -981,7 +933,7 @@ function describeHealthRefresh() {
   async function discardHealthFromPreviousConnection() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    const probe = deferred<BridgeHost | null>(null)
+    const probe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValue(probe.promise)
     const refreshing = runtime.refreshHealth()
     const oldGeneration = connection.viewGeneration
@@ -1002,8 +954,8 @@ function describeHealthRefresh() {
   async function retainNewHealthControllerOwnership() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    const oldProbe = deferred<BridgeHost | null>(null)
-    const newProbe = deferred<BridgeHost | null>(null)
+    const oldProbe = deferred<BridgeAddress | null>(null)
+    const newProbe = deferred<BridgeAddress | null>(null)
     boundary.probe.mockReturnValueOnce(oldProbe.promise).mockReturnValueOnce(newProbe.promise)
     const oldRefresh = runtime.refreshHealth()
     const oldSignal = recordedProbe(0)[1]
@@ -1020,7 +972,7 @@ function describeHealthRefresh() {
     await runtime.refreshHealth()
     expect(boundary.probe).toHaveBeenCalledTimes(2)
     expect(newSignal.aborted).toBe(false)
-    newProbe.resolve(openHost(alpha))
+    newProbe.resolve(alpha)
     await newRefresh
 
     expect(connection.health[alpha.id]).toBe('available')
@@ -1032,7 +984,7 @@ function describeHealthRefresh() {
   async function notifyOfflineTransitions() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
-    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(openHost(alpha)).mockResolvedValueOnce(null)
+    boundary.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(alpha).mockResolvedValueOnce(null)
 
     await runtime.refreshHealth()
 
@@ -1066,7 +1018,7 @@ function describeHealthRefresh() {
     hydrate([recentAlpha])
     runtime.connectAddress(alpha)
     connection.setNotice('Fixture unrelated notice')
-    boundary.probe.mockResolvedValue(openHost(alpha))
+    boundary.probe.mockResolvedValue(alpha)
 
     await runtime.refreshHealth()
 

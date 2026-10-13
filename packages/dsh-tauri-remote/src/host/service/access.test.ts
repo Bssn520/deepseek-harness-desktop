@@ -11,7 +11,6 @@ import { toDataURL } from 'qrcode'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ensureSourceSession, setCurrentHostInstance } from '../config/runtime'
 import { server as remoteServer } from '../server'
-import { verifyPassword } from '../utils/auth'
 import { access } from './access'
 import { defaultAccessDocument, enumerateAddresses, isReachableAddress, readAccessDocument, writeAccessDocument } from './access.utils'
 import { gateway } from './gateway'
@@ -103,8 +102,8 @@ function call(port: number, path: string, options: { source?: string, cookie?: s
   })
 }
 
-function signIn(port: number, password: string): Promise<Reply> {
-  return call(port, '/', { source: 'public', method: 'POST', form: `password=${encodeURIComponent(password)}` })
+function signIn(port: number, code: string): Promise<Reply> {
+  return call(port, '/', { source: 'public', method: 'POST', form: `code=${encodeURIComponent(code)}` })
 }
 
 function freePort(): Promise<number> {
@@ -243,6 +242,26 @@ async function enable(address = '127.0.0.1', port?: number): Promise<RemoteAcces
 }
 
 describe('access 监听生命周期', () => {
+  it('开启暴露仅使用配对码，不生成或保存访问密码', async () => {
+    const status = await enable()
+    expect(status.auth.enabled).toBe(true)
+    expect(status.pairing?.code).toMatch(/^[2-9A-HJ-NP-Z]{8}$/u)
+    expect(status).not.toHaveProperty('generatedPassword')
+    expect(status.auth).not.toHaveProperty('hasPassword')
+    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only' })
+  })
+
+  it('隧道前置认证仅使用配对码，重复调用不生成永久凭据', async () => {
+    const status = await access.ensureAuth()
+    expect(status.auth.enabled).toBe(true)
+    expect(status).not.toHaveProperty('generatedPassword')
+    expect(status.auth).not.toHaveProperty('hasPassword')
+    expect(storedDocument().auth).toEqual({ enabled: true, token: null, scope: 'public_only' })
+    const code = access.policy().pairingCode
+    await access.ensureAuth()
+    expect(access.policy().pairingCode).toBe(code)
+  })
+
   it('apply 开启回环监听后网关真实转发到本机 DSH 上游并注入原生 cookie', async () => {
     const status = await enable()
     expect(status.listening).toBe(true)
@@ -265,28 +284,14 @@ describe('access 监听生命周期', () => {
     expect(status.maskLink).toBe(`http://127.0.0.1:${status.port}/`)
   })
 
-  it('开启暴露时没有凭据就自动生成随机强密码并自动开认证', async () => {
+  it('启用暴露保留已有链接 Token，不把凭据写进事件环', async () => {
+    await access.rotate()
+    const token = storedDocument().auth.token
+    expect(token).toBeTruthy()
     const status = await enable()
-    expect(status.generatedPassword).toMatch(/^[2-9A-HJ-NP-Za-km-z]{20}$/u)
-    expect(status.auth.enabled).toBe(true)
-    expect(status.auth.hasPassword).toBe(true)
-    expect(JSON.stringify(storedDocument())).not.toContain(status.generatedPassword ?? '')
-    expect((await access.status()).generatedPassword).toBeUndefined()
-  })
-
-  it('已有凭据时不覆盖，且不把明文写进事件环', async () => {
-    await access.apply({ password: 'keep-me-please' })
-    const status = await enable()
-    expect(status.generatedPassword).toBeUndefined()
-    expect(status.auth.hasPassword).toBe(true)
-    expect(status.events.map(event => event.line).join('\n')).not.toContain('keep-me-please')
-  })
-
-  it('ensureAuth 为隧道补齐认证：无凭据时生成、已有密码时只开开关', async () => {
-    const generated = await access.ensureAuth()
-    expect(generated.generatedPassword).toMatch(/^[2-9A-HJ-NP-Za-km-z]{20}$/u)
-    expect((await access.ensureAuth()).generatedPassword).toBeUndefined()
-    expect((await access.status()).auth.enabled).toBe(true)
+    expect(status.auth.token).toBe(token)
+    expect(storedDocument().auth.token).toBe(token)
+    expect(status.events.map(event => event.line).join('\n')).not.toContain(token ?? '')
   })
 
   it('access.json 损坏时所有写操作拒绝，且不覆盖原文件', async () => {
@@ -358,25 +363,15 @@ describe('access 监听生命周期', () => {
     expect(status.qr).toBe(await toDataURL(status.link ?? ''))
   })
 
-  it('暴露到非回环地址且没有凭据时自动生成密码，并在事件里写明', async () => {
-    const address = requireReachable()
-    const port = await freePort()
-    const status = await enable(address, port)
-    expect(status.state).toBe('listening')
-    expect(status.auth.hasPassword).toBe(true)
-    const notice = status.events.find(event => event.kind === 'auth')
-    expect(notice?.line).toContain('已自动生成随机强密码')
-  })
-
   it('显式关掉认证再暴露时，仍对公网与隧道来源给出未配置引导', async () => {
     const address = requireReachable()
     const port = await freePort()
-    await access.apply({ password: 'explicit-close-pass', authEnabled: false, enabled: true, address, port })
+    await access.apply({ authEnabled: false, enabled: true, address, port })
     const status = await access.status()
     expect(status.state).toBe('listening')
     expect(status.auth.enabled).toBe(false)
     const warning = status.events.find(event => event.kind === 'auth')
-    expect(warning?.line).toContain('未配置访问密码或链接 Token')
+    expect(warning?.line).toContain('未开启访问认证')
   })
 
   it('重启后按上次的 enabled 与监听配置自动恢复', async () => {
@@ -389,9 +384,7 @@ describe('access 监听生命周期', () => {
     expect(restored.port).toBe(applied.port)
     expect(restored.link).toBe(applied.link)
     const stored = storedDocument()
-    expect({ ...stored, auth: { ...stored.auth, enabled: false, password: null } })
-      .toEqual({ ...defaultAccessDocument(), enabled: true, listen: { address: '127.0.0.1', port } })
-    expect(stored.auth.password).not.toBeNull()
+    expect(stored).toEqual({ ...defaultAccessDocument(), enabled: true, listen: { address: '127.0.0.1', port }, auth: { enabled: true, token: null, scope: 'public_only' } })
   })
 
   it('恢复失败时保持关闭并给出可读原因，且不静默改写配置', async () => {
@@ -540,9 +533,9 @@ describe('access 临时码消费与长轮询（真实路由和网关）', () => 
 })
 
 describe('access 认证与来源判定（经真实网关）', () => {
-  it('开启暴露即自动带凭据：私网免密放行，公网与隧道来源进入登录而非未配置引导', async () => {
+  it('开启暴露即使用配对码：私网放行，公网与隧道来源进入配对而非未配置引导', async () => {
     const status = await enable()
-    expect(status.auth.hasPassword).toBe(true)
+    expect(status.pairing?.code).toMatch(/^[2-9A-HJ-NP-Z]{8}$/u)
     expect((await call(status.port, '/api/probe', { source: 'private' })).status).toBe(200)
     const publicReply = await call(status.port, '/api/probe', { source: 'public' })
     expect(publicReply.status).toBe(401)
@@ -557,13 +550,13 @@ describe('access 认证与来源判定（经真实网关）', () => {
     await access.apply({ authEnabled: false })
     const publicReply = await call(status.port, '/api/probe', { source: 'public' })
     expect(publicReply.status).toBe(403)
-    expect(publicReply.body).toContain('尚未配置访问认证')
+    expect(publicReply.body).toContain('尚未启用配对认证')
     expect((await call(status.port, '/api/probe', { source: 'tunnel' })).status).toBe(403)
   })
 
   it('scope=public_only 时私网免密、公网要求认证；scope=all 时私网也要求认证', async () => {
     const status = await enable()
-    await access.apply({ authEnabled: true, password: 'hunter2', scope: 'public_only' })
+    await access.apply({ authEnabled: true, scope: 'public_only' })
     expect((await call(status.port, '/api/probe', { source: 'private' })).status).toBe(200)
     expect((await call(status.port, '/api/probe', { source: 'public' })).status).toBe(401)
     await access.apply({ scope: 'all' })
@@ -592,7 +585,7 @@ describe('access 认证与来源判定（经真实网关）', () => {
 
   it('作废 Token 后旧链接失效，已签发的会话不受影响', async () => {
     const status = await enable()
-    await access.apply({ authEnabled: true, password: 'hunter2', scope: 'public_only' })
+    await access.apply({ authEnabled: true, scope: 'public_only' })
     const rotated = await access.rotate()
     const token = tokenOf(rotated.link)
     const exchanged = await call(status.port, `/?auth=${token}`, { source: 'public' })
@@ -604,14 +597,14 @@ describe('access 认证与来源判定（经真实网关）', () => {
     expect((await call(status.port, '/api/probe', { source: 'public', cookie })).status).toBe(200)
   })
 
-  it('密码连续错误达阈值后封禁并返回可读剩余时间', async () => {
+  it('配对码连续错误达阈值后封禁并返回可读剩余时间', async () => {
     const status = await enable()
-    await access.apply({ authEnabled: true, password: 'hunter2', scope: 'public_only' })
+    await access.apply({ authEnabled: true, scope: 'public_only' })
     const attempts: number[] = []
     for (let index = 0; index < 5; index++)
       attempts.push((await signIn(status.port, 'wrong')).status)
     expect(attempts).toEqual([401, 401, 401, 401, 429])
-    const banned = await signIn(status.port, 'hunter2')
+    const banned = await signIn(status.port, status.pairing?.code ?? '')
     expect(banned.status).toBe(429)
     expect(banned.body).toContain('认证失败次数过多')
   })
@@ -624,16 +617,5 @@ describe('access 认证与来源判定（经真实网关）', () => {
     expect(status.auth.enabled).toBe(true)
     expect(status.events.map(event => event.line)).toContain('access.json 丢弃未知键 rogue')
     expect(Object.keys(JSON.parse(readFileSync(documentFile(), 'utf8')))).toEqual(['version', 'enabled', 'listen', 'auth', 'tunnel'])
-  })
-
-  it('密码只以哈希落盘且校验通过，明文不出现在配置文档里', async () => {
-    await access.apply({ password: 'hunter2' })
-    const password = storedDocument().auth.password
-    expect(password?.algo).toBe('pbkdf2-sha256')
-    expect(verifyPassword('hunter2', password)).toBe(true)
-    expect(readFileSync(documentFile(), 'utf8')).not.toContain('hunter2')
-    const cleared = await access.apply({ password: null })
-    expect(cleared.auth.hasPassword).toBe(false)
-    expect(storedDocument().auth.password).toBeNull()
   })
 })

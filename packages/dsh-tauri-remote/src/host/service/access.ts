@@ -4,7 +4,7 @@ import { defineService } from 'dsh-tauri'
 import { toDataURL } from 'qrcode'
 import { messageOf } from '../../shared/error'
 import { hostServicePort, localUpstream, mintAuthenticatedUrl } from '../config/runtime'
-import { createLinkToken, createSessionSecret, generateAccessPassword, hashPassword } from '../utils/auth'
+import { createLinkToken, createSessionSecret } from '../utils/auth'
 import { isAuthConfigured } from '../utils/source'
 import { addressProblemOf, buildLink, buildTunnelLink, enumerateAddresses, isLoopbackListen, linkHostOf, maskLinkOf, pairingLinksOf, patchAccessDocument, policyOf, readAccessDocument, writeAccessDocument } from './access.utils'
 import { gateway } from './gateway'
@@ -58,7 +58,6 @@ export const access = defineService({
       auth: {
         enabled: document.auth.enabled,
         scope: document.auth.scope,
-        hasPassword: document.auth.password !== null,
         hasToken: document.auth.token !== null,
         ...document.auth.token === null ? {} : { token: document.auth.token },
       },
@@ -94,26 +93,22 @@ export const access = defineService({
       throw new Error(CORRUPT_DOCUMENT)
     for (const warning of parsed.warnings)
       note('state', warning)
-    const patched = patchAccessDocument(parsed.document, body, enumerateAddresses())
-    const generatedPassword = patched.enabled ? autoPasswordOf(patched) : undefined
-    const next = generatedPassword === undefined ? patched : withGeneratedPassword(patched, generatedPassword)
+    const next = patchAccessDocument(parsed.document, body, enumerateAddresses())
+    if (body.enabled === true && body.authEnabled === undefined)
+      next.auth.enabled = true
     writeAccessDocument(next)
     await activate(next)
-    return { ...await access.status(), ...generatedPassword === undefined ? {} : { generatedPassword } }
+    return await access.status()
   },
 
-  /** 公网隧道前置：认证未开则开；没有可用凭据则自动生成密码（返回明文供面板一次性展示）。 */
   async ensureAuth(): Promise<RemoteAccessStatus> {
     const parsed = readAccessDocument()
     if (parsed.corrupt)
       throw new Error(CORRUPT_DOCUMENT)
-    const generatedPassword = autoPasswordOf(parsed.document)
-    const next = generatedPassword === undefined
-      ? { ...parsed.document, auth: { ...parsed.document.auth, enabled: true } }
-      : withGeneratedPassword(parsed.document, generatedPassword)
+    const next = { ...parsed.document, auth: { ...parsed.document.auth, enabled: true } }
     writeAccessDocument(next)
     await activate(next)
-    return { ...await access.status(), ...generatedPassword === undefined ? {} : { generatedPassword } }
+    return await access.status()
   },
 
   async rotate(): Promise<RemoteAccessStatus> {
@@ -158,18 +153,6 @@ export const access = defineService({
   },
 })
 
-// --- internal ---
-/** 只在完全没有凭据时生成：已有密码或链接 Token 说明用户已做过选择，认证开关本身不再被改写。 */
-function autoPasswordOf(document: RemoteAccessDocument): string | undefined {
-  const auth = document.auth
-  return auth.password === null && auth.token === null ? generateAccessPassword() : undefined
-}
-
-function withGeneratedPassword(document: RemoteAccessDocument, password: string): RemoteAccessDocument {
-  note('auth', '未设置访问密码：已自动生成随机强密码并开启访问认证（明文仅在面板显示一次）')
-  return { ...document, auth: { ...document.auth, enabled: true, password: hashPassword(password) } }
-}
-
 async function activate(document: RemoteAccessDocument): Promise<void> {
   if (!document.enabled) {
     await gateway.stop(ENTRY_ID)
@@ -200,7 +183,7 @@ async function activate(document: RemoteAccessDocument): Promise<void> {
     failure = undefined
     note('state', `入站暴露已监听 ${entry.host}:${entry.port}`)
     if (!isLoopbackListen(document.listen.address) && !isAuthConfigured(access.policy()))
-      note('auth', '未配置访问密码或链接 Token：公网与隧道来源将被 403 拒绝，私网来源可直连')
+      note('auth', '未开启访问认证：公网与隧道来源将被 403 拒绝，私网来源可直连')
   }
   catch (error) {
     await fail(messageOf(error))

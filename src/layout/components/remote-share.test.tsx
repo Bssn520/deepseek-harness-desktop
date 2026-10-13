@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
+import type { ReactElement } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as renderElement, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import en from '@/i18n/locales/en-US.json'
+import zh from '@/i18n/locales/zh-CN.json'
 import { RemoteShare } from './remote-share'
 
 vi.mock('react-i18next', () => ({
@@ -36,6 +40,12 @@ if (typeof CSS === 'undefined')
 
 Element.prototype.getAnimations = function () {
   return []
+}
+
+let queryClient: QueryClient
+
+function render(element: ReactElement) {
+  return renderElement(<QueryClientProvider client={queryClient}>{element}</QueryClientProvider>)
 }
 
 const QR = 'data:image/png;base64,qr'
@@ -86,6 +96,7 @@ function clickTunnelTab() {
 }
 
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false, gcTime: 0 } } })
   openUrlSpy.mockReset().mockResolvedValue(undefined)
   mockIPC((command, args) => {
     if (command === 'open_external_url')
@@ -106,6 +117,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  queryClient.clear()
   clearMocks()
   vi.restoreAllMocks()
   vi.useRealTimers()
@@ -241,7 +253,7 @@ describe('remoteShare 临时码消费订阅', () => {
     await waitFor(() => expect(watch.polls).toHaveLength(1))
     clickTunnelTab()
     fireEvent.click(screen.getByText('remote.share.tunnel_enable'))
-    expect(postAccessTunnelSpy).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(postAccessTunnelSpy).toHaveBeenCalledTimes(1))
     await act(async () => watch.polls[0]!.resolve(consumedStatus(1)))
     expect(screen.getByRole('dialog')).not.toBeNull()
 
@@ -380,17 +392,47 @@ describe('remoteShare 远程分享弹层', () => {
     expect(screen.queryByText('remote.share.tunnel_failed')).toBeNull()
   })
 
-  it('隧道启动中：显示阶段与下载进度', async () => {
+  it('下载阶段只显示下载文案与进度，不叠加正在启动隧道', async () => {
     getAccessSpy.mockResolvedValue(statusOf({
       tunnel: { state: 'starting', mode: 'quick', progress: { stage: 'download', received: 1048576, total: 4194304 } },
     }))
-    render(<RemoteShare onManage={vi.fn()} />)
+    render(<RemoteShare />)
     await openShare()
     clickTunnelTab()
 
-    expect(await screen.findByText('remote.share.stage.download')).toBeTruthy()
-    expect(screen.getByText('remote.share.download_progress')).toBeTruthy()
-    expect(screen.getByText(/remote\.share\.tunnel_starting/u).textContent).toBe('remote.share.tunnel_starting（remote.share.stage.download）')
+    await screen.findByRole('progressbar')
+    expect(screen.getAllByText('remote.share.stage.download')).toHaveLength(1)
+    expect(screen.getByText('remote.share.download_progress').textContent).toBe('remote.share.download_progress')
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
+    expect(screen.queryByText(/remote\.share\.tunnel_starting/u)).toBeNull()
+  })
+
+  it.each([undefined, 0])('下载总量 %s 时仍显示不定进度，不叠加启动文案', async (total) => {
+    getAccessSpy.mockResolvedValue(statusOf({
+      tunnel: { state: 'starting', mode: 'quick', progress: { stage: 'download', received: 1048576, total } },
+    }))
+    render(<RemoteShare />)
+    await openShare()
+    clickTunnelTab()
+
+    await screen.findByRole('progressbar')
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBeNull()
+    expect(screen.getAllByText('remote.share.stage.download')).toHaveLength(1)
+    expect(screen.getByText('remote.share.download_received').textContent).toBe('remote.share.download_received')
+    expect(screen.queryByText(/remote\.share\.tunnel_starting/u)).toBeNull()
+  })
+
+  it('下载结束后的启动阶段不再展示残留下载字节', async () => {
+    getAccessSpy.mockResolvedValue(statusOf({
+      tunnel: { state: 'starting', mode: 'quick', progress: { stage: 'spawn', received: 4194304, total: 4194304 } },
+    }))
+    render(<RemoteShare />)
+    await openShare()
+    clickTunnelTab()
+
+    expect((await screen.findByText(/remote\.share\.tunnel_starting/u)).textContent).toBe('remote.share.tunnel_starting（remote.share.stage.spawn）')
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    expect(screen.queryByText('remote.share.stage.download')).toBeNull()
   })
 
   it('隧道失败：显示原因并可重试', async () => {
@@ -461,53 +503,120 @@ describe('remoteShare 远程分享弹层', () => {
     expect(screen.getByTestId('remote-share-pairing').textContent).toBe(PAIR_CODE)
   })
 
-  it('动作返回的访问密码明文只在弹层里保留，可复制可关闭', async () => {
+  it('旧动作回包的访问密码不再展示，分享仅保留配对码与链接', async () => {
     postAccessSpy.mockResolvedValue(statusOf({ ...listening, generatedPassword: 'Gen-Pass-1234' }))
-    render(<RemoteShare onManage={vi.fn()} />)
+    render(<RemoteShare />)
     await openShare()
     fireEvent.click(await screen.findByText('remote.share.lan_enable'))
 
-    expect((await screen.findByTestId('remote-share-password')).textContent).toBe('Gen-Pass-1234')
-    fireEvent.click(screen.getByTestId('remote-share-password-copy'))
-    await waitFor(() => expect(clipboardSpy).toHaveBeenCalledWith('Gen-Pass-1234', 'remote.share.copied'))
-
-    fireEvent.click(screen.getByTestId('remote-share-password-dismiss'))
+    expect((await screen.findByTestId('remote-share-pairing')).textContent).toBe(PAIR_CODE)
+    expect(screen.getByText(LAN_LINK).textContent).toBe(LAN_LINK)
     expect(screen.queryByTestId('remote-share-password')).toBeNull()
+    expect(screen.queryByText('Gen-Pass-1234')).toBeNull()
+    expect(screen.queryByText('remote.share.password')).toBeNull()
   })
 
-  it('动作进行中打到轮询：结果不被丢弃，按钮也不会永久锁死', async () => {
-    vi.useFakeTimers()
-    try {
-      let resolveTunnel: ((value: unknown) => void) | undefined
-      postAccessTunnelSpy.mockImplementation(() => new Promise((resolve) => {
-        resolveTunnel = resolve
-      }))
-      getAccessSpy.mockResolvedValue(statusOf({
-        tunnel: { enabled: false, mode: 'quick', state: 'stopped', events: [] },
-      }))
-      render(<RemoteShare onManage={vi.fn()} />)
-      fireEvent.click(screen.getByRole('button', { name: 'remote.share' }))
-      await vi.advanceTimersByTimeAsync(0)
-      fireEvent.click(screen.getByText('remote.share.tab_tunnel'))
-      fireEvent.click(screen.getByText('remote.share.tunnel_enable'))
-      await vi.advanceTimersByTimeAsync(0)
-      expect(postAccessTunnelSpy).toHaveBeenCalledTimes(1)
-
-      await vi.advanceTimersByTimeAsync(5000)
-      expect(getAccessSpy).toHaveBeenCalledTimes(1)
-
-      resolveTunnel?.(statusOf({
-        pairing: pairingOf({ tunnelLink: TUNNEL_LINK, tunnelQr: QR }),
-        tunnel: { state: 'running', mode: 'quick' },
-      }))
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(screen.getByText(TUNNEL_LINK)).toBeTruthy()
-      expect((screen.getByText('remote.share.tunnel_stop') as HTMLButtonElement).disabled).toBe(false)
+  it('两种语言移除访问密码文案，保留 SSH 密码与未知总量下载提示', () => {
+    for (const locale of [en, zh]) {
+      expect(Object.keys(locale).filter(key => key.startsWith('remote.share.password'))).toEqual([])
+      expect(locale['remote.auth.password']).toBeTypeOf('string')
+      expect(locale).toHaveProperty('remote.share.download_received', '{{received}} MB')
     }
-    finally {
-      vi.useRealTimers()
-    }
+  })
+
+  it('首次隧道下载尚未返回时持续轮询进度，较旧动作快照不覆盖刚取得的下载', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const mutation = Promise.withResolvers<unknown>()
+    postAccessTunnelSpy.mockReturnValue(mutation.promise)
+    getAccessSpy.mockResolvedValueOnce(statusOf()).mockResolvedValue(statusOf({
+      tunnel: { enabled: true, mode: 'quick', state: 'starting', progress: { stage: 'download', received: 1048576, total: 4194304 } },
+    }))
+    render(<RemoteShare />)
+    await openShare()
+    await screen.findByText('remote.share.lan_enable')
+    clickTunnelTab()
+    fireEvent.click(screen.getByText('remote.share.tunnel_enable'))
+    await waitFor(() => expect(postAccessTunnelSpy).toHaveBeenCalledExactlyOnceWith({ mode: 'quick' }))
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000))
+
+    expect(getAccessSpy).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
+    expect(screen.queryByText('remote.share.tunnel_off_desc')).toBeNull()
+    expect(screen.queryByText(/remote\.share\.tunnel_starting/u)).toBeNull()
+    expect((screen.getByText('remote.share.tunnel_stop') as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => mutation.resolve(statusOf()))
+    await waitFor(() => expect((screen.getByText('remote.share.tunnel_stop') as HTMLButtonElement).disabled).toBe(false))
+
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
+    expect(screen.queryByText('remote.share.tunnel_enable')).toBeNull()
+  })
+
+  it('启动动作结束后忽略在结束前捕获的轮询快照，后续轮询仍可更新为运行', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const mutation = Promise.withResolvers<unknown>()
+    const poll = Promise.withResolvers<unknown>()
+    postAccessTunnelSpy.mockReturnValue(mutation.promise)
+    getAccessSpy.mockResolvedValueOnce(statusOf()).mockReturnValueOnce(poll.promise)
+    render(<RemoteShare />)
+    await openShare()
+    await screen.findByText('remote.share.lan_enable')
+    clickTunnelTab()
+    fireEvent.click(screen.getByText('remote.share.tunnel_enable'))
+    await act(async () => vi.advanceTimersByTimeAsync(5000))
+    expect(getAccessSpy).toHaveBeenCalledTimes(2)
+
+    const running = statusOf({
+      pairing: pairingOf({ tunnelLink: TUNNEL_LINK, tunnelQr: QR }),
+      tunnel: { state: 'running', mode: 'quick' },
+    })
+    getAccessSpy.mockResolvedValue(running)
+    await act(async () => mutation.resolve(running))
+    expect(screen.getByText(TUNNEL_LINK).textContent).toBe(TUNNEL_LINK)
+    await act(async () => poll.resolve(statusOf({ tunnel: { state: 'starting', progress: { stage: 'download', received: 1, total: 2 } } })))
+    expect(screen.getByText(TUNNEL_LINK).textContent).toBe(TUNNEL_LINK)
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    expect((screen.getByText('remote.share.tunnel_stop') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('普通轮询乱序返回时，旧 stopped 快照不覆盖新下载进度', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const older = Promise.withResolvers<unknown>()
+    const newer = Promise.withResolvers<unknown>()
+    getAccessSpy.mockResolvedValueOnce(statusOf()).mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
+    render(<RemoteShare />)
+    await openShare()
+    await screen.findByText('remote.share.lan_enable')
+    clickTunnelTab()
+    await act(async () => vi.advanceTimersByTimeAsync(10000))
+    expect(getAccessSpy).toHaveBeenCalledTimes(3)
+
+    await act(async () => newer.resolve(statusOf({ tunnel: { state: 'starting', progress: { stage: 'download', received: 1, total: 2 } } })))
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('50')
+    await act(async () => older.resolve(statusOf()))
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('50')
+    expect(screen.queryByText('remote.share.tunnel_enable')).toBeNull()
+  })
+
+  it('长启动请求失败后仍给出错误并解除按钮锁，不被进度 polling 掩盖', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const mutation = Promise.withResolvers<unknown>()
+    postAccessTunnelSpy.mockReturnValue(mutation.promise)
+    getAccessSpy.mockResolvedValueOnce(statusOf()).mockResolvedValue(statusOf({
+      tunnel: { state: 'starting', progress: { stage: 'download', received: 1, total: 2 } },
+    }))
+    render(<RemoteShare />)
+    await openShare()
+    await screen.findByText('remote.share.lan_enable')
+    clickTunnelTab()
+    fireEvent.click(screen.getByText('remote.share.tunnel_enable'))
+    await act(async () => vi.advanceTimersByTimeAsync(5000))
+    expect(getAccessSpy).toHaveBeenCalledTimes(2)
+    await act(async () => mutation.reject(new Error('download denied')))
+
+    expect(screen.getByText(/download denied/u).textContent).toContain('download denied')
+    expect((screen.getByText('remote.share.tunnel_stop') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('齿轮保留在标题右侧且打通设置定位链路，缺席时点击不动作', async () => {

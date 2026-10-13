@@ -247,7 +247,7 @@ beforeEach(async () => {
   native.appListeners.clear()
   native.backListeners.clear()
   native.navigation.isFocused.mockReturnValue(true)
-  native.fetch.mockImplementation(async () => Response.json({ enabled: false, allowLoopback: true }))
+  native.fetch.mockImplementation(async () => Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' }))
   native.getIpAddressAsync.mockResolvedValue('192.168.1.50')
   native.getPermissionsAsync.mockResolvedValue({ granted: true })
   native.requestPermissionsAsync.mockResolvedValue({ granted: true })
@@ -279,6 +279,28 @@ afterEach(async () => {
 })
 
 describe('rendered Home scanning and idle actions', () => {
+  it('discovers the LAN DSH serving its public manifest instead of the nonexistent auth-status route', async () => {
+    const origin = 'http://192.168.1.2:3088'
+    native.fetch.mockImplementation(async (input) => {
+      if (String(input) === `${origin}/manifest.webmanifest`)
+        return Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' })
+      return new Response(null, { status: 404 })
+    })
+    hydrate()
+    connection.cancelScan()
+    await mount()
+
+    await press('自动扫描局域网')
+
+    expect(connection.current).toEqual({ id: origin, url: `${origin}/`, host: '192.168.1.2', port: 3088 })
+    expect(webView().props.source).toEqual({ uri: `${origin}/` })
+    expect(connection.loading).toBe(true)
+    expect(connection.history).toEqual([])
+    expect(connection.notice).toBeNull()
+    expect(native.getIpAddressAsync).toHaveBeenCalledTimes(1)
+    expect(native.fetch.mock.calls.every(([url]) => new URL(String(url)).pathname === '/manifest.webmanifest')).toBe(true)
+  })
+
   it('cancels the active discovery and reveals usable idle actions without a late timeout notice', async () => {
     hydrate(history.slice(0, 1))
     holdNetwork()
@@ -477,6 +499,38 @@ describe('rendered Home connection editing', () => {
 })
 
 describe('rendered Home connection drawer', () => {
+  it('keeps a successfully paired page available when a left swipe refreshes the real DSH manifest', async () => {
+    native.fetch.mockImplementation(async (input) => {
+      if (String(input) === `${alpha.id}/manifest.webmanifest`)
+        return Response.json({ name: 'DeepSeek Harness', short_name: 'DSH' })
+      return new Response(null, { status: 404 })
+    })
+    hydrate()
+    runtime.connectAddress({ ...alpha, token: 'consumed-pairing-code' })
+    await mount()
+    await ready()
+    const { WebView } = await import('react-native-webview')
+    const instance = root().findByType(WebView).instance
+    const generation = connection.viewGeneration
+
+    await act(async () => drawer().props.onOpen())
+
+    expect(drawer().props.open).toBe(true)
+    expect(connection.health[alpha.id]).toBe('available')
+    expect(connection.notice).toBeNull()
+    expect(texts()).not.toContain('主机暂时不可用')
+    expect(native.scheduleNotificationAsync).not.toHaveBeenCalled()
+    expect(root().findByType(WebView).instance).toBe(instance)
+    expect(connection.viewGeneration).toBe(generation)
+    expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=consumed-pairing-code' })
+    expect(native.fetch).toHaveBeenCalledExactlyOnceWith(`${alpha.id}/manifest.webmanifest`, {
+      signal: expect.any(AbortSignal),
+      headers: { Accept: 'application/manifest+json' },
+      cache: 'no-store',
+      redirect: 'error',
+    })
+  })
+
   it('opens the right slide drawer from a wider inner-edge region and presents five recent hosts with accessible status', async () => {
     hydrate(history)
     connection.cancelScan()
@@ -651,7 +705,7 @@ describe('rendered Home connection drawer', () => {
     await press('刷新最近连接')
     await press('刷新最近连接')
     expect(native.fetch).toHaveBeenCalledTimes(3)
-    expect(native.fetch.mock.calls[2]![0]).toBe('http://one.local:3080/__dsh_bridge__/auth-status')
+    expect(native.fetch.mock.calls[2]![0]).toBe('http://one.local:3080/manifest.webmanifest')
     expect(connection.viewGeneration).toBe(0)
   })
 
