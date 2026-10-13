@@ -1953,6 +1953,15 @@ const TAILWINDCSS_GENERATED = `
       }
     }
   }
+  .hover\\:not-disabled\\:text-error {
+    &:hover {
+      @media (hover: hover) {
+        &:not(*:disabled) {
+          color: var(--dsw-alias-state-error-primary);
+        }
+      }
+    }
+  }
   .hover\\:not-disabled\\:text-primary {
     &:hover {
       @media (hover: hover) {

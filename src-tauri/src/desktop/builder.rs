@@ -1628,6 +1628,7 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::set_pet_ignore_cursor_events,
         crate::bridge::list_pets,
         crate::bridge::import_pet,
+        crate::bridge::delete_pet,
         crate::bridge::import_pet_repository,
         crate::bridge::get_pet_asset,
         crate::bridge::list_preset_pets,

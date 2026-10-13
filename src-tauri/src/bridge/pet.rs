@@ -342,6 +342,51 @@ pub fn set_pet_throw_enabled(app: AppHandle, enabled: bool) -> Result<PetStatus,
     Ok(status)
 }
 
+/// 删除用户导入的宠物：来源限定 id 删除对应来源目录，预设 id 反注册远端条目（内置预设删不到）。
+///
+/// 被删的宠物正好是当前激活项时顺带清空选择——否则窗口会一直指向已经不存在的素材。
+#[tauri::command]
+pub fn delete_pet(app: AppHandle, id: String) -> Result<PetStatus, String> {
+    let id = id.trim().to_string();
+    match parse_qualified_id(&id) {
+        Ok((source, manifest_id)) => {
+            delete_pet_directory(&pets_dir(&app, source)?, source, manifest_id)?
+        }
+        Err(_) if crate::bridge::preset_pet::safe_preset_id(&id) => {
+            crate::bridge::preset_pet::unregister_remote_pet(&app, &id)?
+        }
+        Err(_) => {
+            return Err(
+                "PET_ID_INVALID: pet id must be a preset id or source-qualified".to_string(),
+            )
+        }
+    }
+    let setting = config::get_store_dat_setting(&app);
+    if setting.active_pet.as_deref() == Some(id.as_str()) {
+        return set_active_pet(app, String::new());
+    }
+    Ok(status_from_setting(&setting, &default_active_pet(&app)))
+}
+
+/// 删除来源目录中清单 id 匹配的宠物目录；目录名不一定等于清单 id，按清单反查真实路径。
+fn delete_pet_directory(root: &Path, source: PetSource, manifest_id: &str) -> Result<(), String> {
+    let _guard = pet_import_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (directory, _) = find_pet_directory(root, manifest_id)?.ok_or_else(|| {
+        format!(
+            "PET_NOT_FOUND: pet {} was not found",
+            qualified_id(source, manifest_id)
+        )
+    })?;
+    fs::remove_dir_all(&directory).map_err(|error| {
+        format!(
+            "PET_DELETE_FAILED: failed to remove {}: {error}",
+            directory.display()
+        )
+    })
+}
+
 /// 将 DSH 会话原始数据推送到独立桌宠 WebView，不在桌面端构造宠物专用结构。
 #[tauri::command]
 pub fn push_pet_session(app: AppHandle, action: String, session: Value) -> Result<(), String> {
@@ -2542,6 +2587,29 @@ mod tests {
         assert!(!directory.0.join("pets").exists());
         assert!(!directory.0.join("__MACOSX").exists());
         assert!(!directory.0.join(".DS_Store").exists());
+    }
+
+    #[test]
+    fn delete_pet_directory_removes_the_manifest_match_and_keeps_siblings() {
+        let root = TestDirectory::new("delete-pet");
+        for (folder, id) in [("folder-a", "alpha"), ("folder-b", "beta")] {
+            fs::create_dir_all(root.0.join(folder)).unwrap();
+            fs::write(
+                root.0.join(folder).join("pet.json"),
+                format!(r#"{{"id":"{id}","spritesheetPath":"spritesheet.webp"}}"#),
+            )
+            .unwrap();
+        }
+
+        assert!(delete_pet_directory(&root.0, PetSource::Codex, "missing")
+            .unwrap_err()
+            .starts_with("PET_NOT_FOUND:"));
+        assert_eq!(
+            delete_pet_directory(&root.0, PetSource::Codex, "alpha"),
+            Ok(())
+        );
+        assert!(!root.0.join("folder-a").exists());
+        assert!(root.0.join("folder-b").join("pet.json").is_file());
     }
 
     #[test]

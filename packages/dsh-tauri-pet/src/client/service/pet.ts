@@ -2,6 +2,7 @@ import type { ClientAdapter } from 'dsh-tauri/client'
 import type { PetActionResult, PetListItem, PetStatus, PresetPetItem } from './pet.types'
 import { invoke } from 'dsh-tauri/client'
 import {
+  CMD_DELETE_PET,
   CMD_GET_FORCE_XWAYLAND,
   CMD_GET_PET_OVERLAY_SUPPORTED,
   CMD_GET_PET_STATUS,
@@ -202,6 +203,18 @@ export async function importPetArchive(input: { name: string, data: string }): P
     await invoke<PetListItem>(CMD_IMPORT_PET, { name: input.name, data: input.data })
     store.pet.setCodexPets(await invoke<PetListItem[]>(CMD_LIST_PETS, { source: 'codex' }))
     return { ok: true }
+  })
+}
+
+/**
+ * Action：删除用户导入的宠物（来源限定 id 删目录，预设 id 反注册远端条目）。
+ *
+ * 删完重装整份清单：被删条目散落在预设 / Chat / Codex 三份列表里，只有这里知道是哪一份。
+ */
+export async function deletePet(input: { id: string }): Promise<PetActionResult> {
+  return guard('delete pet', async () => {
+    store.pet.setStatus(await invoke<PetStatus>(CMD_DELETE_PET, { id: input.id }))
+    return loadPetCatalog()
   })
 }
 

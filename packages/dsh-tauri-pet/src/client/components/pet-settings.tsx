@@ -8,6 +8,7 @@ import { locale } from '../locales'
 import {
   choosePet,
   clearPetSelection,
+  deletePet,
   enablePet,
   importPetArchive,
   importPetRepository,
@@ -129,6 +130,11 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
       await run(clearPetSelection, 'clearFailed')
   }
 
+  /** 删除导入的宠物：预设页删的是远端登记，Chat / Codex 页删的是本地目录。 */
+  async function remove(id: string): Promise<void> {
+    await run(() => deletePet({ id }), 'deleteFailed')
+  }
+
   async function toggleEnabled(): Promise<void> {
     await run(() => togglePet({ enabled: !enabled }), 'toggleFailed')
   }
@@ -232,6 +238,8 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
       disabled={busy}
       actionLabel={locale.text(active === item.id ? 'clear' : 'select')}
       onAction={() => { void (active === item.id ? clearSelection() : choose(item.id)) }}
+      deleteLabel={locale.text('delete')}
+      onDelete={() => { void remove(item.id) }}
     />
   ))
 
@@ -251,6 +259,8 @@ export function PetSettings(props: PetSettingsProps): ReactElement {
                   disabled={busy}
                   actionLabel={locale.text(active === item.id ? 'clear' : 'enable')}
                   onAction={() => { void (active === item.id ? clearSelection() : enablePreset(item.id)) }}
+                  deleteLabel={item.remote ? locale.text('delete') : undefined}
+                  onDelete={item.remote ? () => { void remove(item.id) } : undefined}
                 />
               ))}
               {cards(chatPets)}

@@ -7,6 +7,7 @@ import {
   choosePet,
   clearPetSelection,
   createPetSession,
+  deletePet,
   enablePet,
   importPetArchive,
   importPetRepository,
@@ -160,6 +161,22 @@ describe('pet service native command contracts', () => {
     expect(store.pet.status).toEqual(status)
   })
 
+  it('delete forwards the id, adopts the authoritative status and reloads every list', async () => {
+    const cleared = { ...status, active_pet: '', enabled: false, visible: false }
+    const chat = [{ id: 'chat-a', name: 'Chat', source: 'chat' }]
+    const presets = [{ id: 'builtin', name: 'Built in' }]
+    invoke.mockResolvedValueOnce(cleared).mockResolvedValueOnce(cleared).mockResolvedValueOnce(chat).mockResolvedValueOnce([]).mockResolvedValueOnce(presets)
+    expect(await deletePet({ id: 'chat:chat-a' })).toEqual({ ok: true })
+    expect(invoke.mock.calls).toEqual([
+      ['delete_pet', { id: 'chat:chat-a' }],
+      ['get_pet_status'],
+      ['list_pets', { source: 'chat' }],
+      ['list_pets', { source: 'codex' }],
+      ['list_preset_pets'],
+    ])
+    expect(store.pet.$state).toMatchObject({ status: cleared, catalogLoaded: true, chatPets: chat, codexPets: [], presetPets: presets })
+  })
+
   it('import forwards archive strings before refreshing only the Codex list', async () => {
     const codex = [{ id: 'imported', name: 'Imported', source: 'codex' }]
     invoke.mockResolvedValueOnce(codex[0]).mockResolvedValueOnce(codex)
@@ -241,6 +258,7 @@ describe('pet service native command contracts', () => {
     { label: 'toggle pet throw', action: () => togglePetThrow({ enabled: true }) },
     { label: 'resize pet', action: () => resizePet({ size: 140 }) },
     { label: 'import pet', action: () => importPetArchive({ name: 'bad.zip', data: 'bad' }) },
+    { label: 'delete pet', action: () => deletePet({ id: 'chat:chat-a' }) },
     { label: 'open community share', action: openCommunityShare },
   ])('$label preserves error messages and logging labels without changing cached values', async ({ label, action }) => {
     const error = new Error('native refused')
