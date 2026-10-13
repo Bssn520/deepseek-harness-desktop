@@ -39,6 +39,10 @@ fn get(app_handle: &AppHandle) -> Option<PendingInstaller> {
     Some(pending)
 }
 
+pub(super) fn installer_path(app_handle: &AppHandle) -> Option<std::path::PathBuf> {
+    get(app_handle).map(|pending| pending.path.into())
+}
+
 /// 记录 / 清除「待安装」标记（`None` = 已安装，或无需退出时自动打开）。
 ///
 /// 失败只告警不阻断：标记只是「退出时自动更新」的辅助，丢掉它的降级态是用户

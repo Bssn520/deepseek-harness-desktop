@@ -471,6 +471,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     if let Err(e) = crate::service::patch::plugin_visibility::apply(&app_handle) {
         log::warn!("plugin visibility patch failed: {e}");
     }
+    crate::service::patch::mcp_startup::apply(&app_handle)?;
     mark_phase("core_patches", &mut phase_started);
     // 预防性处理：pnpm 在无 TTY 环境（dsh-market 等子进程）下重装/更新插件时，
     // 清理/重建 node_modules 会触发交互确认并因无 TTY 直接中止
@@ -489,19 +490,26 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     mark_phase("deprecated_plugins", &mut phase_started);
     // 内置插件自愈：随包分发的内置插件（dsh-tauri 等）必须在服务进程加载插件
     // 前就绪——核对「已安装 + 安装路径指向当前捆绑目录」，未安装、路径不正确
-    // 或用户卸载后重启，一律强制重装（见 service::plugin::internal）。最佳
-    // 努力：失败只告警，不阻断启动（核心功能缺失是发布缺陷，由 build:plugins 报错）。
+    // 或用户卸载后重启，一律强制重装（见 service::plugin::internal）。普通
+    // 失败只告警，不阻断启动（核心功能缺失是发布缺陷，由 build:plugins 报错）；
+    // 但进程清理/协调器失败意味着前一次 pnpm 去向未确认，必须终止本次启动。
     if let Err(e) = crate::service::plugin::ensure_internal_plugins(&app_handle).await {
+        if crate::service::plugin::is_process_cleanup_failure(&e) {
+            log::error!("ensure internal plugins blocked by unconfirmed process cleanup: {e}");
+            return Err(e);
+        }
         log::warn!("ensure internal plugins failed: {e}");
     }
     mark_phase("ensure_internal_plugins", &mut phase_started);
     // 预装插件完整性自检：清单引用的预装插件若在 node_modules 缺失产物，服务
     // 启动时 loader 会对每个缺失插件抛 ERR_MODULE_NOT_FOUND 而整体失败（issue
     // #90，日志特征 `Cannot find package`）。用 `pnpm install` 以现有 manifest +
-    // lockfile 为准重建依赖图修复；修复失败只告警并给缺失插件记录错误标记
-    // （启动失败场景由前端 recovery 对话框兜底，见 service::plugin::recovery）。
+    // lockfile 为准重建依赖图修复；普通修复失败只告警并给缺失插件记录错误标记
+    // （启动失败场景由前端 recovery 对话框兜底，见 service::plugin::recovery），
+    // 只有进程清理/协调器失败会作为 Err 传上来并终止启动。
     if let Err(e) = crate::service::plugin::ensure_preset_plugins(&app_handle).await {
-        log::warn!("ensure preset plugins failed: {e}");
+        log::error!("ensure preset plugins blocked by unconfirmed process cleanup: {e}");
+        return Err(e);
     }
     mark_phase("ensure_preset_plugins", &mut phase_started);
     // 插件自愈（内置插件重装 / 预装插件完整性自检）可能刚把插件市场装进档案，而上一轮补丁
@@ -602,10 +610,18 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
 
     // 让市场子进程的 pnpm 与桌面端同一套受控策略（store 主版本感知、避免落到系统
     // homebrew pnpm）。与插件安装路径的 ensure_pnpm 版本感知一致，但启动阶段绝不
-    // 触发下载；捆绑版未安装或与 store 不匹配时不注入（交由用户 pnpm）。
-    // 最佳努力：失败只告警，不阻断启动。
-    if crate::service::plugin::harness_prefer_bundled_pnpm(&app_handle) {
-        envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
+    // 触发下载；捆绑版未安装或与 store 不匹配时不注入（交由用户 pnpm）。探测被正常
+    // 安装占住或探针自身失败只告警，只有进程清理未确认才终止启动。
+    match crate::service::plugin::harness_prefer_bundled_pnpm(&app_handle).await {
+        Ok(true) => {
+            envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
+        }
+        Ok(false) => {}
+        Err(e) if crate::service::plugin::is_process_cleanup_failure(&e) => {
+            log::error!("prefer bundled pnpm blocked by unconfirmed process cleanup: {e}");
+            return Err(e);
+        }
+        Err(e) => log::warn!("prefer bundled pnpm probe failed, keeping user pnpm: {e}"),
     }
 
     // 桌面端代理设置（issue #110）：核心（dsh-http-proxy）在启动时读

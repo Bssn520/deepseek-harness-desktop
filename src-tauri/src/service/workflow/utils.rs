@@ -185,11 +185,17 @@ pub fn wait_for_port_release(port: u16, budget: Duration) -> bool {
     }
 }
 
-/// 检查指定端口是否被占用（通过尝试连接来判断）
+/// 检查指定端口是否被占用。
+///
+/// 以实际绑定结果判断，能够识别“已绑定但尚未 listen”的占用状态。Windows 上
+/// 具体地址与通配地址的绑定互不冲突（`0.0.0.0:3080` 与 `127.0.0.1:3080` 可
+/// 同时绑定成功），只探一个地址会在另一种绑定下误判为空闲：harness 绑
+/// `0.0.0.0`（局域网访问开关，issue #1021）时桌面端永远判定“未监听”，启动
+/// 必然超时失败。两个地址都绑得上才算空闲。
 pub fn is_port_in_use(port: u16) -> bool {
-    // 以实际绑定结果判断，能够识别“已绑定但尚未 listen”的占用状态。
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    TcpListener::bind(addr).is_err()
+    [Ipv4Addr::LOCALHOST, Ipv4Addr::UNSPECIFIED]
+        .iter()
+        .any(|ip| TcpListener::bind(SocketAddr::new(IpAddr::V4(*ip), port)).is_err())
 }
 
 /// 在独立线程中读取子进程的输出，同时写入日志文件
@@ -525,6 +531,27 @@ mod tests {
             started.elapsed() < Duration::from_millis(100),
             "a released port must not be waited on"
         );
+    }
+
+    /// 回归（issue #1021）：Windows 上具体地址与通配地址的绑定互不冲突
+    /// （`127.0.0.1:3080` 与 `0.0.0.0:3080` 可同时绑上），只探回环会把绑在
+    /// `0.0.0.0` 的 harness 判成「端口空闲」，桌面端据此永远报未监听、
+    /// 启动必然超时。两种绑定都必须被识别为占用，端口释放后则读作空闲。
+    #[test]
+    fn is_port_in_use_detects_wildcard_and_loopback_listeners() {
+        for bind_addr in ["127.0.0.1:0", "0.0.0.0:0"] {
+            let listener = TcpListener::bind(bind_addr).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(
+                is_port_in_use(port),
+                "a listener on {bind_addr} must read as occupying port {port}"
+            );
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(!is_port_in_use(port), "a released port must read as free");
     }
 
     #[test]

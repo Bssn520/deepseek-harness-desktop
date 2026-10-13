@@ -30,6 +30,75 @@ fn updates_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn prune_installers_in_dir(dir: &std::path::Path, protected: &[PathBuf]) -> std::io::Result<()> {
+    let root = dunce::canonicalize(dir)?;
+    let protected: Vec<_> = protected
+        .iter()
+        .filter_map(|path| dunce::canonicalize(path).ok())
+        .collect();
+    let mut installers = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            extension.as_str(),
+            "exe" | "msi" | "dmg" | "appimage" | "deb" | "rpm"
+        ) {
+            continue;
+        }
+        let canonical = dunce::canonicalize(&path)?;
+        if canonical.parent() != Some(root.as_path()) {
+            continue;
+        }
+        installers.push((
+            protected.contains(&canonical),
+            entry.metadata()?.modified()?,
+            path,
+        ));
+    }
+    installers.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    for (protected, _, path) in installers.into_iter().skip(5) {
+        if protected || dunce::canonicalize(&path)?.parent() != Some(root.as_path()) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            log::warn!("UPDATE_PRUNE: failed to remove {}: {error}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn prune_old_installers(app_handle: &AppHandle) {
+    let mut protected: Vec<_> = super::pending::installer_path(app_handle)
+        .into_iter()
+        .collect();
+    if let Ok(executable) = std::env::current_exe() {
+        protected.push(executable);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        protected.push(PathBuf::from(appimage));
+    }
+    let result = updates_dir(app_handle).and_then(|dir| {
+        prune_installers_in_dir(&dir, &protected).map_err(|error| error.to_string())
+    });
+    if let Err(error) = result {
+        log::warn!("UPDATE_PRUNE: failed to clean old installers: {error}");
+    }
+}
+
 /// 安装包存放路径（AppData/updates/<asset_name>）
 fn installer_path(app_handle: &AppHandle, asset_name: &str) -> Result<PathBuf, String> {
     Ok(updates_dir(app_handle)?.join(asset_name))
@@ -53,6 +122,7 @@ pub struct DesktopUpdateInfo {
 
 /// 检查是否有新版本可用（含安装包是否已下载）
 pub async fn check(app_handle: &AppHandle) -> Result<Option<DesktopUpdateInfo>, String> {
+    prune_old_installers(app_handle);
     match fetch_latest_release(app_handle).await? {
         None => Ok(None),
         Some(r) => {
@@ -695,7 +765,9 @@ pub(super) fn open_installer_now(app_handle: &AppHandle, path: &str) -> Result<(
 /// 打开安装包：交给系统默认处理器（Windows 会触发 UAC 执行安装器）。
 pub async fn open_installer(app_handle: &AppHandle, path: String) -> Result<(), String> {
     if !super::version::supports_stable_updates(&app_handle.config().identifier) {
-        return Err("UPDATE_CHANNEL_UNSUPPORTED: nightly builds do not install stable updates".into());
+        return Err(
+            "UPDATE_CHANNEL_UNSUPPORTED: nightly builds do not install stable updates".into(),
+        );
     }
     // 更新前先停下本应用持有的 Harness 服务：安装器在安装时会强杀桌面端进程
     // （CheckIfAppIsRunning → taskkill），跳过正常退出路径的 stop_on_exit，导致
@@ -729,6 +801,99 @@ pub async fn open_installer(app_handle: &AppHandle, path: String) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_installers_keeps_up_to_five() {
+        let dir = tempfile::tempdir().unwrap();
+        prune_installers_in_dir(dir.path(), &[]).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("installer-{i}.exe")), b"payload").unwrap();
+            prune_installers_in_dir(dir.path(), &[]).unwrap();
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), i + 1);
+        }
+    }
+
+    #[test]
+    fn prune_installers_keeps_five_by_modified_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = [
+            "z.exe",
+            "a.MSI",
+            "y.dmg",
+            "b.AppImage",
+            "x.deb",
+            "c.rpm",
+            "w.exe",
+            "d.exe",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let file = std::fs::File::create(dir.path().join(name)).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i as u64),
+            ))
+            .unwrap();
+        }
+        for name in ["download.part", "notes.txt"] {
+            std::fs::write(dir.path().join(name), b"keep").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("nested.exe")).unwrap();
+        std::fs::write(dir.path().join("nested.exe/installer.exe"), b"keep").unwrap();
+
+        prune_installers_in_dir(dir.path(), &[]).unwrap();
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(dir.path().join(name).exists(), i >= 3, "{name}");
+        }
+        for name in ["download.part", "notes.txt", "nested.exe/installer.exe"] {
+            assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"keep");
+        }
+    }
+
+    #[test]
+    fn prune_installers_preserves_pending_and_running_packages_within_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..8 {
+            let file =
+                std::fs::File::create(dir.path().join(format!("installer-{i}.exe"))).unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i)),
+            )
+            .unwrap();
+        }
+        let protected = [
+            dir.path().join("installer-0.exe"),
+            dir.path().join("installer-1.exe"),
+        ];
+        prune_installers_in_dir(dir.path(), &protected).unwrap();
+        for i in 0..8 {
+            assert_eq!(
+                dir.path().join(format!("installer-{i}.exe")).exists(),
+                i < 2 || i >= 5,
+                "{i}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_installers_ignores_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("outside.exe");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        let link = dir.path().join("linked.exe");
+        std::os::unix::fs::symlink(&sentinel, &link).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("installer-{i}.exe")), b"payload").unwrap();
+        }
+        prune_installers_in_dir(dir.path(), &[]).unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+        assert!(std::fs::symlink_metadata(link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 6);
+    }
 
     /// 下载后补充可执行位：下载默认 0644 的文件被修复为含可执行位（issue #79）。
     #[cfg(unix)]
