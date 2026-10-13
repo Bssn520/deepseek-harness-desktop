@@ -53,6 +53,8 @@ gh variable set IOS_TESTFLIGHT_ENABLED --body true --repo dsh-tauri/deepseek-har
 
 ## 触发与产物
 
+签名任务使用 `macos-26` ARM64 runner，固定 Xcode `26.4.1`，与已成功归档的本机工具链一致。当前 ExpoModulesJSI 在 Intel macOS 15 runner 的 Xcode 26.3 上有 Swift/C++ 互操作编译错误，不能仅为避开排队而回退到该工具链；未来调整 Xcode 版本须重新验证完整归档。
+
 - 桌面正式发版成功后，现有 `Release Mobile Apps (Native)` 解析发行提交；新增独立 TestFlight 任务签名并上传该提交。
 - 原有 Android 和 unsigned iOS 任务保持不变，GitHub Release 的既有资产不因 TestFlight 上传失败而被阻止。
 - 手动试跑命令：

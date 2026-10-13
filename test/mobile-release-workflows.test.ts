@@ -142,6 +142,13 @@ describe('mobile release workflow contracts', () => {
     expect(section(release, 'build-ios', 2)).not.toContain('secrets:')
   })
 
+  it('pins TestFlight to the locally verified Xcode toolchain on macOS 26', () => {
+    const signed = readSource('.github/workflows/release-testflight.yml')
+    expect(signed).toContain('runs-on: macos-26')
+    expect(signed).toContain('xcode-version: \'26.4.1\'')
+    expect(signed).not.toContain('runs-on: macos-15-intel')
+  })
+
   it('keeps the native version synchronized with the desktop version', () => {
     expect(JSON.parse(readSource('app.json')).expo.version).toBe(JSON.parse(readSource('package.json')).version)
     expect(bumpConfig.files).toContain('app.json')

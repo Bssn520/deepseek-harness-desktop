@@ -37,7 +37,7 @@ jobs:
       github.repository == 'dsh-tauri/deepseek-harness-desktop' &&
       (inputs.source_ref != '' || github.ref == 'refs/heads/main')
     name: Sign and upload iOS TestFlight
-    runs-on: macos-15-intel
+    runs-on: macos-26
     timeout-minutes: 120
     defaults:
       run:
@@ -73,8 +73,19 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$SOURCE_REF" ]]
           echo "SOURCE_SHA=$SOURCE_REF" >> "$GITHUB_ENV"
 
-      - name: Setup Xcode
-        uses: ./.github/actions/setup-xcode
+      - name: Setup verified Xcode 26.4.1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90
+        with:
+          xcode-version: '26.4.1'
+
+      - name: Verify selected toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun swift --version
+          [[ "$(xcodebuild -version | head -n 1)" == 'Xcode 26.4.1' ]]
+          developer_dir="$(xcode-select -p)"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx:/usr/lib/swift" >> "$GITHUB_ENV"
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
