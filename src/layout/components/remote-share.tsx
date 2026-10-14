@@ -365,7 +365,9 @@ export function RemoteShare({ onManage }: { onManage?: () => void }) {
               </If>
 
               <If cond={status !== null && !listening}>
-                <Description className="text-xs">{t('remote.share.lan_off_desc')}</Description>
+                <Description className="flex items-center gap-1.5 text-xs">
+                  {t('remote.share.lan_off_desc')}
+                </Description>
                 <Button
                   className="h-8 w-full text-xs"
                   variant="primary"
