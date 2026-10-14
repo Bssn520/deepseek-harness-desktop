@@ -272,7 +272,7 @@ describe('registerMobileSidebar', () => {
     expect(mocks.sessionListeners.size).toBe(0)
   })
 
-  it.each(['touch', 'pointer'])('leaves %s swipes to content without opening or closing the sidebar', (source) => {
+  it.each(['touch', 'pointer'])('reveals and closes the sidebar with %s drags without activating a dragged session', (source) => {
     const { sidebar, main, overlay } = setupFrame()
     const row = document.createElement('button')
     row.textContent = 'Existing session'
@@ -283,19 +283,57 @@ describe('registerMobileSidebar', () => {
     renderOverlay(overlay)
     const send = source === 'touch' ? touch : pointer
     send(main, source === 'touch' ? 'touchstart' : 'pointerdown', 100, 200, 100)
-    expect(send(main, `${source}move`, 300, 202, 300).defaultPrevented).toBe(false)
+    expect(send(main, `${source}move`, 300, 202, 300).defaultPrevented).toBe(true)
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(true)
+    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-offset')).toBe('200px')
     send(main, source === 'touch' ? 'touchend' : 'pointerup', 320, 202, 400)
-    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(false)
-    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-width')).toBe('319px')
-    fireEvent.click(screen.getByRole('button', { name: 'Open sidebar' }))
-    send(row, source === 'touch' ? 'touchstart' : 'pointerdown', 220, 200, 500)
-    expect(send(row, `${source}move`, 20, 202, 700).defaultPrevented).toBe(false)
-    send(row, source === 'touch' ? 'touchend' : 'pointerup', 20, 202, 800)
     expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(true)
-    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-width')).toBe('319px')
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(false)
+    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-offset')).toBe('')
+    send(row, source === 'touch' ? 'touchstart' : 'pointerdown', 220, 200, 500)
+    expect(send(row, `${source}move`, 20, 202, 700).defaultPrevented).toBe(true)
+    send(row, source === 'touch' ? 'touchend' : 'pointerup', 20, 202, 800)
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(false)
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(false)
+    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-offset')).toBe('')
+    fireEvent.click(row)
+    expect(select).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Open sidebar' }))
     fireEvent.click(row)
     expect(select).toHaveBeenCalledTimes(1)
-    fireEvent.click(overlay.querySelector('[data-dsh-mobile-sidebar-shade]')!)
+  })
+
+  it.each(['touchcancel', 'blur', 'resize'])('clears drag-only styling after %s so conversation toggles can animate', (cancel) => {
+    const { main, overlay } = setupFrame()
+    register()
+    renderOverlay(overlay)
+    touch(main, 'touchstart', 100, 200, 100)
+    touch(main, 'touchmove', 180, 202, 300)
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(true)
+    if (cancel === 'touchcancel')
+      touch(main, cancel, 180, 202, 400)
+    else
+      fireEvent(window, new Event(cancel))
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(false)
+    expect(document.documentElement.style.getPropertyValue('--dsh-mobile-sidebar-offset')).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Open sidebar' }))
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(true)
+    expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-dragging')).toBe(false)
+  })
+
+  it.each(['input', 'pre'])('leaves gestures on editable or horizontally scrolling %s content alone', (tag) => {
+    const { main, overlay } = setupFrame()
+    const target = document.createElement(tag)
+    if (tag === 'pre') {
+      target.style.overflowX = 'auto'
+      Object.defineProperties(target, { scrollWidth: { value: 400 }, clientWidth: { value: 100 } })
+    }
+    main.append(target)
+    register()
+    renderOverlay(overlay)
+    touch(target, 'touchstart', 100, 200, 100)
+    expect(touch(target, 'touchmove', 300, 202, 300).defaultPrevented).toBe(false)
+    touch(target, 'touchend', 300, 202, 400)
     expect(document.documentElement.hasAttribute('data-dsh-mobile-sidebar-open')).toBe(false)
   })
 

@@ -103,6 +103,61 @@ describe('mobile settings official host composition', () => {
     }
   })
 
+  it('settles real conversation swipes with transitions and keeps subsequent tap animations', async () => {
+    const app = await newDshPage(browser, {
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+      ready: '[data-dsh-mobile-sidebar-toggle]',
+    })
+    try {
+      await app.page.emulateMedia({ reducedMotion: 'no-preference' })
+      await app.frame.locator('[data-dsh-mobile-new-session]').tap()
+      await expect.poll(() => app.frame.locator('[data-conversation-scroll]').count(), { message: '必须在真实会话区验证手势，而非插件面板' }).toBe(1)
+      const center = app.frame.locator('[class$="_centerCol"]')
+      const toggle = app.frame.locator('[data-dsh-mobile-sidebar-toggle]')
+      const shade = app.frame.locator('[data-dsh-mobile-sidebar-shade]')
+      await center.evaluate((element) => {
+        element.setAttribute('data-e2e-transform-count', '0')
+        element.addEventListener('transitionrun', (event) => {
+          if (event.target === element && (event as TransitionEvent).propertyName === 'transform')
+            element.setAttribute('data-e2e-transform-count', String(Number(element.getAttribute('data-e2e-transform-count')) + 1))
+        })
+      })
+      const cdp = await app.page.context().newCDPSession(app.page)
+      const swipe = async (start: number, end: number) => {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: start, y: 220 }] })
+        for (let step = 1; step <= 4; step++) {
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start + (end - start) * step / 4, y: 220 }] })
+        }
+        expect(await app.frame.locator('html').getAttribute('data-dsh-mobile-sidebar-dragging'), '横向会话手势必须接管拖动').toBe('')
+        expect(await center.evaluate(element => getComputedStyle(element).transitionDuration), '跟手阶段不应滞后动画').toBe('0s')
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+        expect(await app.frame.locator('html').getAttribute('data-dsh-mobile-sidebar-dragging'), '松手必须立即清理禁用过渡状态').toBeNull()
+      }
+      await swipe(80, 280)
+      await expect.poll(() => toggle.getAttribute('aria-expanded')).toBe('true')
+      await expect.poll(() => center.getAttribute('data-e2e-transform-count'), { message: '会话区松手展开必须真正启动过渡' }).toBe('1')
+      await expect.poll(async () => Math.round((await center.boundingBox())!.x)).toBe(319)
+      await swipe(370, 180)
+      await expect.poll(() => toggle.getAttribute('aria-expanded')).toBe('false')
+      await expect.poll(() => center.getAttribute('data-e2e-transform-count'), { message: '松手收起必须真正启动过渡' }).toBe('2')
+      await expect.poll(async () => Math.round((await center.boundingBox())!.x)).toBe(0)
+      await toggle.tap()
+      await expect.poll(() => center.getAttribute('data-e2e-transform-count'), { message: '拖动后点击展开不能丢失动画' }).toBe('3')
+      await expect.poll(async () => Math.round((await center.boundingBox())!.x)).toBe(319)
+      await shade.tap()
+      await expect.poll(() => center.getAttribute('data-e2e-transform-count'), { message: '拖动后点击收起不能丢失动画' }).toBe('4')
+      await expect.poll(async () => Math.round((await center.boundingBox())!.x)).toBe(0)
+      await cdp.detach()
+      expectNoSyntheticFallbacks(app)
+      expect(app.errors).toEqual([])
+    }
+    finally {
+      await app.close()
+    }
+  })
+
   it.each([{ width: 320, height: 568 }, { width: 430, height: 943 }, { width: 767, height: 800 }])('keeps the official section mounted through categories at $width pixels', async ({ width, height }) => {
     const { app, dialog } = await openPhoneSettings(width, height)
     try {

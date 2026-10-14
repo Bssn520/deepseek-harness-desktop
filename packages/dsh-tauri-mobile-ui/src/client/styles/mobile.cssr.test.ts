@@ -145,9 +145,15 @@ describe('mobile conversation layout', () => {
     })
   })
 
-  it('keeps click transitions on the center and shade without drag-only overrides', () => {
-    const css = root.toString()
-    expect(css).not.toContain('data-dsh-mobile-sidebar-dragging')
+  it('limits transition suppression and offsets to active drags so clicks and releases still animate', () => {
+    for (const selector of ['html[data-dsh-mobile-sidebar-dragging] [class$="_centerCol"]', 'html[data-dsh-mobile-sidebar-dragging] [data-dsh-mobile-sidebar-shade]']) {
+      expect(declarations(selector)).toMatchObject({
+        transform: 'translate3d(var(--dsh-mobile-sidebar-offset), 0, 0)',
+        transition: 'none',
+      })
+    }
+    expect(declarations('html[data-dsh-mobile-sidebar] [class$="_centerCol"]').transform).toBe('translate3d(0, 0, 0)')
+    expect(declarations('html[data-dsh-mobile-sidebar-open] [class$="_centerCol"]').transform).toBe('translate3d(var(--dsh-mobile-sidebar-width), 0, 0)')
     expect(declarations('html[data-dsh-mobile-sidebar] [class$="_centerCol"]').transition).toContain('transform 240ms cubic-bezier(.2, .8, .2, 1)')
     expect(declarations('[data-dsh-mobile-sidebar-shade]').transition).toContain('transform 240ms cubic-bezier(.2, .8, .2, 1)')
     const reducedMotion = root.nodes[0]
