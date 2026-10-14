@@ -19,6 +19,7 @@ import { BRIDGE_PROVIDER, KERNEL_RECORD_TYPE, SESSION_TITLE_PURPOSE } from '../c
 import { resetRuntime, runtime } from '../config/runtime'
 import { server } from '../server'
 import { waitFor } from '../utils/abort'
+import { activity } from './activity'
 import { backend } from './backend'
 import { checkpoint } from './checkpoint'
 import { identity } from './identity'
@@ -129,7 +130,7 @@ export const session = defineService({
       try {
         signal.throwIfAborted()
         lifetime.signal.throwIfAborted()
-        if (runtime.lifetime !== lifetime || source.seq !== cursor || ctx.agents.get(source.id) !== parent)
+        if (runtime.lifetime !== lifetime || !unchangedSince(source, cursor) || ctx.agents.get(source.id) !== parent)
           throw new Error('BRIDGE_FORK_SOURCE_CHANGED: 源会话在原生派生期间发生变化。')
         return handle
       }
@@ -171,13 +172,13 @@ export const session = defineService({
     const cursor = agent.session.inheritedEventCount
     await waitFor(parent.runMaintenance(async (maintenance) => {
       const repairing = AbortSignal.any([scoped, maintenance])
-      if (parent.session.seq !== cursor)
+      if (!unchangedSince(parent.session, cursor))
         throw new Error('BRIDGE_FORK_SOURCE_CHANGED: 父会话已改变，不能将较新的原生历史替代继承前缀。')
       const commit = await bindFork(agent, inherited, repairing, parent.session)
       commit.commit()
       await checkpoint.flush(agent, repairing)
       repairing.throwIfAborted()
-      if (parent.session.seq !== cursor)
+      if (!unchangedSince(parent.session, cursor))
         throw new Error('BRIDGE_FORK_SOURCE_CHANGED: 父会话在原生派生期间发生变化。')
     }), scoped)
     signal.throwIfAborted()
@@ -406,9 +407,13 @@ async function resolveParent(sessionId: string, signal: AbortSignal): Promise<Ag
   return result.agent
 }
 
+function unchangedSince(value: Session, cursor: number): boolean {
+  return value.seq >= cursor && value.snapshotEvents().slice(cursor).every(event => String(event.type) === 'plugin:dsh-tauri-kernel/activity' && event.ignorable === true)
+}
+
 function assertForkSource(parent: Session, child: Agent, binding: KernelBinding): void {
   const ctx = getServerContext<HostContext>(server)
-  if (parent.id !== child.session.header.parentSession || parent.seq !== child.session.inheritedEventCount || !sameBinding(ctx.sessionProjections.stateOf(parent, 'bridgeKernel')?.binding, binding))
+  if (parent.id !== child.session.header.parentSession || !unchangedSince(parent, child.session.inheritedEventCount) || !sameBinding(ctx.sessionProjections.stateOf(parent, 'bridgeKernel')?.binding, binding))
     throw new Error('BRIDGE_FORK_SOURCE_CHANGED: 父会话与当前继承前缀不一致，请重新创建工作树会话。')
 }
 
@@ -480,6 +485,7 @@ async function connect(agent: Agent, id: KernelBinding['backend'], storedId: str
   if (!resolved.detection.installed || !resolved.command || resolved.detection.auth === 'missing')
     throw new Error(resolved.detection.hint ?? 'BRIDGE_BACKEND_UNAVAILABLE: 本机内核不可用。')
   const nativeSink: NativeSink = {
+    activity: message => activity.update(agent, controller, id, message),
     text: (...args) => activeSink(agent, controller).text(...args),
     thinking: (...args) => activeSink(agent, controller).thinking(...args),
     assistant: (...args) => activeSink(agent, controller).assistant(...args),

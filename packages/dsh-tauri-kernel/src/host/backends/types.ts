@@ -54,6 +54,7 @@ export interface NativeQuestion {
 }
 
 export interface NativeSink {
+  activity?: (message: Record<string, unknown>) => void
   text: (id: string, delta: string) => void
   thinking: (id: string, delta: string) => void
   assistant: (id: string, content: readonly NativeContent[]) => void

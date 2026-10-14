@@ -879,6 +879,35 @@ describe('codex native app-server contract', () => {
     expect(sink.assistant.mock.calls).toEqual([['reasoning-2', [{ type: 'thinking', text: 'summary reasoning' }]]])
   })
 
+  it('preserves native execution when activity observation throws on plan notifications', async () => {
+    const { fixture } = codexProcess()
+    const activity = vi.fn((_message: Frame) => {
+      throw new Error('activity projection failed')
+    })
+    const sink = Object.assign(createSink(), { activity })
+    const session = await open(null, sink)
+    const plan = { method: 'turn/plan/updated', params: { threadId: session.id, turnId: 'turn-1', explanation: null, plan: [{ step: 'Inspect repository', status: 'inProgress' }] } }
+    const before = [...fixture.frames]
+    fixture.send(plan)
+    expect(activity).toHaveBeenCalledWith(plan)
+    expect(fixture.frames).toEqual(before)
+    const started = fixture.next(frame => frame.method === 'turn/start')
+    const submitted = session.submit([user()], new AbortController().signal)
+    await started
+    const frames = [...fixture.frames]
+    fixture.send(plan)
+    const item = { id: 'observed-command', type: 'commandExecution', command: 'git status --short', cwd: 'C:/fixture/workspace', status: 'inProgress' }
+    notify(fixture, 'item/started', { item })
+    notify(fixture, 'item/completed', { item: { ...item, status: 'completed', aggregatedOutput: ' M fixture.ts\n', exitCode: 0 } })
+    completed(fixture)
+    await submitted
+    expect(activity.mock.calls.filter(([message]) => message.method === 'turn/plan/updated')).toHaveLength(2)
+    expect(sink.toolStart.mock.calls).toEqual([['observed-command', 'commandExecution', '{"command":"git status --short","cwd":"C:/fixture/workspace"}']])
+    expect(sink.toolEnd.mock.calls).toEqual([['observed-command', ' M fixture.ts\n', false]])
+    expect(fixture.frames).toEqual(frames)
+    expect(fixture.kill).not.toHaveBeenCalled()
+  })
+
   it('preserves native tool ids and error results without executing DSH tools', async () => {
     const { fixture } = codexProcess()
     const sink = createSink()

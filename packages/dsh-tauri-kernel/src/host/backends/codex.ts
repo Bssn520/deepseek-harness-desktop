@@ -579,6 +579,14 @@ class CodexSession implements NativeSession {
         })().catch(error => this.transport.fail(errorFrom(error)))
       }
     }
+    if (params.threadId === this.id) {
+      try {
+        this.sink.activity?.(message)
+      }
+      catch {
+        // Visibility must not affect native execution.
+      }
+    }
     const turn = this.active
     if (!turn || params.threadId !== this.id)
       return
