@@ -46,7 +46,7 @@
 ## Features
 
 - 🪶 **Native desktop** — Tauri 2 + React 19 + HeroUI 3, embedding the local Harness UI.
-- 📱 **Remote connection** — Connect to the DSH instance on your computer from the native Android / iOS mobile app.
+- 📱 **Remote connection** — Scan a QR code in the Android / iOS app to connect to your computer's DSH over LAN or a Cloudflare public tunnel.
 - 🔄 **Runtime management** — Install dependencies, select core versions, and access desktop/core updates.
 - 🔀 **Multi-backend support** — Use DSH / Codex / Claude in one interface, powered by their native tools.
 - 🧩 **Plugin management** — 13 built-in plugins, plus local-directory installs, built-in disabling, community plugin installation, upgrades, removal, and error details.
@@ -114,9 +114,22 @@ brew install dsh-tauri/desktop/deepseek-harness
 - Leave empty to inherit system/environment settings. Saved changes apply to new requests; retry failed downloads afterward.
 - SOCKS5H resolves destination names through the proxy; loopback connections stay direct.
 
+## Data management
+
+- **Running → Profiles → Backup**: back up the active profile's configuration to `DSH_HOME/.backups`; restore over the current profile or as a new one. Sessions and shared storage are not included.
+- **Export recovery archive**: export sessions, shared storage, and all profiles outside `DSH_HOME`, under the desktop application data folder, excluding dependencies and existing backups. Finish tasks and close other clients first; the local service stops and stays stopped until you restart it. Recover manually into a new empty directory following the archive's `README.txt`, not with the profile Restore button.
+- Credentials are excluded by default, but other configuration can still contain secrets. Archives are not automatically redacted; keep them private and copy them to another device for protection against disk failure.
+- **Running → Data Directory**: preflight and migrate the entire data directory; update `DSH_HOME` only after verification, retaining the renamed old directory for rollback. Close other clients using it first, then restart the desktop app and reopen terminals. Development builds use `~/.dsh.dev` and cannot migrate it.
+
+See the [data management guide](https://dshtauri.mintlify.site/en/guides/data-management).
+
 ## Mobile support
 
-The same repository also maintains the **DSH Mobile** mobile app (Expo / React Native): it discovers a DSH host on the local network and hosts the Harness web UI in a full-screen WebView. The source lives in `src-native/`.
+The same repository maintains **DSH Mobile** (Expo / React Native): discover your computer's DSH over LAN or connect by QR code, then use the Harness web UI in a full-screen WebView. It does not run a core on the phone; source lives in `src-native/`.
+
+- Use **Remote → LAN / Public tunnel** in the desktop's top bar to enable sharing and display a pairing QR code, then scan it in DSH Mobile. LAN requires the same network; internet access supports Cloudflare Quick (no account, random hostname) or a named tunnel (Token and public hostname). Keep the computer, Harness service, and any tunnel online.
+- Sharing is off by default and requires authentication when enabled. Temporary pairing codes last 5 minutes and rotate after use; devices remember authorization. **Harness Settings → Remote Access → Remote Access** configures listening, tunnels, and revokes pairing authorization; revocation requires every device to pair again.
+- Pairing permits operating Harness on your computer, not read-only access. Keep QR codes, links, and access codes private. See the [mobile remote access guide](https://dshtauri.mintlify.site/en/guides/mobile-remote-access).
 
 - Android APKs are downloadable from the [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) page as `Deepseek.Harness.Android_x.x.x.apk`, and the version follows the desktop app.
 - **An unsigned iOS IPA is distributed with desktop releases**; you must sign it yourself before installation—it cannot be installed directly.
