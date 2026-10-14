@@ -205,6 +205,30 @@ describe('desktop style reporting', () => {
     stylesheet.remove()
   })
 
+  it('refreshes tokenized stylesheet links on href changes and load completion', async () => {
+    const { paint, frames, reads, dispose } = setup()
+    paint()
+    const link = document.createElement('link')
+    link.rel = 'next StyleSheet'
+    document.head.append(link)
+    await Promise.resolve()
+    paint()
+    reads.mockClear()
+    link.href = '/theme.css'
+    await Promise.resolve()
+    expect(frames.size).toBe(1)
+    paint()
+    expect(reads).toHaveBeenCalledOnce()
+    reads.mockClear()
+    link.dispatchEvent(new Event('load'))
+    expect(frames.size).toBe(1)
+    paint()
+    expect(reads).toHaveBeenCalledOnce()
+    dispose()
+    link.dispatchEvent(new Event('load'))
+    expect(frames.size).toBe(0)
+  })
+
   it('reports a root color-scheme change even when the chat body stays unchanged', async () => {
     const { paint, post } = setup()
     paint()

@@ -66,6 +66,10 @@ export const registerStyle = defineRegister<ClientContext>((controller) => {
     attributeOldValue: true,
     attributeFilter: ['style', 'class', 'data-theme', 'data-slot', 'href', 'rel', 'media', 'disabled'],
   })
+  controller.listen('load', (event) => {
+    if (event.target instanceof HTMLLinkElement && event.target.matches(STYLE_INPUT_SELECTOR))
+      scheduleReport()
+  }, { capture: true })
   controller.listenWindow('resize', scheduleReport)
   scheduleReport()
 })
