@@ -45,14 +45,6 @@ export function buildSessionMenu(
 ): void {
   const current = session
 
-  if (current && 'dshDesktop' in globalThis) {
-    composer.add(locale.text('openInNewWindow'), () => invoke<void>('create_app_window', {
-      sessionId: current.id,
-      iframeUrl: window.location.origin,
-    }))
-    composer.split()
-  }
-
   // 置顶会话：官方 0.1.7 起提供置顶能力，旧核心不展示该入口。
   if (current && supportsSessionPin(composer.workspaces)) {
     const pinned = isSessionPinned({ workspaces: composer.workspaces, sessionId: current.id })
@@ -144,6 +136,12 @@ export function buildSessionMenu(
   }
 
   composer.split()
+  if (current && 'dshDesktop' in globalThis) {
+    composer.add(locale.text('openInNewWindow'), () => invoke<void>('create_app_window', {
+      sessionId: current.id,
+      iframeUrl: window.location.origin,
+    }))
+  }
   composer.add(locale.text('refresh'), reload, shortcutLabel('R'))
 }
 
