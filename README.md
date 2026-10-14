@@ -45,7 +45,7 @@
 ## 功能
 
 - 🪶 **原生桌面** — Tauri 2 + React 19 + Hero 3，内嵌本地 Harness 界面。
-- 📱 **远程连接** — 通过原生 Android / iOS 移动端连接电脑上的 DSH 实例。
+- 📱 **远程连接** — Android / iOS 移动端扫码连接电脑上的 DSH，支持局域网与 Cloudflare 公网隧道。
 - 🔄 **运行时管理** — 安装依赖、选择内核版本，并提供桌面端与内核更新入口。
 - 🔀 **多内核支持** — 在同一界面畅用 DSH / Codex / Claude，发挥各自原生工具能力。
 - 🧩 **插件管理** — 13 个内置插件；支持本地路径安装、内置插件停用、社区插件安装、升级、卸载与错误查看。
@@ -113,9 +113,22 @@ brew install dsh-tauri/desktop/deepseek-harness
 - 留空沿用系统/环境代理；保存后对新请求生效，可重试失败的下载。
 - SOCKS5H 通过代理解析目标域名；本机回环连接始终直连。
 
+## 数据管理
+
+- **运行配置 → 档案 → 备份**：备份当前档案配置到 `DSH_HOME/.backups`，可覆盖还原或还原为新档案；不含会话与共享存储。
+- **导出恢复归档**：将会话、共享存储和所有档案导出到 `DSH_HOME` 外的桌面应用数据目录，排除依赖与已有备份。先结束任务并关闭其他客户端；本机服务停止后保持停止，需手动重启。恢复需解压到新空目录，按归档内的 `README.txt` 操作，不适用档案还原按钮。
+- 凭据默认不包含；即使不勾选，其他配置仍可能含密钥。归档不会自动脱敏，请妥善保管，另存到其他设备才能防范磁盘损坏。
+- **运行配置 → 数据**：预检后整体迁移数据目录，校验通过才改写 `DSH_HOME`，旧目录改名保留并可回滚。迁移前关闭其他使用该目录的客户端，完成后重启桌面端、重开终端；开发构建固定使用 `~/.dsh.dev`，不能迁移。
+
+详见[数据管理指南](https://dshtauri.mintlify.site/zh-CN/guides/data-management)。
+
 ## 移动端支持
 
-同一仓库内维护移动端 **DSH Mobile**（Expo / React Native）：在局域网发现 DSH 主机，并以全屏 WebView 承载 Harness 网页，源码位于 `src-native/`。
+同一仓库内维护移动端 **DSH Mobile**（Expo / React Native）：通过局域网发现或扫码连接电脑上的 DSH，以全屏 WebView 承载 Harness 网页，不在手机上运行内核；源码位于 `src-native/`。
+
+- 桌面顶部**远程 → 局域网 / 公网隧道**可开启分享并显示配对二维码；DSH Mobile 扫码连接。局域网需同一网络，外网可用 Cloudflare Quick（免账号、随机域名）或具名隧道（Token 与公开主机名）。电脑、Harness 服务和所用隧道须保持在线。
+- 分享默认关闭，开启后需认证；临时配对码 5 分钟有效，使用后轮换，设备记住授权。**Harness 设置 → 远程访问 → 远程访问**可配置监听地址、隧道及撤销配对授权；撤销后所有设备需重新配对。
+- 配对允许操作电脑上的 Harness，并非只读分享；不要公开二维码、链接或访问码。步骤见[手机远程访问指南](https://dshtauri.mintlify.site/zh-CN/guides/mobile-remote-access)。
 
 - Android APK 可在 [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) 页面下载，资产名形如 `Deepseek.Harness.Android_x.x.x.apk`，版本跟随桌面端。
 - **iOS 未签名 IPA 随桌面端发版**；需自行签名后安装，不能直接安装。
