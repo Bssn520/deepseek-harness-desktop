@@ -152,7 +152,7 @@ function ConnectionDrawer() {
             setEditing(null)
         }}
       >
-        <Dialog.Portal>
+        <Dialog.Portal unstable_accessibilityContainerViewIsModal>
           <Dialog.Overlay />
           <Dialog.Content className="gap-5">
             <If cond={dialogMode === 'actions'}>

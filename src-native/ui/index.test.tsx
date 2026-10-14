@@ -461,6 +461,7 @@ describe('rendered Home connection editing', () => {
     await act(async () => button(i18n.t('connection.reconnect')).props.onLongPress())
 
     const content = root().find(node => String(node.type) === 'Content')
+    expect(root().find(node => String(node.type) === 'Portal').props.unstable_accessibilityContainerViewIsModal).toBe(true)
     expect(content.props.className).toBe('gap-5')
     expect(content.findAll(node => String(node.type) === 'Button').map(text)).toEqual([
       i18n.t('connection.rename'),
