@@ -20,11 +20,7 @@ use windows_sys::Win32::UI::{
     WindowsAndMessaging::{SendMessageW, HICON, ICON_BIG, ICON_SMALL, WM_GETICON, WM_SETICON},
 };
 
-// 托盘相关的 tauri 类型只在非 Linux 路径使用：Linux 走 desktop::linux_tray 的
-// KSNI 托盘（见该文件的背景说明），届时这些导入会变成未使用。
-#[cfg(not(target_os = "linux"))]
 use tauri::menu::{Menu, MenuEvent, MenuItem};
-#[cfg(not(target_os = "linux"))]
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 
 #[cfg(target_os = "macos")]
@@ -50,9 +46,6 @@ const MACOS_VIEW_COMMANDS: [(&str, &str); 4] = [
 #[cfg(windows)]
 use crate::desktop::window::on_page_load;
 use crate::desktop::window::{on_download, on_new_window};
-// 只在 tauri::tray 路径（Windows / macOS）里按短名使用；Linux 的 KSNI 托盘在
-// desktop::linux_tray 内自行引用，且下面单例回调用的是完整路径。
-#[cfg(not(target_os = "linux"))]
 use crate::utils::show_main_window;
 
 pub const SHELL_NAV_HEIGHT: u32 = 44;
@@ -170,18 +163,23 @@ pub fn setup(app_handle: tauri::AppHandle) {
 
 /// 构建系统托盘。
 ///
-/// Linux 用上游 tray-icon 的 KSNI 后端自建（`tauri::tray` 固定依赖的 tray-icon 0.24
-/// 在 Linux 上不上报任何托盘事件，见 `desktop::linux_tray` 的平台说明与 issue #386）；
-/// Windows / macOS 沿用 `tauri::tray`。
-#[cfg(target_os = "linux")]
+/// 托盘是可选壳层能力：Linux 桌面没有 SNI watcher（例如未装 AppIndicator 扩展的
+/// GNOME）或会话总线不可用时只记日志，不让应用启动失败。
 pub fn tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    crate::desktop::linux_tray::build(app);
+    #[cfg(target_os = "linux")]
+    if let Err(error) = build_tray(app) {
+        log::warn!("[tray] LINUX_TRAY_FAILED: {error}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    build_tray(app)?;
     Ok(())
 }
 
-/// 构建系统托盘（Windows / macOS：`tauri::tray`）。
-#[cfg(not(target_os = "linux"))]
-pub fn tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+/// Linux 后端由 Cargo.toml 里 `tray-icon` 的 `ksni` 特性选定（tauri 自己只开
+/// libappindicator，而后者在 Linux 上不上报托盘事件，见 issue #386）；tauri 在
+/// `App::run` 里给同一个 tray-icon / muda 实例装全局处理器，因此 Linux 上同样能收到
+/// 单击与菜单事件。
+fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     // 平台差异的托盘图标策略：
     // - macOS：使用 scoped template 透明图标（NSImage template），由系统按菜单栏
     //   深浅/半透明材质自动着色，呈现与系统一致的半透明玻璃观感，而非彩色方块。
