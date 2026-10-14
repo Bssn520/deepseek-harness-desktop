@@ -1835,6 +1835,14 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
                         log::error!("[activation] APP_HIDE_FAILED: {error}");
                     }
                 }
+                // 隐藏窗口**不会**停掉页面里的动画 tick：WebView2 的「隐藏后照跑」是
+                // By Design 行为（WebView2Feedback #3207），微软那边的建议是按 webview
+                // 可见性停 tick，而不是把窗口移出屏幕。`background_throttling()` 只在
+                // WKWebView 上生效（wry CHANGELOG 0.48.1），Windows/WebView2 上是空转
+                // API；tauri/wry 也都不调用 `TrySuspendAsync`（WebView2Feedback #2398），
+                // 最小化同样不改变 webview 可见性（tauri-runtime-wry 只在窗口 Show/Hide
+                // 时 `set_visible`）。要真正停 tick 只能显式把 webview 可见性设为 false
+                // （已有的 `with_webview` 通路，webview2-com 已是直接依赖）。
                 #[cfg(not(target_os = "macos"))]
                 let _ = window.hide();
             }
