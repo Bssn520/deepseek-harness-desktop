@@ -107,6 +107,12 @@ export default c(`@media ${MOBILE_MEDIA_QUERIES.join(' and ')}`, [
     borderRadius: '24px 0 0 24px',
     boxShadow: 'var(--dsw-shadow-lv3)',
   }),
+  c('html[data-dsh-mobile-sidebar-dragging] [class$="_centerCol"]', {
+    transform: 'translate3d(var(--dsh-mobile-sidebar-offset), 0, 0)',
+    borderRadius: 'clamp(0px, calc(var(--dsh-mobile-sidebar-offset) / 10), 24px) 0 0 clamp(0px, calc(var(--dsh-mobile-sidebar-offset) / 10), 24px)',
+    boxShadow: 'var(--dsw-shadow-lv3)',
+    transition: 'none',
+  }),
   c('html[data-dsh-mobile-sidebar] body[data-ds-dark-theme] [class$="_centerCol"]', {
     colorScheme: 'dark',
   }),
@@ -228,6 +234,13 @@ export default c(`@media ${MOBILE_MEDIA_QUERIES.join(' and ')}`, [
     visibility: 'visible',
     pointerEvents: 'auto',
     transitionDelay: '0s',
+  }),
+  c('html[data-dsh-mobile-sidebar-dragging] [data-dsh-mobile-sidebar-shade]', {
+    transform: 'translate3d(var(--dsh-mobile-sidebar-offset), 0, 0)',
+    opacity: '1',
+    visibility: 'visible',
+    pointerEvents: 'auto',
+    transition: 'none',
   }),
   c('@media (prefers-reduced-motion: reduce)', [
     c('html[data-dsh-mobile-sidebar] [class$="_centerCol"], html[data-dsh-mobile-sidebar] [data-dsh-mobile-sidebar-shade]', {

@@ -7,7 +7,7 @@ import { Input } from 'heroui-native/input'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Else, If, Then } from 'react-if-lite'
-import { Alert, BackHandler, ScrollView, Text, useWindowDimensions, View } from 'react-native'
+import { BackHandler, ScrollView, Text, useWindowDimensions, View } from 'react-native'
 import { Drawer } from 'react-native-drawer-layout'
 import { History, Radar, RefreshCw, ScanLine, X } from 'react-native-lucide'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -37,35 +37,33 @@ function ConnectionDrawer() {
   const { t } = useTranslation()
   const state = useStore(connection)
   const [background, foreground, muted] = useThemeColor(['surface', 'foreground', 'muted'])
-  const [renaming, setRenaming] = useState<BridgeAddress | null>(null)
+  const [editing, setEditing] = useState<BridgeAddress | null>(null)
+  const [dialogMode, setDialogMode] = useState<'actions' | 'rename' | 'delete'>('actions')
   const [name, setName] = useState('')
   function editConnection(entry: BridgeAddress) {
-    Alert.alert(connectionLabel(entry), entry.url, [
-      { text: t('connection.rename'), onPress: () => {
-        setName(connectionLabel(entry))
-        setRenaming(entry)
-      } },
-      { text: t('connection.delete'), style: 'destructive', onPress: () => {
-        let message = t('connection.deleteConfirm')
-        if (connection.current?.id === entry.id)
-          message = t('connection.deleteCurrentConfirm')
-        Alert.alert(t('connection.delete'), message, [
-          { text: t('common.cancel'), style: 'cancel' },
-          { text: t('connection.delete'), style: 'destructive', onPress: () => {
-            stopConnectionRuntime()
-            connection.forget(entry.id)
-          } },
-        ])
-      } },
-      { text: t('common.cancel'), style: 'cancel' },
-    ])
+    setName(connectionLabel(entry))
+    setDialogMode('actions')
+    setEditing(entry)
   }
   function saveName() {
-    if (!renaming || !name.trim())
+    if (!editing || !name.trim())
       return
-    connection.rename(renaming.id, name)
-    setRenaming(null)
+    connection.rename(editing.id, name)
+    setEditing(null)
   }
+  function deleteConnection() {
+    if (!editing)
+      return
+    stopConnectionRuntime()
+    connection.forget(editing.id)
+    setEditing(null)
+  }
+  let actionTitle = ''
+  if (editing)
+    actionTitle = connectionLabel(editing)
+  let deleteMessage = t('connection.deleteConfirm')
+  if (editing && state.current?.id === editing.id)
+    deleteMessage = t('connection.deleteCurrentConfirm')
   let currentLabel: string = t('connection.noConnection')
   if (state.current)
     currentLabel = connectionLabel(state.current)
@@ -148,21 +146,48 @@ function ConnectionDrawer() {
         </View>
       </ScrollView>
       <Dialog
-        isOpen={renaming !== null}
+        isOpen={editing !== null}
         onOpenChange={(open) => {
           if (!open)
-            setRenaming(null)
+            setEditing(null)
         }}
       >
-        <Dialog.Portal>
+        <Dialog.Portal unstable_accessibilityContainerViewIsModal>
           <Dialog.Overlay />
-          <Dialog.Content>
-            <Dialog.Title>{t('connection.rename')}</Dialog.Title>
-            <Input accessibilityLabel={t('connection.name')} value={name} onChangeText={setName} autoFocus returnKeyType="done" onSubmitEditing={saveName} />
-            <View className="flex-row justify-end gap-3">
-              <Button variant="ghost" onPress={() => setRenaming(null)}>{t('common.cancel')}</Button>
-              <Button isDisabled={!name.trim()} onPress={saveName}>{t('common.save')}</Button>
-            </View>
+          <Dialog.Content className="gap-5">
+            <If cond={dialogMode === 'actions'}>
+              <Then>
+                <View className="gap-2">
+                  <Dialog.Title>{actionTitle}</Dialog.Title>
+                  <Dialog.Description>{editing?.url}</Dialog.Description>
+                </View>
+                <View className="gap-3">
+                  <Button variant="secondary" onPress={() => setDialogMode('rename')}>{t('connection.rename')}</Button>
+                  <Button variant="danger-soft" onPress={() => setDialogMode('delete')}>{t('connection.delete')}</Button>
+                  <Button variant="ghost" className="mt-1" onPress={() => setEditing(null)}>{t('common.cancel')}</Button>
+                </View>
+              </Then>
+            </If>
+            <If cond={dialogMode === 'rename'}>
+              <Then>
+                <Dialog.Title>{t('connection.rename')}</Dialog.Title>
+                <Input accessibilityLabel={t('connection.name')} value={name} onChangeText={setName} autoFocus returnKeyType="done" onSubmitEditing={saveName} />
+                <View className="flex-row justify-end gap-3">
+                  <Button variant="ghost" onPress={() => setEditing(null)}>{t('common.cancel')}</Button>
+                  <Button isDisabled={!name.trim()} onPress={saveName}>{t('common.save')}</Button>
+                </View>
+              </Then>
+            </If>
+            <If cond={dialogMode === 'delete'}>
+              <Then>
+                <Dialog.Title>{t('connection.delete')}</Dialog.Title>
+                <Dialog.Description>{deleteMessage}</Dialog.Description>
+                <View className="flex-row justify-end gap-3">
+                  <Button variant="ghost" onPress={() => setEditing(null)}>{t('common.cancel')}</Button>
+                  <Button variant="danger" onPress={deleteConnection}>{t('connection.delete')}</Button>
+                </View>
+              </Then>
+            </If>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog>
