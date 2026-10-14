@@ -23,7 +23,11 @@ function initialMachineId(): string | null {
   if (!('__TAURI_INTERNALS__' in window))
     return null
   const label = getCurrentWindow().label
-  return label.startsWith('remote-') ? label.slice('remote-'.length) || null : null
+  if (label.startsWith('remote-'))
+    return label.slice('remote-'.length) || null
+  const parameters = new URLSearchParams(window.location.hash.slice(1))
+  const url = parameters.has('sessionId') ? parameters.get('iframeUrl') : null
+  return url && URL.canParse(url) ? new URL(url).origin : null
 }
 
 export function useRemote() {
@@ -119,8 +123,9 @@ export function useRemote() {
   })
 
   useWatch([bootId, machinesQuery.data, available], () => {
-    if (bootId !== null && available && enabled && machines.some(machine => machine.id === bootId))
-      switchTo(bootId)
+    const target = machines.find(machine => machine.id === bootId || (machine.tunnelBaseUrl !== undefined && URL.canParse(machine.tunnelBaseUrl) && new URL(machine.tunnelBaseUrl).origin === bootId))?.id
+    if (target !== undefined && available && enabled)
+      switchTo(target)
   }, { immediate: true })
 
   useEventListener('focus', () => {

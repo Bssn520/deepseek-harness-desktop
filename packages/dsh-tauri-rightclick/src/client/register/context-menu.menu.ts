@@ -6,6 +6,7 @@ import type {
   WorkspaceViewLike,
 } from '../types'
 import type { MenuComposer } from './context-menu.types'
+import { invoke } from 'dsh-tauri/client'
 import { confirmDialog } from '../components/confirm-dialog'
 import { locale } from '../locales'
 import {
@@ -43,6 +44,14 @@ export function buildSessionMenu(
   extensions: ContextMenuExtension[],
 ): void {
   const current = session
+
+  if (current && 'dshDesktop' in globalThis) {
+    composer.add(locale.text('openInNewWindow'), () => invoke<void>('create_app_window', {
+      sessionId: current.id,
+      iframeUrl: window.location.origin,
+    }))
+    composer.split()
+  }
 
   // 置顶会话：官方 0.1.7 起提供置顶能力，旧核心不展示该入口。
   if (current && supportsSessionPin(composer.workspaces)) {

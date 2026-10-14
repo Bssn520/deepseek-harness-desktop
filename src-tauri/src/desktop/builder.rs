@@ -1164,12 +1164,13 @@ pub fn build_shell_window(
     app: &tauri::AppHandle<Wry>,
     label: String,
     title: &str,
+    path: std::path::PathBuf,
 ) -> tauri::Result<tauri::WebviewWindow<Wry>> {
     let app_handle = app.clone();
 
     let webview_builder = with_shell_chrome(
         app,
-        WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into())).title(title),
+        WebviewWindowBuilder::new(app, label, WebviewUrl::App(path)).title(title),
     )?;
 
     // 非 Windows 平台没有 WebView2 的 FrameCreated/ContentLoading 流程，兼容桥、
@@ -1213,12 +1214,16 @@ pub fn build_shell_window(
 }
 
 /// 「文件 → 新建窗口」：`window-<N>` 序号 label，chrome 全部取 `build_shell_window`。
-pub fn build_extra_window(app: &tauri::AppHandle<Wry>) -> tauri::Result<tauri::WebviewWindow<Wry>> {
+pub fn build_extra_window(
+    app: &tauri::AppHandle<Wry>,
+    path: std::path::PathBuf,
+) -> tauri::Result<tauri::WebviewWindow<Wry>> {
     let sequence = EXTRA_WINDOW_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     build_shell_window(
         app,
         format!("window-{sequence}"),
         crate::desktop::product_name(app),
+        path,
     )
 }
 
