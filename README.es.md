@@ -114,27 +114,16 @@ brew install dsh-tauri/desktop/deepseek-harness
 - Vacío hereda la configuración del sistema/entorno. Los cambios se aplican a nuevas peticiones; reintentá las descargas fallidas.
 - SOCKS5H resuelve los nombres por el proxy; las conexiones de loopback siguen directas.
 
-## Gestión de datos
-
-- **Configuración → Perfiles → Backups**: guardá la configuración del perfil activo en `DSH_HOME/.backups` y restaurala sobre el perfil actual o como uno nuevo. No incluye sesiones ni almacenamiento compartido.
-- **Exportar archivo de recuperación**: exportá sesiones, almacenamiento compartido y todos los perfiles fuera de `DSH_HOME`, en los datos de la aplicación de escritorio, sin dependencias ni backups existentes. Terminá las tareas y cerrá otros clientes primero; el servicio local se detiene y queda detenido hasta que lo reinicies. Recuperá manualmente en un directorio nuevo y vacío siguiendo el `README.txt` del archivo, no con el botón de restauración del perfil.
-- Las credenciales se excluyen por defecto, pero otras configuraciones pueden contener claves. Los archivos no se censuran automáticamente; guardalos en privado y copialos a otro dispositivo para protegerte contra fallas del disco.
-- **Configuración → Datos**: verificá y migrá el directorio completo; `DSH_HOME` cambia solo después de validar la copia, conservando el directorio anterior renombrado para revertir. Cerrá otros clientes que lo usen primero; luego reiniciá el escritorio y abrí nuevas terminales. Las versiones de desarrollo usan `~/.dsh.dev` y no permiten migrarlo.
-
-Consultá la [guía de gestión de datos en inglés](https://dshtauri.mintlify.site/en/guides/data-management).
-
 ## Soporte móvil
 
-El mismo repositorio mantiene **DSH Mobile** (Expo / React Native): descubrí el DSH de tu computadora por LAN o conectate con un QR y usá la interfaz web de Harness en un WebView a pantalla completa. No ejecuta el núcleo en el teléfono; el código está en `src-native/`.
+**DSH Mobile** accede al Harness de tu computadora por LAN o un túnel público; no ejecuta el núcleo en el teléfono.
 
-- En la barra superior del escritorio, **Remoto → LAN / Túnel público** permite compartir y mostrar un QR de emparejamiento; escanealo en DSH Mobile. LAN requiere la misma red; desde internet podés usar Cloudflare Quick (sin cuenta, dominio aleatorio) o un túnel con nombre (Token y dominio público). La computadora, Harness y el túnel deben seguir en línea.
-- Compartir está desactivado por defecto y exige autenticación al activarlo. Los códigos temporales duran 5 minutos y cambian después de usarse; los dispositivos recuerdan la autorización. **Ajustes de Harness → Acceso remoto → Acceso remoto** permite configurar la escucha, los túneles y revocar el emparejamiento; después todos los dispositivos deben emparejarse otra vez.
-- El emparejamiento permite operar Harness en tu computadora, no es acceso de solo lectura. No publiques QR, enlaces ni códigos de acceso. Consultá la [guía de acceso remoto móvil en inglés](https://dshtauri.mintlify.site/en/guides/mobile-remote-access).
+- **Android**: descargá un APK desde [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases).
+- **iOS**: instalá la beta mediante la [invitación de TestFlight](https://testflight.apple.com/join/kYXkpnp1), según la aprobación y los cupos disponibles. Los IPA sin firmar de Releases requieren tu propia firma.
 
-- Los APK de Android se descargan desde la página de [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) como `Deepseek.Harness.Android_x.x.x.apk`, y la versión sigue a la de escritorio.
-- **El IPA de iOS sin firmar se distribuye con las versiones de escritorio**; tenés que firmarlo por tu cuenta antes de instalarlo: no se puede instalar directamente.
-- La app móvil se mantiene **solo mientras no exista un servicio móvil oficial**, como solución transitoria.
-- Los comandos de desarrollo (`pnpm dev:native`, `pnpm android`, `pnpm test:native`, `pnpm typecheck:native`, etc.) y las convenciones de descubrimiento, conexión, persistencia y publicación están en la [especificación móvil](docs/specs/native.md).
+Activá la opción de compartir en la barra superior del escritorio y escaneá el QR para emparejar. La computadora, Harness y el túnel deben seguir en línea. El acceso no es de solo lectura; no publiques QR ni códigos de acceso. Consultá la [guía de acceso remoto móvil en inglés](https://dshtauri.mintlify.site/en/guides/mobile-remote-access).
+
+La app se mantiene solo hasta que se lance un servicio móvil oficial. Los detalles de desarrollo están en la [especificación móvil](docs/specs/native.md).
 
 ## Runtime
 

@@ -113,27 +113,16 @@ brew install dsh-tauri/desktop/deepseek-harness
 - 留空沿用系统/环境代理；保存后对新请求生效，可重试失败的下载。
 - SOCKS5H 通过代理解析目标域名；本机回环连接始终直连。
 
-## 数据管理
-
-- **运行配置 → 档案 → 备份**：备份当前档案配置到 `DSH_HOME/.backups`，可覆盖还原或还原为新档案；不含会话与共享存储。
-- **导出恢复归档**：将会话、共享存储和所有档案导出到 `DSH_HOME` 外的桌面应用数据目录，排除依赖与已有备份。先结束任务并关闭其他客户端；本机服务停止后保持停止，需手动重启。恢复需解压到新空目录，按归档内的 `README.txt` 操作，不适用档案还原按钮。
-- 凭据默认不包含；即使不勾选，其他配置仍可能含密钥。归档不会自动脱敏，请妥善保管，另存到其他设备才能防范磁盘损坏。
-- **运行配置 → 数据**：预检后整体迁移数据目录，校验通过才改写 `DSH_HOME`，旧目录改名保留并可回滚。迁移前关闭其他使用该目录的客户端，完成后重启桌面端、重开终端；开发构建固定使用 `~/.dsh.dev`，不能迁移。
-
-详见[数据管理指南](https://dshtauri.mintlify.site/zh-CN/guides/data-management)。
-
 ## 移动端支持
 
-同一仓库内维护移动端 **DSH Mobile**（Expo / React Native）：通过局域网发现或扫码连接电脑上的 DSH，以全屏 WebView 承载 Harness 网页，不在手机上运行内核；源码位于 `src-native/`。
+**DSH Mobile** 通过局域网或公网隧道访问电脑上的 Harness，不在手机运行内核。
 
-- 桌面顶部**远程 → 局域网 / 公网隧道**可开启分享并显示配对二维码；DSH Mobile 扫码连接。局域网需同一网络，外网可用 Cloudflare Quick（免账号、随机域名）或具名隧道（Token 与公开主机名）。电脑、Harness 服务和所用隧道须保持在线。
-- 分享默认关闭，开启后需认证；临时配对码 5 分钟有效，使用后轮换，设备记住授权。**Harness 设置 → 远程访问 → 远程访问**可配置监听地址、隧道及撤销配对授权；撤销后所有设备需重新配对。
-- 配对允许操作电脑上的 Harness，并非只读分享；不要公开二维码、链接或访问码。步骤见[手机远程访问指南](https://dshtauri.mintlify.site/zh-CN/guides/mobile-remote-access)。
+- **Android**：从 [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) 下载 APK。
+- **iOS**：通过 [TestFlight 邀请](https://testflight.apple.com/join/kYXkpnp1)安装测试版，以审核与名额为准；Release 中的未签名 IPA 需自行签名。
 
-- Android APK 可在 [Releases](https://github.com/dsh-tauri/deepseek-harness-desktop/releases) 页面下载，资产名形如 `Deepseek.Harness.Android_x.x.x.apk`，版本跟随桌面端。
-- **iOS 未签名 IPA 随桌面端发版**；需自行签名后安装，不能直接安装。
-- 该移动端**仅在官方未推出移动端服务期间维护**，属于过渡方案。
-- 开发命令（`pnpm dev:native`、`pnpm android`、`pnpm test:native`、`pnpm typecheck:native` 等）与发现、连接、持久化、发版约定见[移动端规范](docs/specs/native.md)。
+在桌面顶部**远程**开启分享，手机扫码配对；电脑、Harness 与所用隧道须在线。远程访问并非只读，请勿公开二维码或访问码，详见[手机远程访问指南](https://dshtauri.mintlify.site/zh-CN/guides/mobile-remote-access)。
+
+移动端仅在官方移动服务推出前维护；开发说明见[移动端规范](docs/specs/native.md)。
 
 ## 运行方式
 
