@@ -179,6 +179,7 @@
   "messages.log_copied": "日志已复制到剪贴板",
   "messages.copy_failed": "复制地址失败",
   "messages.open_link_failed": "打开链接失败",
+  "messages.open_settings_failed": "打开桌面端设置失败",
   "messages.port_changed": "端口已更改",
   "messages.port_restart_hint": "重启服务后生效，是否立即重启？",
   "messages.launch_on_login_failed": "更新开机自启动设置失败",
