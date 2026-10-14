@@ -14,7 +14,7 @@ export function NativeActivity(props: NativeActivityProps) {
   if (backend === undefined || backend === 'dsh' || isForkedIdentity(binding, props.sessionId))
     return null
   return (
-    <section aria-label={locale.text('activity.title')} data-dsh-native-activity={props.sessionId} className="w-full text-xs text-secondary">
+    <section aria-label={locale.text('activity.title')} data-dsh-native-activity={props.sessionId} className="w-full text-secondary">
       <p>{locale.text('activity.readOnly')}</p>
       {activity === undefined ? <p role="status">{locale.text('activity.unavailable')}</p> : <ActivityContent activity={activity} />}
     </section>
