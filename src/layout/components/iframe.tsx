@@ -9,6 +9,8 @@ import {
   sendNotification,
 } from '@choochmeque/tauri-plugin-notifications-api'
 import { CircleExclamation } from '@gravity-ui/icons'
+import { toast } from '@heroui/react'
+import { useOverlay } from '@overlastic/react'
 import { useEventListener, useTimeoutFn, useWatch } from '@reause/core'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -27,6 +29,7 @@ import { useNotificationClicked } from '@/hooks/use-notification-clicked'
 import { useSyncVisibility } from '@/hooks/use-sync-visibility'
 import { useZoomFactor } from '@/hooks/use-zoom-factor'
 import { store } from '@/store'
+import { ConfigDialog } from '@/ui/dialog/config'
 import { zoomActionFromBridgeMessage, zoomActionFromShortcut } from '@/utils/zoom'
 import { appearanceBootCss, appearanceTranslucent, normalizeAppearance } from '../../../packages/dsh-tauri/src/shared/appearance'
 import { Loadable } from './loadable'
@@ -204,6 +207,7 @@ async function loadNotificationSounds(): Promise<Record<string, string>> {
 
 export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: IframeProps) {
   const { t } = useTranslation()
+  const openConfigDialog = useOverlay(ConfigDialog)
   const harness = useStore(store.harness)
   const setting = useStore(store.setting)
   // 远端模式：非空时 iframe 指向该隧道 URL（远端机器的本地回环隧道，见
@@ -291,6 +295,14 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
     // 与具体桥无关——据此确认 iframe 不是一张浏览器内部错误页（issue #705）。
     store.harness.markIframeAlive()
     switch (data.type) {
+      case 'dsh://desktop-settings:open':
+        void openConfigDialog({ tab: 'application' }).catch((error: unknown) => {
+          if (error === undefined)
+            return
+          console.error('[Iframe] failed to open desktop settings:', error)
+          toast(t('messages.open_settings_failed'), { variant: 'danger' })
+        })
+        break
       // 原生通知：转发给 Tauri 命令弹出系统通知
       case 'dsh://native-notification':
         handleNativeNotification(data)
