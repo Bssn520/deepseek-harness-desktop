@@ -120,10 +120,72 @@ pub fn on_page_load(
 /// 异步命令（不占用主线程）是唯一安全的调用侧：`WebviewWindowBuilder::build()`
 /// 需要主线程事件循环回包，主线程调用会死锁（与 `pet::ensure_pet_window` 同约束）。
 #[tauri::command]
-pub async fn create_app_window(app_handle: AppHandle<Wry>) -> Result<(), String> {
-    crate::desktop::builder::build_extra_window(&app_handle)
+pub async fn create_app_window(
+    app_handle: AppHandle<Wry>,
+    session_id: Option<String>,
+    iframe_url: Option<String>,
+) -> Result<(), String> {
+    let path = session_window_path(session_id.as_deref(), iframe_url.as_deref())?;
+    crate::desktop::builder::build_extra_window(&app_handle, path)
         .map(|_| ())
         .map_err(|error| format!("WINDOW_CREATE_FAILED: {error}"))
+}
+
+fn session_window_path(
+    session_id: Option<&str>,
+    iframe_url: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let Some(session_id) = session_id else {
+        return Ok("index.html".into());
+    };
+    if session_id.trim().is_empty() || session_id.len() > 512 {
+        return Err("WINDOW_CREATE_FAILED: invalid sessionId".into());
+    }
+    let url = Url::parse(iframe_url.unwrap_or_default())
+        .map_err(|error| format!("WINDOW_CREATE_FAILED: invalid iframeUrl: {error}"))?;
+    if url.scheme() != "http"
+        || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("WINDOW_CREATE_FAILED: iframeUrl must be a loopback HTTP origin".into());
+    }
+    let mut target = url.clone();
+    target
+        .query_pairs_mut()
+        .append_pair("sessionId", session_id)
+        .append_pair("iframeUrl", url.as_str());
+    Ok(format!("index.html#{}", target.query().unwrap_or_default()).into())
+}
+
+#[cfg(test)]
+mod session_window_tests {
+    use super::session_window_path;
+
+    #[test]
+    fn session_target_is_encoded_and_rejects_untrusted_urls() {
+        assert_eq!(
+            session_window_path(None, None).unwrap().to_str(),
+            Some("index.html")
+        );
+        assert_eq!(
+            session_window_path(Some("session &/?#"), Some("http://127.0.0.1:3080")).unwrap().to_str(),
+            Some("index.html#sessionId=session+%26%2F%3F%23&iframeUrl=http%3A%2F%2F127.0.0.1%3A3080%2F")
+        );
+        for url in [
+            "https://example.com",
+            "file:///x",
+            "http://localhost/api",
+            "http://u@localhost",
+            "http://localhost/?token=x",
+        ] {
+            assert!(session_window_path(Some("s1"), Some(url)).is_err());
+        }
+        assert!(session_window_path(Some(" "), Some("http://localhost:3080")).is_err());
+    }
 }
 
 /// 壳层导航栏「文件 → 退出」：与托盘「退出」同语义，走 `exit(0)` 完整退出

@@ -199,7 +199,7 @@ pub fn remote_open_window(
     // 桥脚本按窗口注入、（Windows）WebView2 共用数据目录等，远端窗口与本体
     // 唯一区别是连接的后端。label 即机器寻址：前端 remote-<id> 自切换。
     let title = format!("DSH Remote · {machine_id}");
-    crate::desktop::builder::build_shell_window(&app_handle, label, &title)
+    crate::desktop::builder::build_shell_window(&app_handle, label, &title, "index.html".into())
         .map(|_| ())
         .map_err(|err| format!("REMOTE_WINDOW_FAILED: {err}"))
 }
