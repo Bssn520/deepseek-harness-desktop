@@ -98,6 +98,7 @@ describe('desktop style reporting', () => {
     const wrapper = document.createElement('section')
     sidebar.replaceWith(wrapper)
     wrapper.append(sidebar)
+    await Promise.resolve()
     paint()
     post.mockClear()
     if (change === 'insert') {
