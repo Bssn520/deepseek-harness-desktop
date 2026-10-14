@@ -56,6 +56,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install AppImage regression tools
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools
+
+      - name: Test AppImage repacking
+        run: |
+          for seed in 1 2 3 4 5; do
+            node node_modules/vitest/vitest.mjs run --project unit test/appimage-host-libs.test.ts --sequence.shuffle --sequence.seed="$seed"
+          done
+
       - name: Test iOS signing guards without credentials
         run: python3 -m unittest discover -s .github/scripts -p 'test_ios_testflight.py' -v
 
