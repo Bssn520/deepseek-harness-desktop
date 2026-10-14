@@ -90,7 +90,7 @@ vi.mock('heroui-native/dialog', async () => {
       return null
     return createElement('Dialog', props, children)
   }
-  return { Dialog: Object.assign(Dialog, { Portal: 'Portal', Overlay: 'Overlay', Content: 'Content', Title: 'Text' }) }
+  return { Dialog: Object.assign(Dialog, { Portal: 'Portal', Overlay: 'Overlay', Content: 'Content', Title: 'Text', Description: 'Text' }) }
 })
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }))
 vi.mock('react-native-lucide', () => ({ History: 'HistoryIcon', Radar: 'RadarIcon', QrCode: 'QrCodeIcon', ScanLine: 'ScanLineIcon', RefreshCw: 'RefreshIcon', X: 'Icon', ArrowLeft: 'Icon', Hand: 'Icon' }))
@@ -451,6 +451,43 @@ describe('rendered Home scanning and idle actions', () => {
 })
 
 describe('rendered Home connection editing', () => {
+  it('uses the same spaced themed dialog for connection actions, rename and deletion', async () => {
+    const { i18n } = await import('@/i18n')
+    hydrate(history)
+    runtime.connectAddress(alpha)
+    await mount()
+    await ready()
+    await act(async () => connection.setDrawerOpen(true))
+    await act(async () => button(i18n.t('connection.reconnect')).props.onLongPress())
+
+    const content = root().find(node => String(node.type) === 'Content')
+    expect(content.props.className).toBe('gap-5')
+    expect(content.findAll(node => String(node.type) === 'Button').map(text)).toEqual([
+      i18n.t('connection.rename'),
+      i18n.t('connection.delete'),
+      i18n.t('common.cancel'),
+    ])
+    expect(texts()).toContain(alpha.url)
+    expect(button(i18n.t('connection.delete')).props.variant).toBe('danger-soft')
+    expect(button(i18n.t('common.cancel')).props.className).toBe('mt-1')
+    expect(content.find(node => String(node.type) === 'View' && node.props.className === 'gap-3').children).toHaveLength(3)
+    expect(native.alert).not.toHaveBeenCalled()
+
+    await press(i18n.t('connection.rename'))
+    expect(root().findAll(node => String(node.type) === 'Content')).toEqual([content])
+    expect(content.find(node => String(node.type) === 'Input').props.value).toBe('one.local:3080')
+    expect(content.find(node => String(node.type) === 'View' && node.props.className === 'flex-row justify-end gap-3').children).toHaveLength(2)
+    await press(i18n.t('common.cancel'))
+    expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
+
+    await act(async () => button(i18n.t('connection.reconnect')).props.onLongPress())
+    await press(i18n.t('connection.delete'))
+    expect(root().findAll(node => String(node.type) === 'Content')).toHaveLength(1)
+    expect(root().find(node => String(node.type) === 'Content').props.className).toBe('gap-5')
+    expect(button(i18n.t('connection.delete')).props.variant).toBe('danger')
+    expect(native.alert).not.toHaveBeenCalled()
+  })
+
   it('opens rename on long press and saves a display name without reconnecting the WebView', async () => {
     hydrate(history)
     runtime.connectAddress(alpha)
@@ -459,9 +496,7 @@ describe('rendered Home connection editing', () => {
     await act(async () => connection.setDrawerOpen(true))
     const generation = connection.viewGeneration
     await act(async () => button('重新连接').props.onLongPress())
-    const actions = native.alert.mock.calls.at(-1)![2]!
-    expect(actions.map(action => action.text)).toEqual(['重命名', '删除连接', '取消'])
-    await act(async () => actions[0]!.onPress!())
+    await press('重命名')
     const input = root().find(node => String(node.type) === 'Input')
     await act(async () => input.props.onChangeText('  我的电脑  '))
     await press('保存')
@@ -472,21 +507,69 @@ describe('rendered Home connection editing', () => {
     expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
   })
 
+  it('rejects blank names on keyboard submission and discards cancelled drafts', async () => {
+    const { i18n } = await import('@/i18n')
+    hydrate(history)
+    connection.cancelScan()
+    await mount()
+    await press(i18n.t('connection.recentConnections'))
+    const host = i18n.t('connection.hostStatus', { host: 'one.local:3080', status: i18n.t('connection.available') })
+    await act(async () => button(host).props.onLongPress())
+    await press(i18n.t('connection.rename'))
+    const input = root().find(node => String(node.type) === 'Input')
+    expect(input.props).toMatchObject({ autoFocus: true, accessibilityLabel: i18n.t('connection.name'), returnKeyType: 'done' })
+    await act(async () => input.props.onChangeText('   '))
+    expect(button(i18n.t('common.save')).props.isDisabled).toBe(true)
+    await act(async () => input.props.onSubmitEditing())
+    expect(connection.history.find(entry => entry.id === alpha.id)?.name).toBeUndefined()
+    expect(root().findAll(node => String(node.type) === 'Input')).toHaveLength(1)
+    await act(async () => input.props.onChangeText('draft'))
+    await press(i18n.t('common.cancel'))
+    await act(async () => button(host).props.onLongPress())
+    await press(i18n.t('connection.rename'))
+    const reopened = root().find(node => String(node.type) === 'Input')
+    expect(reopened.props.value).toBe('one.local:3080')
+    await act(async () => reopened.props.onChangeText('  renamed  '))
+    await act(async () => reopened.props.onSubmitEditing())
+    expect(connection.history.find(entry => entry.id === alpha.id)?.name).toBe('renamed')
+    expect(connection.current).toBeNull()
+    expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
+  })
+
+  it('dismisses connection actions through the dialog close callback without modifying history', async () => {
+    const { i18n } = await import('@/i18n')
+    hydrate(history)
+    connection.cancelScan()
+    await mount()
+    await press(i18n.t('connection.recentConnections'))
+    const host = i18n.t('connection.hostStatus', { host: 'one.local:3080', status: i18n.t('connection.available') })
+    await act(async () => button(host).props.onLongPress())
+    await act(async () => root().find(node => String(node.type) === 'Dialog').props.onOpenChange(false))
+    expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
+    expect(connection.history.map(entry => entry.id)).toEqual(history.map(entry => entry.id))
+    expect(drawer().props.open).toBe(true)
+  })
+
   it('keeps the active connection on cancel and removes it only after confirming the disconnect warning', async () => {
+    const { i18n } = await import('@/i18n')
     hydrate(history)
     runtime.connectAddress(alpha)
     await mount()
     await ready()
     await act(async () => connection.setDrawerOpen(true))
     await act(async () => button('one.local:3080，可用').props.onLongPress())
-    await act(async () => native.alert.mock.calls.at(-1)![2]![1]!.onPress!())
-    const confirmation = native.alert.mock.calls.at(-1)!
-    expect(confirmation[1]).toBe('这条连接正在使用。删除后将停止连接并返回初始页，是否继续？')
-    expect(confirmation[2]![0]!.style).toBe('cancel')
+    await press(i18n.t('connection.delete'))
+    expect(texts()).toContain(i18n.t('connection.deleteCurrentConfirm'))
     expect(connection.current?.id).toBe(alpha.id)
     expect(root().findAll(node => String(node.type) === 'WebView')).toHaveLength(1)
+    await press(i18n.t('common.cancel'))
+    expect(connection.history.some(entry => entry.id === alpha.id)).toBe(true)
+    expect(connection.tokens[alpha.id]).toBe('saved-token')
+    expect(connection.forgettingOrigin).toBeNull()
+    await act(async () => button('one.local:3080，可用').props.onLongPress())
+    await press(i18n.t('connection.delete'))
     native.fetch.mockClear()
-    await act(async () => confirmation[2]![1]!.onPress!())
+    await press(i18n.t('connection.delete'))
     expect(connection.current?.id).toBe(alpha.id)
     expect(connection.forgettingOrigin).toBe(alpha.id)
     expect(connection.history.some(entry => entry.id === alpha.id)).toBe(false)
@@ -503,6 +586,27 @@ describe('rendered Home connection editing', () => {
     expect(root().findAll(node => String(node.type) === 'WebView')).toHaveLength(0)
     expect(button('自动扫描局域网').props.isDisabled).toBe(false)
     expect(native.fetch).not.toHaveBeenCalled()
+  })
+
+  it('deletes an inactive saved connection only after its themed confirmation without disconnecting the active host', async () => {
+    const { i18n } = await import('@/i18n')
+    hydrate(history)
+    runtime.connectAddress(alpha)
+    await mount()
+    await ready()
+    await act(async () => connection.setDrawerOpen(true))
+    const generation = connection.viewGeneration
+    await act(async () => button(i18n.t('connection.hostStatus', { host: 'two.local:3080', status: i18n.t('connection.checking') })).props.onLongPress())
+    await press(i18n.t('connection.delete'))
+    expect(texts()).toContain(i18n.t('connection.deleteConfirm'))
+    expect(texts()).not.toContain(i18n.t('connection.deleteCurrentConfirm'))
+    expect(connection.history.some(entry => entry.id === history[1]!.id)).toBe(true)
+    await press(i18n.t('connection.delete'))
+    expect(connection.history.some(entry => entry.id === history[1]!.id)).toBe(false)
+    expect(connection.current).toEqual({ ...alpha, token: 'saved-token' })
+    expect(connection.viewGeneration).toBe(generation)
+    expect(webView().props.source).toEqual({ uri: 'http://one.local:3080/tasks?auth=saved-token' })
+    expect(root().findAll(node => String(node.type) === 'Dialog')).toHaveLength(0)
   })
 })
 
