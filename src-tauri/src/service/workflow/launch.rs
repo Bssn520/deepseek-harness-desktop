@@ -26,9 +26,7 @@ use super::status;
 use super::sweep::persist_harness_pid;
 #[cfg(windows)]
 use super::sweep::{dsh_bin_open_error, relaunch_marker_path, relaunch_via_shell_escape};
-use super::utils::{
-    append_log, is_port_in_use, rotate_service_log, spawn_output_readers, wait_for_port_release,
-};
+use super::utils::{append_log, rotate_service_log, spawn_output_readers, wait_for_port_release};
 use super::win_inspector;
 
 #[cfg(windows)]
@@ -129,8 +127,29 @@ fn build_harness_args(
 }
 
 /// 从起始端口向上查找第一个空闲端口，绝不结束未知的端口占用进程。
-fn find_available_port(start: u16) -> Result<u16, String> {
-    find_available_port_by(start, is_port_in_use)
+fn find_available_port(start: u16, dsh_binary: &Path) -> Result<u16, String> {
+    find_available_port_by(start, |port| {
+        prepare_port(dsh_binary, port).map(|free| !free)
+    })
+}
+
+fn prepare_port(dsh_binary: &Path, port: u16) -> Result<bool, String> {
+    if !super::utils::is_port_in_use(port) {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        super::process::reclaim_orphan_port(dsh_binary, port)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dsh_binary;
+        log::warn!(
+            "PORT_OWNER: port={port} pid={:?} ownership=unknown",
+            super::sweep::port_owner_pid(port)
+        );
+        Ok(false)
+    }
 }
 
 /// 按调用方提供的占用判定查找第一个空闲端口。
@@ -140,11 +159,11 @@ fn find_available_port(start: u16) -> Result<u16, String> {
 /// 其他进程在两次探测之间占用。
 fn find_available_port_by(
     start: u16,
-    mut is_in_use: impl FnMut(u16) -> bool,
+    mut is_in_use: impl FnMut(u16) -> Result<bool, String>,
 ) -> Result<u16, String> {
     let mut port = start;
     loop {
-        if !is_in_use(port) {
+        if !is_in_use(port)? {
             return Ok(port);
         }
         log::warn!("Port {port} is occupied, trying the next port");
@@ -334,22 +353,22 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 一次全量枚举约 0.3–0.6s），因此只在尚未清扫时才执行。
     {
         let handle = app_handle.clone();
-        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::spawn_blocking(move || {
             if take_startup_sweep() {
-                terminate_stale_harness_processes(&handle);
+                let result = terminate_stale_harness_processes(&handle);
+                if result.is_err() {
+                    super::process::retry_startup_sweep();
+                }
+                result
             } else {
                 log::debug!(
                     "Skipping pre-launch stale Harness sweep: already swept during this launch"
                 );
+                Ok(())
             }
         })
         .await
-        {
-            log::warn!(
-                "failed to sweep stale Harness processes before launch at {}: {e}",
-                dsh_binary_path.display()
-            );
-        }
+        .map_err(|error| format!("HARNESS_SWEEP_FAILED: {error}"))??;
     }
 
     // 端口自愈：自动避让递增（配置端口被占 → 逐级顶高）遗留的非默认端口，
@@ -357,7 +376,14 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 端口只增不减、一路从 3080 漂到 3084+（issue #91）。先于
     // wait_for_port_release 探测：既然放弃旧端口，就无需等它释放。
     let heal_target = setting.manual_port.unwrap_or(config::default_port());
-    let healed_port = resolve_heal_port(setting.port, heal_target, !is_port_in_use(heal_target));
+    let entry = dsh_binary_path.clone();
+    let heal_target_free = tauri::async_runtime::spawn_blocking(move || {
+        wait_for_port_release(heal_target, PORT_RELEASE_WAIT);
+        prepare_port(&entry, heal_target)
+    })
+    .await
+    .map_err(|error| format!("HARNESS_CLEANUP_FAILED: {error}"))??;
+    let healed_port = resolve_heal_port(setting.port, heal_target, heal_target_free);
     if healed_port != setting.port {
         log::info!(
             "Harness port healed from {} back to {} (no longer occupied)",
@@ -375,14 +401,16 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 一路漂移，表现为“端口持续累加 + 首次启动超时、刷新后恢复”）。先留出
     // 窗口等配置端口回落为空闲，再决定是否真的逐级递增。
     // 有界轮询是阻塞等待，交给阻塞线程池，避免占用启动所在的 Tokio 执行线程。
-    {
-        let port = setting.port;
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            wait_for_port_release(port, PORT_RELEASE_WAIT)
-        })
-        .await;
-    }
-    let available_port = find_available_port(setting.port)?;
+    let port = setting.port;
+    let entry = dsh_binary_path.clone();
+    let available_port = tauri::async_runtime::spawn_blocking(move || {
+        if port != heal_target {
+            wait_for_port_release(port, PORT_RELEASE_WAIT);
+        }
+        find_available_port(port, &entry)
+    })
+    .await
+    .map_err(|error| format!("HARNESS_CLEANUP_FAILED: {error}"))??;
     if available_port != setting.port {
         log::info!(
             "Harness port changed from {} to {} because the configured port is occupied",
@@ -1159,7 +1187,7 @@ mod tests {
         let mut checked = Vec::new();
         let selected = find_available_port_by(3080, |port| {
             checked.push(port);
-            port < 3082
+            Ok(port < 3082)
         })
         .expect("find next free port");
 
@@ -1169,8 +1197,20 @@ mod tests {
 
     #[test]
     fn occupied_port_reports_exhaustion_at_max_port() {
-        let error = find_available_port_by(u16::MAX, |_| true).expect_err("port exhaustion");
+        let error = find_available_port_by(u16::MAX, |_| Ok(true)).expect_err("port exhaustion");
         assert!(error.starts_with("PORT_EXHAUSTED:"));
+    }
+
+    #[test]
+    fn confirmed_orphan_cleanup_failure_does_not_advance_port() {
+        let mut checked = Vec::new();
+        let error = find_available_port_by(3080, |port| {
+            checked.push(port);
+            Err("HARNESS_CLEANUP_FAILED: retained listener".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "HARNESS_CLEANUP_FAILED: retained listener");
+        assert_eq!(checked, vec![3080]);
     }
 
     fn text_args(args: &[OsString]) -> Vec<String> {

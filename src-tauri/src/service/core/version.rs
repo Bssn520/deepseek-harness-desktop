@@ -426,10 +426,10 @@ async fn stop_harness_for_core_switch(app_handle: &AppHandle) -> Result<(), Stri
     }
     let handle = app_handle.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        workflow::terminate_stale_harness_processes(&handle);
+        workflow::terminate_stale_harness_processes(&handle)
     })
     .await
-    .map_err(|e| format!("CORE_SWITCH_STOP_FAILED: {e}"))?;
+    .map_err(|e| format!("CORE_SWITCH_STOP_FAILED: {e}"))??;
     Ok(())
 }
 
@@ -577,10 +577,10 @@ async fn switch_app_version(app_handle: &AppHandle, tag: &str) -> Result<(), Str
     {
         let handle = app_handle.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            workflow::terminate_stale_harness_processes(&handle);
+            workflow::terminate_stale_harness_processes(&handle)
         })
         .await
-        .map_err(|e| format!("CORE_SWITCH_STOP_FAILED: {e}"))?;
+        .map_err(|e| format!("CORE_SWITCH_STOP_FAILED: {e}"))??;
     }
 
     // 1. 当前激活目录让出激活位：改名为自己的 tag 槽位（旧备份先移到临时位置，切换成功后再清理）
