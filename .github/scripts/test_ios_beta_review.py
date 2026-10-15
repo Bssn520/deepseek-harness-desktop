@@ -21,6 +21,7 @@ SHA = 'a' * 40
 class FakeApple:
     def __init__(self):
         self.writes = []
+        self.reads = []
         self.pauses = []
         self.processing = ['VALID']
         self.state = 'READY_FOR_BETA_SUBMISSION'
@@ -78,6 +79,7 @@ class FakeApple:
             else:
                 raise AssertionError('Unexpected mutation route')
             return {}
+        self.reads.append(route)
         if route == '/v1/apps':
             assert query['filter[bundleId]'] == ['com.dshtauri.dshbridge']
             return {'data': [{'id': 'app1', 'attributes': {'bundleId': helper.BUNDLE_ID}}]}
@@ -104,7 +106,9 @@ class FakeApple:
         if route == '/v1/betaBuildLocalizations':
             return {'data': copy.deepcopy(self.locales)}
         if route == '/v1/builds/build1/betaGroups':
-            return {'data': copy.deepcopy(self.groups)}
+            raise helper.ApiError(403)
+        if route == '/v1/betaGroups/group1/relationships/builds':
+            return {'data': [{'type': 'builds', 'id': 'build1'}] if any(item['id'] == 'group1' for item in self.groups) else []}
         raise AssertionError('Unexpected read route: ' + route)
 
     def build_page(self, state='VALID'):
@@ -135,6 +139,36 @@ class SubmitTests(unittest.TestCase):
         self.assertEqual(self.api.writes[1][2]['data']['attributes'], {'autoNotifyEnabled': True})
         self.assertEqual(self.api.writes[-1][2], {'data': [{'type': 'betaGroups', 'id': 'group1'}]})
         self.assertIn('No notification delivery is claimed', result)
+
+    def test_pending_review_recovers_group_link_via_supported_reverse_relationship(self):
+        self.api.state = 'WAITING_FOR_BETA_REVIEW'
+        self.api.submissions = [{'id': 'submission1', 'attributes': {'betaReviewState': 'WAITING_FOR_REVIEW'}}]
+        self.api.auto_notify = True
+        self.submit()
+        self.assertIn('/v1/betaGroups/group1/relationships/builds', self.api.reads)
+        self.assertNotIn('/v1/builds/build1/betaGroups', self.api.reads)
+        self.assertEqual(self.api.writes, [('/v1/builds/build1/relationships/betaGroups', 'POST', {'data': [{'type': 'betaGroups', 'id': 'group1'}]})])
+        self.api.writes.clear()
+        self.submit()
+        self.assertEqual(self.api.writes, [])
+
+    def test_check_verifies_group_build_read_access_without_linking(self):
+        self.submit(check=True)
+        self.assertIn('/v1/betaGroups/group1/relationships/builds', self.api.reads)
+        self.assertFalse(self.api.writes)
+
+    def test_group_read_failure_prevents_any_review_or_metadata_mutation(self):
+        original = self.api.collection
+
+        def denied(path):
+            if '/relationships/builds' in path:
+                raise helper.ApiError(403)
+            return original(path)
+
+        self.api.collection = denied
+        with self.assertRaises(helper.ApiError):
+            self.submit()
+        self.assertFalse(self.api.writes)
 
     def test_repeated_run_does_not_duplicate_review_or_group(self):
         self.submit()
@@ -352,6 +386,17 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn('sensitive', str(context.exception))
         self.assertNotIn('private', str(context.exception))
         self.assertEqual(self.client.opener.open.call_count, 1)
+
+    def test_api_error_reports_method_and_path_without_query_response_or_token(self):
+        self.client.opener.open.side_effect = urllib.error.HTTPError('https://api.appstoreconnect.apple.com/v1/builds/build1/betaGroups', 403, 'sensitive response', {}, io.BytesIO(b'private detail'))
+        with self.assertRaises(helper.ApiError) as context:
+            self.client.request('/v1/builds/build1/betaGroups?filter[email]=private@example.invalid')
+        message = str(context.exception)
+        self.assertIn('GET /v1/builds/build1/betaGroups HTTP 403', message)
+        self.assertIn('endpoint may not support this operation', message)
+        for hidden in ('private@example.invalid', 'filter[email]', 'private detail', 'sensitive response', 'fake-token-not-a-secret'):
+            self.assertNotIn(hidden, message)
+        self.assertEqual(helper.ApiError(403).status, 403)
 
     def test_get_retry_budget_and_deadline_are_finite(self):
         self.client.opener.open.side_effect = urllib.error.URLError('sensitive')

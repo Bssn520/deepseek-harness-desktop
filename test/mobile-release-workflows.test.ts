@@ -158,6 +158,21 @@ describe('mobile release workflow contracts', () => {
     expect(readSource('.github/workflows/ci.yml')).toContain('-p \'test_ios_*.py\'')
   })
 
+  it('recovers review of an existing build without signing or uploading another IPA', () => {
+    const recovery = readSource('.github/workflows/review-testflight.yml')
+    expect([...section(recovery, 'on').matchAll(/^ {2}(\w+):/gm)].map(match => match[1])).toEqual(['workflow_dispatch'])
+    expect(recovery).toContain('github.repository == \'dsh-tauri/deepseek-harness-desktop\'')
+    expect(recovery).toContain('github.ref == \'refs/heads/main\'')
+    expect(recovery).toContain('vars.IOS_BETA_REVIEW_ENABLED == \'true\'')
+    expect(recovery).toContain('group: ios-testflight-distribution')
+    for (const name of ['ios_version', 'build_number', 'source_sha'])
+      expect(recovery).toContain(`${name}:`)
+    expect(recovery).toContain('git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main')
+    expect(recovery).toContain('run: python3 .github/scripts/ios-beta-review.py')
+    expect(recovery).toContain('if: always()')
+    expect(recovery).not.toMatch(/IOS_DISTRIBUTION_CERTIFICATE|IOS_PROVISIONING_PROFILE|xcodebuild|altool|workflow_run/)
+  })
+
   it('pins TestFlight to the locally verified Xcode toolchain on macOS 26', () => {
     const signed = readSource('.github/workflows/release-testflight.yml')
     expect(signed).toContain('runs-on: macos-26')

@@ -87,6 +87,15 @@ gh variable set IOS_BETA_REVIEW_ENABLED --body true --repo dsh-tauri/deepseek-ha
 
 已处于审核中、已批准或正在外部测试的目标构建不会重复送审；被拒绝或缺失合规信息时直接报出需要人工处理的状态，不通过重试规避审核。苹果限制同一版本同时在审的构建数量，且有每日 Beta 送审限额，遇到此类限制不会撤销其他构建的审核。
 
+若上传已成功而送审后续步骤失败，使用 `Review Existing TestFlight Build` 工作流补跑，准确填写原上传的营销版本、构建号和源码提交；该任务只使用 API Key，不访问分发证书、不重新上传 IPA。它同样要求官方 main 与审核开关开启，并与签名上传共用串行并发组：
+
+```bash
+gh workflow run review-testflight.yml --repo dsh-tauri/deepseek-harness-desktop --ref main \
+  -f ios_version="${IOS_VERSION:?}" -f build_number="${BUILD_NUMBER:?}" -f source_sha="${SOURCE_SHA:?}"
+```
+
+读取测试组成员关系应使用 `/v1/betaGroups/{id}/relationships/builds`；苹果不支持对 `/v1/builds/{id}/betaGroups` 执行 GET，会返回 403，即使密钥职能足够。403 不一定意味着需要升级密钥权限。
+
 官方要求参考：[邀请外部测试员](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers/)。需要 App Manager、Admin 或账户持有人权限；只给 Developer 的上传密钥可能在送审或测试组管理接口返回 403。替换密钥时同步更新 `.p8`、Key ID 与 Issuer ID，验证成功前不要撤销旧密钥。
 
 ## 验证边界

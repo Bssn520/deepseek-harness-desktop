@@ -40,11 +40,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class ApiError(ValueError):
-    def __init__(self, status):
+    def __init__(self, status, method=None, path=None):
         self.status = status
-        message = f'Apple API HTTP {status}; response omitted to protect account information'
+        operation = f' {method} {urllib.parse.urlsplit(path).path}' if method and path else ''
+        message = f'Apple API{operation} HTTP {status}; query and response omitted to protect account information'
         if status == 403:
-            message += '; Beta review operations may require an App Manager team API key; ask the account administrator, do not change permissions automatically'
+            message += '; the endpoint may not support this operation, or the API key may lack permission; check the route before asking an administrator about App Manager access'
         super().__init__(message)
 
 
@@ -96,7 +97,7 @@ class Client:
                 if method == 'GET' and (status == 429 or 500 <= status <= 599) and attempt < 2:
                     self.pause(5 * (attempt + 1))
                     continue
-                raise ApiError(status) from None
+                raise ApiError(status, method, url) from None
             except (urllib.error.URLError, TimeoutError):
                 if method == 'GET' and attempt < 2:
                     self.pause(5 * (attempt + 1))
@@ -198,6 +199,8 @@ def submit(client, group_id, marketing, number, source_sha, check=False):
     build = wait_for_build(client, app_id, marketing, number, check)
     build_id = resource_id(build['id'])
     detail, state, submitted = review_state(client, build_id, wait=not check)
+    group_builds = client.collection(f'/v1/betaGroups/{resource_id(group_id)}/relationships/builds?limit=200')
+    require(all(item.get('type') == 'builds' for item in group_builds), 'Expected build identifiers in the Beta group relationship')
     if check:
         return f'Preflight passed for {marketing} ({number}); no Apple resources changed'
     if state == 'READY_FOR_BETA_SUBMISSION' and not submitted:
@@ -222,8 +225,7 @@ def submit(client, group_id, marketing, number, source_sha, check=False):
                 raise
             _, current, exists = review_state(client, build_id)
             require(current in ACTIVE or exists, 'Apple rejected review submission; no duplicate submission attempted')
-    groups = client.collection(f'/v1/builds/{build_id}/betaGroups?limit=200')
-    if not any(item['id'] == group_id for item in groups):
+    if not any(item['id'] == build_id for item in group_builds):
         client.request(f'/v1/builds/{build_id}/relationships/betaGroups', 'POST', {'data': [{'type': 'betaGroups', 'id': group_id}]})
     final, final_state, final_submitted = review_state(client, build_id)
     require(final['attributes'].get('autoNotifyEnabled') is True, 'Apple did not retain automatic tester notification setting')
