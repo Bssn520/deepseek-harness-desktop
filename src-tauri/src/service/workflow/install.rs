@@ -16,6 +16,7 @@ pub async fn install(
     app_handle: &tauri::AppHandle,
     mut dsh_latest: Option<download::LatestDshPkg>,
 ) -> Result<bool, String> {
+    let _transition = super::process::acquire_core_transition().await?;
     super::instances::require_exclusive_profile()?;
     log::info!("Starting installation process");
     // dsh 任务实际下载解压时置 true
@@ -228,4 +229,29 @@ pub async fn install(
     );
 
     Ok(dsh_updated)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn installation_holds_core_transition_before_checks_and_shared_file_changes() {
+        let source = include_str!("install.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transition = source
+            .find("let _transition = super::process::acquire_core_transition().await?;")
+            .unwrap();
+        for effect in [
+            "super::instances::require_exclusive_profile()?",
+            "if has_owned_process()",
+            "download::ensure_extract",
+        ] {
+            assert!(
+                transition < source.find(effect).unwrap(),
+                "{effect} must be serialized with launch"
+            );
+        }
+        assert!(!source.contains("drop(_transition)"));
+    }
 }
