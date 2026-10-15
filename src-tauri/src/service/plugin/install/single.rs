@@ -113,10 +113,6 @@ async fn resolve_missing_targets(
 /// `link:` 本地目录 / 精确版本）也照样被改写到目标版本——这正是「用户授权过那个新版本、
 /// 升级却始终停在旧版本」的唯一出路。
 ///
-/// 目标还在发布保护期内时先让 pnpm 如实报错（不加旗标），再用**我们自己请求的目标**合成
-/// 拒绝载荷请用户授权（见 [`policy_refusal_from_specs`]）；授权会写进档案豁免清单，重跑时
-/// 本批目标全部已豁免，带上放宽旗标就是安全的。反过来，没豁免就放宽会把太新的条目写进
-/// lock，此后每一次插件操作都会在 lockfile 校验阶段失败（见 §5.3 的自愈说明）。
 async fn install_targets(
     app_handle: &AppHandle,
     targets: &[(String, String)],
@@ -131,13 +127,7 @@ async fn install_targets(
         .iter()
         .map(|id| dependency_fingerprint(&profile, id))
         .collect();
-    let mut args = specs.clone();
-    if targets.iter().all(|(id, version)| {
-        profile_release_age_excluded(app_handle, &format!("{id}@{version}"))
-    }) {
-        args.push(RELEASE_AGE_RELAXED_FLAG.to_string());
-    }
-    if let Err(e) = run_plugin_command(app_handle, &ids, "add", &args).await {
+    if let Err(e) = run_plugin_command(app_handle, &ids, "add", &specs).await {
         return UpdateFailure::stage(&specs, e);
     }
     let mut failures = Vec::new();
@@ -160,14 +150,7 @@ async fn update_to_latest(app_handle: &AppHandle, ids: &[String]) -> Vec<UpdateF
         .iter()
         .map(|id| dependency_fingerprint(&profile, id))
         .collect();
-    let targets: Vec<(bool, bool)> = ids
-        .iter()
-        .map(|id| release_age_target(app_handle, &profile, id))
-        .collect();
-    let mut args = update_pnpm_args(ids);
-    if relax_release_age(&targets) {
-        args.push(RELEASE_AGE_RELAXED_FLAG.to_string());
-    }
+    let args = update_pnpm_args(ids);
     if let Err(e) = run_plugin_command(app_handle, ids, "update", &args).await {
         return UpdateFailure::stage(ids, e);
     }
@@ -444,52 +427,6 @@ fn update_pnpm_args(ids: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// 放宽 pnpm 发布时长门禁的参数：档案的 `minimumReleaseAgeExclude` 会被解析阶段采信，
-/// lockfile 校验阶段却照旧按默认窗口拦截，授权过的精确版本因此永远装不上（见
-/// [`relax_release_age`]）。
-pub(super) const RELEASE_AGE_RELAXED_FLAG: &str = "--config.minimumReleaseAge=0";
-
-/// 单个 id 的发布时长门禁事实：`(有可升级的 registry 目标, 该目标已授权)`。
-///
-/// 目标版本取更新探测缓存（[`known_latest`]，不新发网络请求）；git 托管插件的「最新」是
-/// 提交 SHA、`next` 这类 ref 都不是版本，不能进发布时长豁免清单，按形状挡掉。
-fn release_age_target(app_handle: &AppHandle, profile: &Path, id: &str) -> (bool, bool) {
-    let target = known_latest(app_handle, id);
-    let target = target.as_deref().filter(|latest| is_registry_version(latest));
-    let Some(target) = target else {
-        return (false, false);
-    };
-    let upgradable = installed_package_version(profile, id).as_deref() != Some(target);
-    let excluded = profile_release_age_excluded(app_handle, &format!("{id}@{target}"));
-    (upgradable, excluded)
-}
-
-/// 这次 `update` 调用是否要放宽发布时长门禁（[`RELEASE_AGE_RELAXED_FLAG`]）。
-///
-/// 实测 bundled pnpm 11.7.0：档案已列出 `billion-context@0.1.174` 时
-/// `pnpm update billion-context --latest` 仍以 1 退出并报
-/// `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`，同一命令追加
-/// `--config.minimumReleaseAge=0` 才装到 0.1.174——「授权过的版本装不上」正是
-/// 升级入口报「没有可授权的新版本」的成因。
-///
-/// 该旗标是**全调用生效**的：一旦放宽，同批里未被授权的包也可能跟着越过默认窗口。
-/// 因此只在「本批每个可升级的 registry 目标都已授权」时放宽；混进一个未授权的可
-/// 升级目标就保持默认窗口，界面照旧先请用户授权。升级入口按单个插件派发，批里通常
-/// 只有一个目标。
-fn relax_release_age(targets: &[(bool, bool)]) -> bool {
-    let mut authorized = 0;
-    for (upgradable, excluded) in targets {
-        if !*upgradable {
-            continue;
-        }
-        if !*excluded {
-            return false;
-        }
-        authorized += 1;
-    }
-    authorized > 0
-}
-
 /// registry 版本形状：数字开头且含 `.`。git 托管插件的「最新」是提交 SHA、`next`
 /// 这类 ref 都不是版本，不能进发布时长豁免清单。
 fn is_registry_version(value: &str) -> bool {
@@ -541,14 +478,6 @@ fn lock_dependency(profile: &Path, id: &str) -> Option<(String, String)> {
         .unwrap_or_default()
         .to_string();
     Some((specifier, version))
-}
-
-/// importer 里该依赖已解析的精确版本（不在 lock 中 / 读不出时 `None`）。
-///
-/// 供发布时长门禁的自愈判定使用（见 `install::heal_locked_release_age`）：被 pnpm 拦下
-/// 的版本若正是 lock 里早早解析好的那个，说明它早就装到本机了，不是本次新解析的版本。
-pub(super) fn locked_package_version(profile: &Path, id: &str) -> Option<String> {
-    lock_dependency(profile, id).map(|(_, version)| version)
 }
 
 /// `node_modules/<id>/package.json` 声明的版本（缺失或损坏返回 `None`）。
@@ -780,12 +709,10 @@ async fn run_plugin_command(
 
     let envs = build_plugin_envs(app_handle, prefer_bundled_pnpm);
 
+    let profile = active_profile(app_handle);
+    let profile_path = crate::service::profile::profile_dir_of(app_handle, &profile);
     let mut args = vec![dsh_bin.as_os_str().to_os_string()];
-    args.extend(single_plugin_args(
-        &active_profile(app_handle),
-        action,
-        sub_args,
-    ));
+    args.extend(single_plugin_args(&profile, action, sub_args));
 
     let cwd = crate::service::core::active_core_dir(app_handle);
     log::info!("Running dsh plugin {action} for {ids:?}");
@@ -794,25 +721,15 @@ async fn run_plugin_command(
     )
     .await?;
 
-    // 门禁自愈：lockfile 里早有的太新条目会让**每一次**状态变更都失败
-    // （见 `super::heal_locked_release_age`）。补齐豁免后放宽窗口重跑一次——本批若已经
-    // 因全部目标授权而放宽过（参数里已有旗标），就没什么可补的，直接按原样分类。
-    let relaxed = args
-        .iter()
-        .any(|arg| arg.to_str() == Some(RELEASE_AGE_RELAXED_FLAG));
-    let (exit_code, output, last_attempt) = if exit_code != 0
-        && !relaxed
-        && super::heal_locked_release_age(app_handle, &last_attempt)
-    {
-        let mut retry_args = args.clone();
-        retry_args.push(OsString::from(RELEASE_AGE_RELAXED_FLAG));
-        run_plugin_with_allow_build_retry(
-            app_handle, &node, &retry_args, &cwd, &envs, &window, action, None, owner,
-        )
-        .await?
-    } else {
-        (exit_code, output, last_attempt)
-    };
+    let (exit_code, output, last_attempt) =
+        if exit_code != 0 && super::heal_locked_release_age(&profile_path, &last_attempt) {
+            run_plugin_with_allow_build_retry(
+                app_handle, &node, &args, &cwd, &envs, &window, action, None, owner,
+            )
+            .await?
+        } else {
+            (exit_code, output, last_attempt)
+        };
 
     if exit_code != 0 {
         log::error!("dsh plugin {action} failed for {ids:?} with exit code {exit_code}");
@@ -909,10 +826,8 @@ async fn run_plugin_command(
 /// 2. pnpm 的 release-age 策略：新版本发布不足 `minimumReleaseAge`（pnpm 11
 ///    默认 1440 分钟 = 24 小时）时解析会回落到仍达标的最新版本，命令照旧以 0
 ///    退出且**不打印任何说明**——实测 bundled pnpm 11.7.0 在 `^2.10.15` 上
-///    `update --latest` 静默停在 2.10.15。用户授权该精确版本后，由 [`update_many`]
-///    追加 `--config.minimumReleaseAge=0` 才能真正落地（档案里的豁免只被解析阶段
-///    采信，lockfile 校验阶段照样拦）。因此这条消息不能只归因于 catalog 钉死
-///    （会把人引偏）。
+///    `update --latest` 静默停在 2.10.15。用户授权该精确版本后，档案豁免让
+///    解析与 lockfile 校验放行该版本。因此这条消息不能只归因于 catalog 钉死。
 /// 必须如实报「没升级」——报成功会让用户以为已在新版本上（与 [`remove_many`] 的
 /// 「卸载后核验」同理）；但**不**记进插件错误：插件没坏，记了会让列表挂上
 /// 「可能已损坏或与当前环境不兼容」的误导标记（安装/升级真失败各有记录点）。
@@ -1519,22 +1434,6 @@ mod tests {
             update_pnpm_args(&["dsh-better-sidebar".to_string()]),
             vec!["dsh-better-sidebar", "--latest"]
         );
-    }
-
-    /// 回归用户报告：授权过的精确版本此前永远装不上——档案里的发布时长豁免只被
-    /// 解析阶段采信，lockfile 校验阶段照旧按默认窗口拦截，`--latest` 于是「退出 0
-    /// 但版本没动」。已授权的目标版本必须让那次调用带上门禁放宽参数。
-    #[test]
-    fn release_age_relaxation_requires_an_authorized_registry_target() {
-        assert!(relax_release_age(&[(true, true)]));
-        // 没授权过 → 不放宽，界面照旧先请用户授权
-        assert!(!relax_release_age(&[(true, false)]));
-        // 混进未授权的可升级目标 → 整批保持默认窗口，不能顺带把它放过去
-        assert!(!relax_release_age(&[(true, true), (true, false)]));
-        // 没有可升级目标的目标不阻碍放宽（同版本 / 没有 registry 目标）
-        assert!(relax_release_age(&[(true, true), (false, false)]));
-        assert!(!relax_release_age(&[(false, true)]));
-        assert!(!relax_release_age(&[]));
     }
 
     #[test]
