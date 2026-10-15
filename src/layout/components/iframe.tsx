@@ -227,6 +227,30 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   const post = useIframePost(iframeRef)
   // 握手兜底：帧内接收器异常时不能让 iframe 永久藏住，超时后按「未确认」直接揭开。
   const appearancePending = translucent && bootFrame !== frameKey
+  const iframeHidden = appearancePending || remoteLoading || harness.showIframeError
+  const mounted = remoteMode || harness.serviceHealthy
+  const showIframeError = !remoteMode && harness.showIframeError
+  const documentWaiting = !remoteMode && mounted && !harness.iframeAlive && !showIframeError && !appearancePending
+  const branch = !mounted ? 'service-wait' : showIframeError ? 'iframe-error' : remoteLoading ? 'remote-loading' : appearancePending ? 'appearance-wait' : documentWaiting ? 'document-wait' : remoteMode ? 'remote-frame' : 'local-frame'
+  useWatch([branch, harness.status, remoteMode, mounted, harness.serviceHealthy, harness.serviceRunning, harness.iframeKey, harness.iframeLoaded, harness.iframeAlive, harness.iframeError, harness.startupPhase, harness.busyAction, appearancePending, documentWaiting, iframeHidden], () => {
+    console.warn('[Iframe] view', {
+      branch,
+      status: harness.status,
+      remoteMode,
+      mounted,
+      serviceHealthy: harness.serviceHealthy,
+      serviceRunning: harness.serviceRunning,
+      iframeKey: harness.iframeKey,
+      iframeLoaded: harness.iframeLoaded,
+      iframeAlive: harness.iframeAlive,
+      iframeError: harness.iframeError,
+      startupPhase: harness.startupPhase,
+      busyAction: harness.busyAction,
+      appearancePending,
+      documentWaiting,
+      iframeHidden,
+    })
+  }, { immediate: true })
   const { start: armAppearanceFallback, stop: stopAppearanceFallback } = useTimeoutFn(
     () => setBootFrame(frameKey),
     APPEARANCE_HANDSHAKE_TIMEOUT,

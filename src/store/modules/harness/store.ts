@@ -939,8 +939,18 @@ let iframeWatch: { loaded: boolean, timer: ReturnType<typeof setTimeout> } | nul
 harness.$subscribe(() => {
   const { status, serviceHealthy, iframeLoaded, iframeError } = harness.$state
   const watching = status === 'ready' && serviceHealthy && !harness.iframeAlive && !iframeError
+  const context = {
+    status,
+    serviceHealthy,
+    serviceRunning: harness.serviceRunning,
+    iframeKey: harness.iframeKey,
+    iframeLoaded,
+    iframeAlive: harness.iframeAlive,
+    iframeError,
+  }
   if (!watching) {
     if (iframeWatch) {
+      console.warn('[Harness] iframe watchdog cancelled', context)
       clearTimeout(iframeWatch.timer)
       iframeWatch = null
     }
@@ -953,13 +963,24 @@ harness.$subscribe(() => {
   if (iframeWatch) {
     clearTimeout(iframeWatch.timer)
   }
+  const timeoutMs = iframeLoaded ? IFRAME_FRAME_GRACE_TIMEOUT : IFRAME_LOAD_TIMEOUT
+  console.warn('[Harness] iframe watchdog armed', { ...context, timeoutMs })
   iframeWatch = {
     loaded: iframeLoaded,
     timer: setTimeout(() => {
       iframeWatch = null
-      console.warn('[Harness] iframe never confirmed a dsh document, showing retryable error')
+      console.warn('[Harness] iframe watchdog expired', {
+        status: harness.status,
+        serviceHealthy: harness.serviceHealthy,
+        serviceRunning: harness.serviceRunning,
+        iframeKey: harness.iframeKey,
+        iframeLoaded: harness.iframeLoaded,
+        iframeAlive: harness.iframeAlive,
+        iframeError: harness.iframeError,
+        timeoutMs,
+      })
       harness.iframeLoaded = false
       harness.iframeError = true
-    }, iframeLoaded ? IFRAME_FRAME_GRACE_TIMEOUT : IFRAME_LOAD_TIMEOUT),
+    }, timeoutMs),
   }
 })
