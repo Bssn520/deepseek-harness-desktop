@@ -1037,6 +1037,11 @@ mod tests {
         node: &Path,
         path: &std::ffi::OsStr,
     ) -> std::process::Output {
+        std::fs::write(
+            shim.parent().unwrap().join("git.cmd"),
+            "@echo off\r\nexit /b 1\r\n",
+        )
+        .unwrap();
         let system_root = std::env::var_os("SystemRoot").unwrap();
         let system32 = PathBuf::from(system_root).join("System32");
         let mut command = if shim.extension().unwrap() == "ps1" {
