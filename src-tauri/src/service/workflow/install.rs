@@ -36,11 +36,12 @@ pub async fn install(
     // 枚举/结束涉及 powershell 枚举与 taskkill（同步阻塞），移出 Tokio 线程。
     {
         let handle = app_handle.clone();
+        let profile = crate::service::profile::active_profile(app_handle);
         tauri::async_runtime::spawn_blocking(move || {
-            terminate_stale_harness_processes(&handle);
+            super::instances::scope_sync(profile, || terminate_stale_harness_processes(&handle))
         })
         .await
-        .map_err(|e| format!("STOP_FAILED: {e}"))?;
+        .map_err(|e| format!("STOP_FAILED: {e}"))??;
     }
 
     let window = crate::utils::operation_window(app_handle)

@@ -49,7 +49,7 @@ export function Webview() {
   const [dshStyle] = useDshStyle()
   const [{ rows: shortcutRows }, setDshShortcuts] = useDshShortcuts()
 
-  const { status, serviceHealthy } = useStore(store.harness)
+  const { status, serviceHealthy, serviceRunning, iframeKey, iframeLoaded, iframeAlive, iframeError, startupPhase, busyAction } = useStore(store.harness)
   const { recovery } = useStore(store.recovery)
   const [remoteView, setRemoteView] = useState({ url: '', tint: null as string | null })
   const [sessionSource, setSessionSource] = useState(sessionTarget?.url ?? '')
@@ -57,6 +57,24 @@ export function Webview() {
   const borderTint = remoteView.tint
   const remoteMode = activeTunnelUrl !== ''
   const live = status === 'ready' && (remoteMode || serviceHealthy)
+  const branch = status === 'ready' ? 'iframe' : status === 'preinstall' ? 'preinstall' : status === 'error' && recovery.required ? 'recovery' : 'setup'
+  useWatch([branch, status, remoteMode, serviceHealthy, serviceRunning, iframeKey, iframeLoaded, iframeAlive, iframeError, startupPhase, busyAction, sessionPending, Boolean(sessionError)], () => {
+    console.warn('[Webview] shell view', {
+      branch,
+      status,
+      remoteMode,
+      serviceHealthy,
+      serviceRunning,
+      iframeKey,
+      iframeLoaded,
+      iframeAlive,
+      iframeError,
+      startupPhase,
+      busyAction,
+      sessionPending,
+      sessionError: Boolean(sessionError),
+    })
+  }, { immediate: true })
 
   function syncViewMenu() {
     if (type() !== 'macos')
