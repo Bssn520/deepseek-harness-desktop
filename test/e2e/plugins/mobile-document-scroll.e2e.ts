@@ -5,8 +5,8 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import mobileStyle from '../../../packages/dsh-tauri-mobile-ui/src/client/styles/mobile.cssr'
 
-vi.mock('dsh-tauri/client', async () => import('../../../packages/dsh-tauri/src/client/utils/device'))
-vi.mock('dsh-tauri-ui/client', async () => import('../../../packages/dsh-tauri-ui/src/client/utils/cssr'))
+vi.mock('../../../packages/dsh-tauri/dist/client.cjs', () => import('../../../packages/dsh-tauri/src/client/utils/device'))
+vi.mock('../../../packages/dsh-tauri-ui/dist/client.cjs', () => import('../../../packages/dsh-tauri-ui/src/client/utils/cssr'))
 
 const require = createRequire(import.meta.url)
 const upstream = ['layout', 'conversation'].map((name) => {
