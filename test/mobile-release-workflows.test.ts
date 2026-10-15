@@ -142,6 +142,22 @@ describe('mobile release workflow contracts', () => {
     expect(section(release, 'build-ios', 2)).not.toContain('secrets:')
   })
 
+  it('gates external Beta review after upload and before credential cleanup', () => {
+    const signed = readSource('.github/workflows/release-testflight.yml')
+    const upload = signed.indexOf('- name: Upload the same IPA to App Store Connect')
+    const review = signed.indexOf('- name: Submit external Beta review and enable automatic tester notifications')
+    const cleanup = signed.indexOf('- name: Always remove temporary signing material')
+    expect(upload).toBeGreaterThan(-1)
+    expect(review).toBeGreaterThan(upload)
+    expect(cleanup).toBeGreaterThan(review)
+    const step = signed.slice(review, cleanup)
+    expect(step).toContain('if: vars.IOS_BETA_REVIEW_ENABLED == \'true\'')
+    expect(step).toContain('timeout-minutes: 35')
+    expect(step).toContain(`TESTFLIGHT_BETA_GROUP_ID: \${{ vars.TESTFLIGHT_BETA_GROUP_ID }}`)
+    expect(step).toContain('run: python3 .github/scripts/ios-beta-review.py')
+    expect(readSource('.github/workflows/ci.yml')).toContain('-p \'test_ios_*.py\'')
+  })
+
   it('pins TestFlight to the locally verified Xcode toolchain on macOS 26', () => {
     const signed = readSource('.github/workflows/release-testflight.yml')
     expect(signed).toContain('runs-on: macos-26')

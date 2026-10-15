@@ -194,6 +194,7 @@ src-native/
 * 上述 unsigned IPA 不含分发签名，不能直接安装或提交 App Store，需自行签名。预发布完整版本保留在资产名中，iOS `CFBundleShortVersionString` 使用三段数字核心版本。
 * `release-testflight.yml` 为独立的官方仓库签名与自动上传任务，由 `release-native.yml` 的 `prepare` 成功后调用，仓库 Variable `IOS_TESTFLIGHT_ENABLED=true` 开启；不改变原有 APK / unsigned IPA 的发布依赖。也可从官方 `main` 手动运行，签名任务使用仓库级 Secrets，不依赖独立 Environment，仅构建官方 `main` 历史中的提交。
 * iOS 沿用 `APPLE_TEAM_ID`，新增 Apple Distribution 证书、App Store 描述文件和 App Store Connect 团队 API Key；不能拿 macOS Developer ID 证书替代。密钥清单、启用步骤及上传边界见 [TestFlight 签名发布](../TESTFLIGHT.zh.md)。
+* `IOS_BETA_REVIEW_ENABLED=true` 可在成功上传后自动等待本次准确版本与构建号处理完成，提交外部 Beta 审核并关联 `TESTFLIGHT_BETA_GROUP_ID` 指定的外部组；使用 App Manager 团队 API Key。`buildBetaDetails.autoNotifyEnabled` 交由苹果在批准后通知，不等待人工审核，不创建测试员、不改变公开邀请链接，也不代填账号或合规声明；此开关独立于签名上传。
 
 ---
 

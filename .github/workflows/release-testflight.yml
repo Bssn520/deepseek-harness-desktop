@@ -206,8 +206,17 @@ jobs:
             --apiKey "$APP_STORE_CONNECT_KEY_ID" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
           {
             echo "Uploaded signed IPA for $VERSION ($BUILD_NUMBER), commit $SOURCE_SHA."
-            echo 'App Store Connect processing, compliance and TestFlight review/tester assignment remain Apple-side steps.'
+            echo 'Upload accepted; optional external Beta review automation runs next.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Submit external Beta review and enable automatic tester notifications
+        if: vars.IOS_BETA_REVIEW_ENABLED == 'true'
+        timeout-minutes: 35
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          TESTFLIGHT_BETA_GROUP_ID: ${{ vars.TESTFLIGHT_BETA_GROUP_ID }}
+        run: python3 .github/scripts/ios-beta-review.py
 
       - name: Always remove temporary signing material
         if: always()
