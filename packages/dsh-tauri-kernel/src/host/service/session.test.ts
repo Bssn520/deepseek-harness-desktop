@@ -849,6 +849,42 @@ describe('independent native worktree session setup', () => {
     expect(announced).toEqual([parent.agent])
   }, 10_000)
 
+  it('publishes a child when native task progress arrives outside a turn during the awaited fork', async () => {
+    const { handle: parent, connection: original } = await conversation('claude')
+    const source = parent.agent.session
+    const observe = vi.mocked(createClaudeSession).mock.calls[0]![3].activity!
+    observe({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'background-task', task_type: 'local_bash', description: 'Inspecting' }] })
+    expect(projections.stateOf(source, 'bridgeActivity')?.activity.jobs).toEqual([{ id: 'background-task', label: 'Inspecting' }])
+    const prefix = source.snapshotEvents()
+    const messages = source.deriveMessages()
+    const ack = deferred<NativeSession>()
+    const started = deferred<void>()
+    const connection = native('worktree-progress-child')
+    releases.push(() => ack.resolve(connection))
+    vi.mocked(createClaudeSession).mockImplementationOnce(async () => {
+      started.resolve()
+      return ack.promise
+    })
+    const task = fork(parent.agent, 'worktree-progress-official')
+    await started.promise
+    expect(parent.agent.status).not.toBe('running')
+    observe({ type: 'system', subtype: 'task_progress', task_id: 'background-task', description: 'Still inspecting', last_tool_name: 'Read' })
+    expect(source.seq).toBe(prefix.length + 1)
+    expect(projections.stateOf(source, 'bridgeActivity')?.activity.jobs).toEqual([{ id: 'background-task', label: 'Still inspecting', details: 'Read' }])
+    ack.resolve(connection)
+    const child = await task
+    expect(agents.get(child.agent.id)).toBe(child.agent)
+    expect(child.agent.session.inheritedEventCount).toBe(prefix.length)
+    expect(child.agent.session.snapshotEvents().slice(0, prefix.length)).toEqual(prefix)
+    expect(projections.stateOf(child.agent.session, 'bridgeActivity')?.activity.jobs).toEqual([])
+    expect(identity.resolve(child.agent)).toEqual({ backend: 'claude', nativeSessionId: 'worktree-progress-child', sessionId: child.agent.id })
+    expect(source.deriveMessages()).toEqual(messages)
+    expect(connection.dispose).not.toHaveBeenCalled()
+    expect(original.submit).toHaveBeenCalledOnce()
+    expect(createClaudeSession).toHaveBeenCalledTimes(2)
+    expect(errors).toEqual([])
+  }, 10_000)
+
   it('refuses a parent changed during native fork instead of silently inheriting a newer history', async () => {
     const { handle: parent, connection: original } = await conversation()
     const ack = deferred<NativeSession>()

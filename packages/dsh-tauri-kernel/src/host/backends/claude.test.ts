@@ -801,6 +801,35 @@ describe('claude native stream-json control contract', () => {
     expect(fixture.kill).not.toHaveBeenCalled()
   })
 
+  it('preserves native execution when activity observation throws on background task events', async () => {
+    const fixture = claudeProcess()
+    const activity = vi.fn((_message: Frame) => {
+      throw new Error('activity projection failed')
+    })
+    const sink = Object.assign(createSink(), { activity })
+    const session = await open(null, sink)
+    activity.mockClear()
+    const snapshot = { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'observed-shell', task_type: 'local_bash', description: 'Inspect repository' }], uuid: 'observed-snapshot', session_id: session.id }
+    const before = [...fixture.frames]
+    fixture.send(snapshot)
+    expect(activity).toHaveBeenCalledExactlyOnceWith(snapshot)
+    expect(fixture.frames).toEqual(before)
+    const submitted = session.submit([user()], new AbortController().signal)
+    const frames = [...fixture.frames]
+    const started = { type: 'system', subtype: 'task_started', task_id: 'observed-shell', task_type: 'local_bash', description: 'Inspect repository', uuid: 'observed-start', session_id: session.id }
+    fixture.send(started)
+    fixture.send({ type: 'assistant', uuid: 'observed-tool-frame', session_id: session.id, message: { id: 'observed-message', content: [{ type: 'tool_use', id: 'observed-tool', name: 'Bash', input: { command: 'git status --short' } }] } })
+    fixture.send({ type: 'user', session_id: session.id, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'observed-tool', content: ' M fixture.ts\n', is_error: false }] } })
+    fixture.send({ type: 'system', subtype: 'task_notification', task_id: 'observed-shell', status: 'completed', output_file: 'C:/fixture/output', summary: 'Repository inspected', uuid: 'observed-complete', session_id: session.id })
+    result(fixture, session.id)
+    await submitted
+    expect(activity).toHaveBeenCalledWith(started)
+    expect(sink.toolStart.mock.calls).toEqual([['observed-tool', 'Bash', '{"command":"git status --short"}']])
+    expect(sink.toolEnd.mock.calls).toEqual([['observed-tool', ' M fixture.ts\n', false]])
+    expect(fixture.frames).toEqual(frames)
+    expect(fixture.kill).not.toHaveBeenCalled()
+  })
+
   it('records one native tool call and error result without echoing native user messages', async () => {
     const fixture = claudeProcess()
     const sink = createSink()

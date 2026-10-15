@@ -3,6 +3,7 @@ import type { HostContext } from './types'
 import { PLUGIN_ID } from '../shared/constants'
 import { runtime } from './config/runtime'
 import { server } from './server'
+import { activity } from './service/activity'
 import { adapter } from './service/adapter'
 import { checkpoint } from './service/checkpoint'
 import { identity } from './service/identity'
@@ -17,6 +18,7 @@ export function apply(ctx: HostContext, config: Config = {}): void {
     yield () => session.dispose()
     yield await identity.register()
     yield await model.register()
+    yield await activity.register()
     yield await checkpoint.register()
     yield ctx.provide('nativeSessionBridge', { create: session.createInherited, prepare: session.prepare })
     yield ctx.on('agent/pre-step', adapter.admit, { global: true, prepend: true })
