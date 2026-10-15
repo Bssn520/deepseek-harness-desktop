@@ -105,10 +105,12 @@ describe('chat flow off-screen rendering', () => {
     }
   })
 
-  it('对可见聊天流锚点启用原生屏外跳过渲染并保留尺寸记忆', () => {
+  it('可见聊天行保留屏外渲染与尺寸记忆，向左扩展绘制盒且不移动正文（issue #1085）', () => {
     expect(rules['[data-chat-flow] > [data-chat-anchor-key]:not([hidden])']).toEqual({
       'content-visibility': 'auto',
       'contain-intrinsic-size': 'auto 320px',
+      'padding-left': '24px',
+      'margin-left': '-24px',
     })
   })
 
