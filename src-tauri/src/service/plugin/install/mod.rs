@@ -35,7 +35,9 @@
 use crate::config;
 use crate::service::cli;
 use crate::service::core;
-use crate::service::profile::{active_profile, allow_profile_release_age};
+use crate::service::profile::{
+    active_profile, allow_profile_release_age, profile_dir_of, release_age_excludes_at,
+};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
@@ -306,38 +308,37 @@ fn locked_release_age_exemptions(
     if blocked.is_empty() {
         return None;
     }
+    let content = std::fs::read_to_string(profile.join("pnpm-lock.yaml")).ok()?;
+    let lockfile: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let packages = lockfile.get("packages")?.as_mapping()?;
     let mut entries = Vec::with_capacity(blocked.len());
     for item in blocked {
-        if single::locked_package_version(profile, &item.name).as_deref()
-            != Some(item.version.as_str())
+        let entry = format!("{}@{}", item.name, item.version);
+        if !packages
+            .keys()
+            .filter_map(serde_yaml::Value::as_str)
+            .any(|key| {
+                key.strip_prefix(&entry).is_some_and(|suffix| {
+                    suffix.is_empty() || (suffix.starts_with('(') && suffix.ends_with(')'))
+                })
+            })
         {
             return None;
         }
-        entries.push(format!("{}@{}", item.name, item.version));
+        entries.push(entry);
     }
     Some(entries)
 }
 
-/// 这次失败是不是「lockfile 里早就有的太新条目又被门禁拦下」：是则补齐豁免并返回 `true`。
-///
-/// pnpm 的 `minimumReleaseAgeExclude` 只被**解析**阶段采信，lockfile 校验阶段照旧按窗口
-/// 判定：一旦 lock 里存在比窗口更新的条目（用户授权后放宽窗口装上的那一次就会写入），
-/// 此后**每一次**触发状态变更的插件操作都会失败——升级第二个插件卡在第一个插件的条目上，
-/// 启动期的内置插件安装失败还会让应用起不来（`INTERNAL_PLUGIN_INSTALL_FAILED`）。
-/// 已在 lock 里的版本说明它早就装到本机，不是本次要审的新版本：补进豁免清单（幂等）并让
-/// 调用方放宽窗口重跑一次，把档案带回自洽状态。
-///
-/// 被拦下的条目里只要有一个不在 lock 中（或 lock 里是别的版本），说明那是本次新解析出来
-/// 的版本：保持默认窗口、交前端走「逐项授权」，绝不放宽。
-fn heal_locked_release_age(app_handle: &AppHandle, output: &str) -> bool {
+fn heal_locked_release_age(profile: &Path, output: &str) -> bool {
     let blocked = policy_blocked_versions(output);
-    let Some(entries) = locked_release_age_exemptions(&profile_dir(app_handle), &blocked) else {
+    let Some(entries) = locked_release_age_exemptions(profile, &blocked) else {
         return false;
     };
-    match allow_profile_release_age(app_handle, &entries) {
+    match release_age_excludes_at(profile, &entries) {
         Ok(()) => {
             log::warn!(
-                "pnpm release-age policy blocked {} entries that are already locked; recorded them as exempt and retrying with the window relaxed",
+                "pnpm release-age policy blocked {} entries that are already locked; recorded exact exemptions and retrying with the default window",
                 entries.len()
             );
             true
@@ -416,11 +417,13 @@ async fn install_with_cancel(
     let envs = build_plugin_envs(app_handle, prefer_bundled_pnpm);
 
     // 拼装命令行参数
+    let profile = active_profile(app_handle);
+    let profile_path = profile_dir_of(app_handle, &profile);
     let mut args = vec![
         dsh_bin.as_os_str().to_os_string(),
         OsString::from("plugin"),
         OsString::from("--profile"),
-        OsString::from(active_profile(app_handle)),
+        OsString::from(&profile),
         OsString::from("add"),
     ];
     args.extend(specs.iter().map(OsString::from));
@@ -447,16 +450,12 @@ async fn install_with_cancel(
     )
     .await?;
 
-    // 门禁自愈：lockfile 里早有的太新条目会让**每一次**状态变更都失败
-    // （见 [`heal_locked_release_age`]）。补齐豁免后放宽窗口重跑一次，仍失败就照原样分类。
     let (exit_code, last_output, last_attempt) =
-        if exit_code != 0 && heal_locked_release_age(app_handle, &last_attempt) {
-            let mut retry_args = args.clone();
-            retry_args.push(OsString::from(single::RELEASE_AGE_RELAXED_FLAG));
+        if exit_code != 0 && heal_locked_release_age(&profile_path, &last_attempt) {
             run_plugin_install_with_transient_retry(
                 app_handle,
                 &node,
-                &retry_args,
+                &args,
                 &cwd,
                 &envs,
                 &window,
@@ -705,24 +704,16 @@ pub async fn allow_version_exemptions(
     }
 }
 
-/// 记录用户明确授权的发布时长策略豁免：把精确 `包名@版本` 写进档案的
-/// `minimumReleaseAgeExclude`，pnpm 的解析随后会放行这些条目；lockfile 校验阶段
-/// 仍按默认窗口拦截，因此升级调用还会附上 `--config.minimumReleaseAge=0`
-/// （见 `single::update_many`），否则授权过的版本依旧装不上。
-///
-/// 与 [`allow_version_exemptions`] 的分工：那个针对 dsh 的**版本兼容性**（写档案的
-/// `compatibility.json`），这个针对 pnpm 的**发布时长门禁**（写 `pnpm-workspace.yaml`）。
-/// 两者都只认精确版本、都在用户确认后才调用；这里不起进程、不停服、不碰 `node_modules`，
-/// 写完由界面重跑原操作（重跑会真正改写 lockfile/依赖，必须由 pnpm 自己跑）。
 pub fn allow_policy_versions(
     app_handle: &AppHandle,
     versions: &[PolicyBlockedVersion],
+    expected_profile: Option<&str>,
 ) -> Result<(), String> {
     let entries: Vec<String> = versions
         .iter()
         .map(|entry| format!("{}@{}", entry.name, entry.version))
         .collect();
-    allow_profile_release_age(app_handle, &entries)
+    allow_profile_release_age(app_handle, &entries, expected_profile)
 }
 
 /// 返回 `(exit_code, 历次尝试的输出拼接, 最后一次尝试的输出)`。
@@ -1069,7 +1060,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pnpm-lock.yaml"),
-            "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      dshmarket:\n        specifier: ^2.12.0\n        version: 2.12.0\n",
+            "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      dshmarket:\n        specifier: ^2.12.0\n        version: 2.12.0\npackages:\n  dshmarket@2.12.0: {}\n  transitive@1.0.0: {}\n  transitive@1.1.0: {}\n  '@scope/pkg@2.0.0(peer@1.0.0)': {}\n  transitive@1.2.0-extra: {}\n  missing@1.0.0suffix: {}\n",
         )
         .unwrap();
 
@@ -1090,6 +1081,50 @@ mod tests {
             locked_release_age_exemptions(&dir, &[locked.clone()]),
             Some(vec!["dshmarket@2.12.0".to_string()])
         );
+        let transitive = PolicyBlockedVersion {
+            name: "transitive".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let second = PolicyBlockedVersion {
+            name: "transitive".to_string(),
+            version: "1.1.0".to_string(),
+        };
+        let scoped = PolicyBlockedVersion {
+            name: "@scope/pkg".to_string(),
+            version: "2.0.0".to_string(),
+        };
+        assert_eq!(
+            locked_release_age_exemptions(&dir, &[transitive.clone(), second, scoped]),
+            Some(vec![
+                "transitive@1.0.0".to_string(),
+                "transitive@1.1.0".to_string(),
+                "@scope/pkg@2.0.0".to_string()
+            ])
+        );
+        assert_eq!(
+            locked_release_age_exemptions(&dir, &[transitive.clone(), newer.clone()]),
+            None
+        );
+        assert_eq!(
+            locked_release_age_exemptions(&dir, &[transitive, absent.clone()]),
+            None
+        );
+        for (name, version) in [
+            ("transitive", "1.2.0"),
+            ("missing", "1.0.0"),
+            ("@scope/pkg", "2.1.0"),
+        ] {
+            assert_eq!(
+                locked_release_age_exemptions(
+                    &dir,
+                    &[PolicyBlockedVersion {
+                        name: name.to_string(),
+                        version: version.to_string()
+                    }]
+                ),
+                None
+            );
+        }
         assert_eq!(locked_release_age_exemptions(&dir, &[newer]), None);
         assert_eq!(locked_release_age_exemptions(&dir, &[absent]), None);
         assert_eq!(locked_release_age_exemptions(&dir, &[]), None);

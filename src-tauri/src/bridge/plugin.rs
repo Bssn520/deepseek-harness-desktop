@@ -145,8 +145,9 @@ pub async fn allow_plugin_versions(
 pub async fn allow_plugin_policy_versions(
     app_handle: AppHandle,
     versions: Vec<plugin::PolicyBlockedVersion>,
+    expected_profile: Option<String>,
 ) -> Result<(), String> {
-    plugin::allow_policy_versions(&app_handle, &versions)
+    plugin::allow_policy_versions(&app_handle, &versions, expected_profile.as_deref())
 }
 
 /// 跳过预装插件引导：记录状态与预设指纹，之后不再弹出（除非清单内容变更）

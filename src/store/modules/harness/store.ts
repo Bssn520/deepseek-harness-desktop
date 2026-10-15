@@ -1,4 +1,5 @@
 import type { UnlistenFn } from '@tauri-apps/api/event'
+import type { PolicyBlockedVersion } from '../preinstall'
 import type { StartupPhase } from './readiness'
 import type {
   HarnessProcessExitedPayload,
@@ -11,14 +12,18 @@ import type {
   StartupError,
 } from './types'
 import type { PatchEntryStripReport, PatchQuarantineReport } from '@/types/plugin'
+import type { Profile } from '@/types/profile'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import i18next from 'i18next'
+import semver from 'semver'
 import { defineStore } from 'valtio-define'
 import { queryClient } from '@/config/client'
 import { hooks } from '@/config/hooks'
 import { queryKeys } from '@/config/query-keys'
+import { toast } from '@/utils/toast'
 import { harnessUpdater } from '../harness-updater'
+import { parseBlockedRefusal } from '../plugins'
 import { preinstall } from '../preinstall'
 import { recovery } from '../recovery'
 import { setting } from '../setting'
@@ -79,6 +84,7 @@ let pluginActivityReason = ''
 const restartFlight = new SingleFlight<void>()
 const iframeReloadGate = new BoundedReloadGate(IFRAME_RELOAD_MAX_ATTEMPTS)
 let iframeRefreshTimer: ReturnType<typeof setTimeout> | undefined
+let policyApprovalKey: string | undefined
 
 /**
  * 桌面外壳核心业务模块：安装/启动流程、服务生命周期（启动/健康检查/重启/停止）、
@@ -543,6 +549,10 @@ export const harness = defineStore({
     /** 启动流程：检测环境/安装依赖 → 拉起服务 → 已安装时后台检查更新 */
     async boot() {
       const token = ++bootToken
+      if (policyApprovalKey !== undefined) {
+        toast.close(policyApprovalKey)
+        policyApprovalKey = undefined
+      }
       iframeReloadGate.reset()
       if (iframeRefreshTimer !== undefined) {
         clearTimeout(iframeRefreshTimer)
@@ -565,6 +575,7 @@ export const harness = defineStore({
       recovery.clear()
       this.status = 'ready'
       let unlistenInstall: UnlistenFn | null = null
+      let policyApproval: { versions: PolicyBlockedVersion[], profile: string } | undefined
 
       try {
         // 事件监听失败（例如 IPC 自定义协议被 CSP 拦截、回退 postMessage 也异常）
@@ -605,6 +616,7 @@ export const harness = defineStore({
         this.startupReason = i18next.t('status.loading_internal')
         pluginActivitySequence++
         pluginActivityReason = i18next.t('status.internal_waiting')
+        const installProfile = (await invoke<Profile[]>('get_profiles')).find(item => item.active)?.id
         try {
           const result = await waitForActivityTask({
             task: invoke('ensure_internal_plugins'),
@@ -637,7 +649,23 @@ export const harness = defineStore({
           if (err instanceof Error && (err as StartupError).phase) {
             throw err
           }
-          throw startupError('plugin-install', String(err), 'failed')
+          if (token !== bootToken)
+            return
+          const message = err instanceof Error ? err.message : String(err)
+          const policyMessage = message.replace(/^INTERNAL_PLUGIN_INSTALL_FAILED: /, '')
+          const refusal = policyMessage.startsWith('PLUGIN_POLICY_BLOCKED:') && !policyMessage.includes('\n')
+            ? parseBlockedRefusal(policyMessage)
+            : null
+          if (refusal?.kind !== 'policy' || !Array.isArray(refusal.versions)
+            || !refusal.versions.every(item => item && typeof item.name === 'string' && item.name.trim() !== ''
+              && typeof item.version === 'string' && semver.valid(item.version))) {
+            throw startupError('plugin-install', message, 'failed')
+          }
+          const profiles = await invoke<Profile[]>('get_profiles')
+          const profile = profiles.find(item => item.active)?.id
+          if (!installProfile || profile !== installProfile)
+            throw startupError('plugin-install', message, 'failed')
+          policyApproval = { versions: refusal.versions, profile }
         }
         // 预装插件引导：首次安装、老版本升级（无指纹基线）或清单 plugins 节
         // 内容变更（社区新增推荐插件）时重新进入预设流程，装完/跳过后才拉起服务。
@@ -678,6 +706,45 @@ export const harness = defineStore({
       }
       finally {
         unlistenInstall?.()
+        if (policyApproval && token === bootToken) {
+          const { versions, profile } = policyApproval
+          let granting = false
+          const key = toast(i18next.t('plugins.blocked_policy_title', { name: versions.map(item => item.name).join('、') }), {
+            variant: 'warning',
+            timeout: 0,
+            sticky: true,
+            description: i18next.t('plugins.blocked_policy_desc', { blocked: versions.map(item => `${item.name}@${item.version}`).join('、') }),
+            actionProps: {
+              children: i18next.t('buttons.authorize'),
+              onPress: async () => {
+                if (granting || token !== bootToken || this.busyAction || preinstall.installing)
+                  return
+                granting = true
+                try {
+                  const profiles = await invoke<Profile[]>('get_profiles')
+                  if (token !== bootToken || profiles.find(item => item.active)?.id !== profile) {
+                    toast.close(key)
+                    return
+                  }
+                  if (!await preinstall.allowPolicyVersions(versions, profile)) {
+                    toast(i18next.t('plugins.authorize_failed'), { variant: 'danger', description: preinstall.error })
+                    return
+                  }
+                  toast.close(key)
+                  if (token === bootToken)
+                    await this.restart()
+                }
+                catch (error) {
+                  toast(i18next.t('plugins.authorize_failed'), { variant: 'danger', description: String(error) })
+                }
+                finally {
+                  granting = false
+                }
+              },
+            },
+          })
+          policyApprovalKey = key
+        }
       }
     },
 
