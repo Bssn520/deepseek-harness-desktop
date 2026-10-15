@@ -65,7 +65,10 @@ pub fn sweep_orphan_harness(app_handle: &tauri::AppHandle) {
     // Windows 按入口路径与转发链状态回收，不按共享标记结束另一个仍在运行的 dev 实例。
     // 启动期只做一次：本次启动已清扫过就跳过（重复枚举同一份进程快照没有新结论）。
     if take_startup_sweep() {
-        terminate_stale_harness_processes(app_handle);
+        if let Err(error) = terminate_stale_harness_processes(app_handle) {
+            super::process::retry_startup_sweep();
+            log::warn!("Startup Harness sweep failed: {error}");
+        }
     } else {
         log::debug!("Skipping orphan Harness sweep: already swept during this launch");
     }
@@ -103,7 +106,7 @@ pub fn sweep_orphan_harness(app_handle: &tauri::AppHandle) {
 /// - Windows：`netstat -ano` 解析；
 /// - Unix：`lsof -ti tcp:<port>`，不可用时返回 None。
 ///   返回 None 视为"无法确认"，调用方不会因此杀任何进程。
-fn port_owner_pid(port: u16) -> Option<u32> {
+pub(super) fn port_owner_pid(port: u16) -> Option<u32> {
     #[cfg(windows)]
     {
         // 打包版是 GUI 进程（无控制台）：netstat 是控制台子系统程序，直接运行会

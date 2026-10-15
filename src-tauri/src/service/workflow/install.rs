@@ -36,11 +36,9 @@ pub async fn install(
     // 枚举/结束涉及 powershell 枚举与 taskkill（同步阻塞），移出 Tokio 线程。
     {
         let handle = app_handle.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            terminate_stale_harness_processes(&handle);
-        })
-        .await
-        .map_err(|e| format!("STOP_FAILED: {e}"))?;
+        tauri::async_runtime::spawn_blocking(move || terminate_stale_harness_processes(&handle))
+            .await
+            .map_err(|e| format!("STOP_FAILED: {e}"))??;
     }
 
     let window = app_handle
