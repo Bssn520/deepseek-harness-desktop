@@ -203,7 +203,7 @@ export async function waitForActivityTask<T>({
   let value: T | undefined
   let failure: unknown
 
-  void task.then(
+  const completion = task.then(
     (result) => {
       value = result
       settled = true
@@ -242,14 +242,17 @@ export async function waitForActivityTask<T>({
         reason: snapshot.reason,
       }
     }
-    await wait(boundedWait(
-      intervalMs,
-      now(),
-      startedAt,
-      lastActivityAt,
-      inactivityTimeoutMs,
-      absoluteTimeoutMs,
-    ))
+    await Promise.race([
+      completion,
+      wait(boundedWait(
+        intervalMs,
+        now(),
+        startedAt,
+        lastActivityAt,
+        inactivityTimeoutMs,
+        absoluteTimeoutMs,
+      )),
+    ])
   }
 
   return {

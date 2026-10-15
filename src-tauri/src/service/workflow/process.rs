@@ -6,6 +6,8 @@
 use crate::config;
 use std::fs;
 #[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
+#[cfg(windows)]
 use std::path::Path;
 use std::process::Command;
 #[cfg(windows)]
@@ -43,13 +45,11 @@ pub(crate) fn launch_guard() -> Arc<AtomicBool> {
 /// 「PID 清空」与「句柄关闭」之间不存在跨原子竞态（WARN-6）。历史上 PID/句柄
 /// 分两个 `Atomic*` 存储，`stop` 读 PID 与监视线程清句柄之间有微窗口可能导致
 /// 漏杀或重复 close。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct OwnedProcess {
     pub(super) pid: u32,
-    /// Windows 进程句柄（原始 HANDLE 转 usize 存储，避免 `*mut c_void` 非 Send）。
-    /// 只在 Windows 存在；Unix 无句柄概念。
     #[cfg(windows)]
-    pub(super) handle: usize,
+    pub(super) handle: Arc<OwnedHandle>,
 }
 
 /// 本次启动是否已按 dsh 入口路径清扫过历史残留。
@@ -70,31 +70,27 @@ pub(super) fn retry_startup_sweep() {
     STARTUP_SWEEP_DONE.store(false, Ordering::SeqCst);
 }
 
-/// 记录新持有的 Harness 根进程（Unix，启动成功后调用）。
-#[cfg(not(windows))]
-pub(super) fn set_owned_process(pid: u32) {
+pub(super) fn register_owned_process<T>(
+    previous_pid: Option<u32>,
+    spawn: impl FnOnce() -> Result<(OwnedProcess, T), String>,
+) -> Result<Option<T>, String> {
     let instance = super::instances::instance();
     let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(OwnedProcess { pid });
+    if !instance.launching.load(Ordering::SeqCst)
+        || guard.as_ref().map(|process| process.pid) != previous_pid
+    {
+        return Ok(None);
+    }
+    let (owned, value) = spawn()?;
+    *guard = Some(owned);
+    Ok(Some(value))
 }
 
-/// 若调用方 owns 该进程（Windows 额外存句柄），记录之。
-#[cfg(windows)]
-pub(super) fn set_owned_process_with_handle(pid: u32, handle: usize) {
-    let instance = super::instances::instance();
-    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(OwnedProcess { pid, handle });
-    // 本应用此后持有自己的 Harness：再次启动前必须重新确认没有残留
-}
-
-/// 原子取出持有的进程（PID+句柄一起）。取走者负责关闭 Windows 句柄；
-/// 无条件取出（停止/退出路径）。
 fn take_owned_process() -> Option<OwnedProcess> {
-    crate::service::workflow::instances::instance()
-        .process
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
+    let instance = super::instances::instance();
+    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
+    instance.launching.store(false, Ordering::SeqCst);
+    guard.take()
 }
 
 /// 纯函数部分：便于单测，不触碰全局状态。
@@ -109,11 +105,11 @@ fn take_owned_process_if_matching(
     }
 }
 
-pub(crate) struct LaunchGuard;
+pub(crate) struct LaunchGuard(pub(super) Arc<AtomicBool>);
 
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
-        launch_guard().store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -175,9 +171,7 @@ pub fn owned_process_pid() -> Option<u32> {
 /// - 匹配成功后无条件回落到 Stopped——进程可能在 Starting 或 Running 阶段
 ///   退出，任何情况下都不能继续广播一个已经失效的运行状态（WARN-5）。
 ///
-/// 返回被取出的进程记录（含 Windows 句柄），取到者负责 `CloseHandle`——保证
-/// 「取走进程」与「关闭句柄」同属一个调用者，杜绝重复 close。幂等：多次调用
-/// （tick 与监视线程并发）只会生效一次，后续调用返回 None。
+/// 幂等：多次调用只会生效一次，后续调用返回 None。
 pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     pid: u32,
@@ -192,6 +186,10 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
         let owned = take_owned_process_if_matching(&mut guard, pid)?;
         // issue #1075：报告路径落盘前不让健康探测观察到 ownership 丢失。
         let exit_code = exit_code(&owned);
+        *instance
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = status::Status::Stopped;
         (owned, exit_code)
     };
 
@@ -215,7 +213,6 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
         );
     }
 
-    status::set_status(status::Status::Stopped);
     status::emit_status(app_handle);
     let payload = HarnessProcessExitedPayload {
         pid: owned.pid,
@@ -237,13 +234,10 @@ fn terminate_owned_process() -> Result<bool, ()> {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        let handle = owned.handle as windows_sys::Win32::Foundation::HANDLE;
-        if handle.is_null() {
-            return Err(());
-        }
+        let handle = owned.handle.as_raw_handle();
         if let Err(error) = terminate_windows_process(owned.pid, handle, kill_pid_tree) {
             log::error!("{error}");
+            log::error!("Harness process {} is still running after stop", owned.pid);
             let instance = super::instances::instance();
             let mut guard = instance
                 .process
@@ -251,13 +245,9 @@ fn terminate_owned_process() -> Result<bool, ()> {
                 .unwrap_or_else(|error| error.into_inner());
             if guard.is_none() {
                 *guard = Some(owned);
-            } else {
-                unsafe { CloseHandle(handle) };
             }
-            log::error!("Harness process {} is still running after stop", owned.pid);
             return Err(());
         }
-        unsafe { CloseHandle(handle) };
     }
 
     #[cfg(unix)]
@@ -533,7 +523,7 @@ fn terminate_confirmed_process(pid: u32, created: u64) -> Result<bool, String> {
 }
 
 #[cfg(windows)]
-fn terminate_windows_process(
+pub(super) fn terminate_windows_process(
     pid: u32,
     handle: windows_sys::Win32::Foundation::HANDLE,
     kill_tree: impl FnOnce(u32),
@@ -970,7 +960,15 @@ mod tests {
     /// 构造一个测试用 `OwnedProcess`（跨平台处理 Windows 句柄字段）。
     #[cfg(windows)]
     fn test_owned(pid: u32) -> OwnedProcess {
-        OwnedProcess { pid, handle: 0 }
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        assert!(!handle.is_null(), "{}", std::io::Error::last_os_error());
+        OwnedProcess {
+            pid,
+            handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }),
+        }
     }
     #[cfg(not(windows))]
     fn test_owned(pid: u32) -> OwnedProcess {
@@ -1003,13 +1001,12 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        let profile = "exit-diagnostics-test";
         let app = tauri::test::mock_app();
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("fatal-report.log");
-        *crate::service::workflow::instances::instance()
-            .process
-            .lock()
-            .unwrap() = Some(test_owned(42));
+        let instance = super::super::instances::instance_of(profile);
+        *instance.process.lock().unwrap() = Some(test_owned(42));
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let timeout = Duration::from_secs(5);
@@ -1018,28 +1015,151 @@ mod tests {
             let callback_marker = marker.clone();
             let handle = app.handle().clone();
             let exit = scope.spawn(move || {
-                on_owned_process_exit(&handle, 42, |_| {
-                    entered_tx.send(()).unwrap();
-                    resume_rx.recv_timeout(timeout).unwrap();
-                    fs::write(callback_marker, "ERROR HARNESS_FATAL_REPORT: fatal.json\n").unwrap();
-                    Some(1)
+                super::super::instances::scope_sync(profile.into(), || {
+                    on_owned_process_exit(&handle, 42, |_| {
+                        entered_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(timeout).unwrap();
+                        fs::write(callback_marker, "ERROR HARNESS_FATAL_REPORT: fatal.json\n")
+                            .unwrap();
+                        Some(1)
+                    })
                 })
             });
             entered_rx.recv_timeout(timeout).unwrap();
             let callback_holds_ownership = matches!(
-                crate::service::workflow::instances::instance()
-                    .process
-                    .try_lock(),
+                instance.process.try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
             );
             let observer = scope.spawn(|| {
-                let owned = has_owned_process();
-                (owned, marker.is_file())
+                super::super::instances::scope_sync(profile.into(), || {
+                    (has_owned_process(), marker.is_file())
+                })
             });
             resume_tx.send(()).unwrap();
             assert_eq!(exit.join().unwrap().map(|owned| owned.pid), Some(42));
             assert!(callback_holds_ownership);
             assert_eq!(observer.join().unwrap(), (false, true));
+        });
+    }
+
+    #[test]
+    fn registration_rejects_cancelled_launch_and_replaces_only_expected_pid() {
+        super::super::instances::scope_sync("registration-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            assert!(take_owned_process().is_none());
+            assert!(!launching.load(Ordering::SeqCst));
+            assert!(
+                register_owned_process::<()>(None, || panic!("cancelled spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), None);
+
+            launching.store(true, Ordering::SeqCst);
+            assert_eq!(
+                register_owned_process(None, || Ok((test_owned(41), 41))).unwrap(),
+                Some(41)
+            );
+            assert_eq!(
+                register_owned_process(Some(41), || Ok((test_owned(42), 42))).unwrap(),
+                Some(42)
+            );
+            assert!(
+                register_owned_process::<()>(Some(41), || panic!("stale retry spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(
+                register_owned_process::<()>(Some(42), || Err("spawn failed".into())).unwrap_err(),
+                "spawn failed"
+            );
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(take_owned_process().map(|owned| owned.pid), Some(42));
+            assert!(
+                register_owned_process::<()>(Some(42), || panic!("cancelled retry spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), None);
+        });
+    }
+
+    #[test]
+    fn launch_guard_clears_its_own_profile_outside_original_scope() {
+        let guard = super::super::instances::scope_sync("guard-owner-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            LaunchGuard(launching)
+        });
+        super::super::instances::scope_sync("guard-drop-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            drop(guard);
+            assert!(launching.load(Ordering::SeqCst));
+            assert!(!super::super::instances::instance_of("guard-owner-test")
+                .launching
+                .load(Ordering::SeqCst));
+            launching.store(false, Ordering::SeqCst);
+        });
+    }
+
+    #[test]
+    fn exit_holds_ownership_until_status_commit_and_preserves_new_registration() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let profile = "exit-status-commit-test";
+        let app = tauri::test::mock_app();
+        let instance = super::super::instances::instance_of(profile);
+        instance.launching.store(true, Ordering::SeqCst);
+        *instance.process.lock().unwrap() = Some(test_owned(41));
+        let mut status_guard = instance.status.lock().unwrap();
+        *status_guard = status::Status::Running;
+        let (exiting_tx, exiting_rx) = mpsc::channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let timeout = std::time::Duration::from_secs(5);
+
+        std::thread::scope(|scope| {
+            let handle = app.handle().clone();
+            let exit = scope.spawn(move || {
+                super::super::instances::scope_sync(profile.into(), || {
+                    on_owned_process_exit(&handle, 41, |_| {
+                        exiting_tx.send(()).unwrap();
+                        Some(1)
+                    })
+                })
+            });
+            exiting_rx.recv_timeout(timeout).unwrap();
+            let observer_instance = instance.clone();
+            let observer = scope.spawn(move || {
+                let guard = observer_instance.process.lock().unwrap();
+                observed_tx.send(guard.is_none()).unwrap();
+            });
+            let blocked_until_commit = observed_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err();
+            drop(status_guard);
+            assert_eq!(exit.join().unwrap().map(|owned| owned.pid), Some(41));
+            assert!(observed_rx.recv_timeout(timeout).unwrap());
+            observer.join().unwrap();
+            assert!(
+                blocked_until_commit,
+                "ownership must stay locked until Stopped is committed"
+            );
+        });
+
+        super::super::instances::scope_sync(profile.into(), || {
+            assert_eq!(status::get_status(), status::Status::Stopped);
+            assert!(register_owned_process(None, || Ok((test_owned(42), ())))
+                .unwrap()
+                .is_some());
+            status::set_status(status::Status::Running);
+            assert!(on_owned_process_exit(app.handle(), 41, |_| panic!("stale exit")).is_none());
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(status::get_status(), status::Status::Running);
+            take_owned_process();
         });
     }
 
