@@ -179,6 +179,16 @@ describe('useRemote 查询、降级与启动寻址', () => {
     expect(invoke.mock.calls.filter(call => call[1].method.endsWith('/machines'))).toHaveLength(2)
   })
 
+  it.each(['remote-776562--m1', 'remote-7461757269--m1'])('profile-scoped window %s reads its explicit machine target', async (label) => {
+    windowInfo.label = label
+    window.location.hash = new URLSearchParams({ remoteMachineId: 'machine--with spaces' }).toString()
+    rows = [machineOf({ id: 'machine--with spaces', state: 'connected', tunnelBaseUrl: 'http://127.0.0.1:4001' })]
+    const { result } = await ready()
+    await waitFor(() => expect(result.current.activeId).toBe('machine--with spaces'))
+    expect(result.current.activeTunnelUrl).toBe('http://127.0.0.1:4001')
+    expect(connect).not.toHaveBeenCalled()
+  })
+
   it('remote-窗口已连接目标直接切换', async () => {
     windowInfo.label = 'remote-m1'
     rows = [machineOf({ state: 'connected', tunnelBaseUrl: 'http://127.0.0.1:4001' })]

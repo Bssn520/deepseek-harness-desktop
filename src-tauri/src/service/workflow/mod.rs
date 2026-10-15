@@ -12,6 +12,7 @@
 //! - [`startup`]：启动耗时观测（spawn → 首个 HTTP 响应 → 客户端模块就绪）
 //! - [`status`] / [`utils`] / [`win_inspector`] / [`win_spawn`]：既有子模块
 
+pub mod instances;
 pub mod status;
 pub mod utils;
 pub(crate) mod win_inspector;

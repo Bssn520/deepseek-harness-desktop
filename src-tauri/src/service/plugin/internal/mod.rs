@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use super::cancel::terminate_owned_install;
 use super::install::install_internal;
@@ -195,11 +195,17 @@ impl EnsureCoordinator {
     }
 }
 
-static ENSURE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<EnsureCoordinator>> =
-    std::sync::OnceLock::new();
-
-fn ensure_lock() -> &'static tokio::sync::Mutex<EnsureCoordinator> {
-    ENSURE_LOCK.get_or_init(|| tokio::sync::Mutex::new(EnsureCoordinator::default()))
+fn ensure_lock(profile: &str) -> std::sync::Arc<tokio::sync::Mutex<EnsureCoordinator>> {
+    static COORDINATORS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<EnsureCoordinator>>>>,
+    > = std::sync::OnceLock::new();
+    COORDINATORS
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(profile.to_string())
+        .or_default()
+        .clone()
 }
 
 /// 在启动 Harness 前修复旧桌面目录遗留的 profile loader 状态。
@@ -316,6 +322,12 @@ fn ensure_fingerprint(app_handle: &AppHandle, internal: &[PreinstallPluginInfo])
 }
 
 pub(crate) async fn ensure(app_handle: &AppHandle) -> Result<(), String> {
+    let profile = crate::service::profile::active_profile(app_handle);
+    crate::service::workflow::instances::scope(profile, ensure_scoped(app_handle)).await
+}
+
+async fn ensure_scoped(app_handle: &AppHandle) -> Result<(), String> {
+    let lock = ensure_lock(&crate::service::profile::active_profile(app_handle));
     let presets = load_presets(app_handle);
     // 被核心吸收的内置插件（当前核心已超出其声明的全部核心版本区间）自愈不再装回，
     // 与 `uninstall_deprecated_plugins` 的退役判定同源，避免两边互相拉扯。
@@ -330,7 +342,7 @@ pub(crate) async fn ensure(app_handle: &AppHandle) -> Result<(), String> {
     let reused = if internal.is_empty() {
         false
     } else {
-        ensure_lock().lock().await.reuse(fingerprint)
+        lock.lock().await.reuse(fingerprint)
     };
     if reused {
         log::debug!(
@@ -363,8 +375,7 @@ pub(crate) async fn ensure(app_handle: &AppHandle) -> Result<(), String> {
     if outcome.is_ok() {
         // 记「完成后的」指纹：本轮自己写回的状态（去重/修复/安装）就是已被核对过的
         // 状态，后到的那一路按同一状态算指纹即可命中，不会白跑第二轮。
-        ensure_lock()
-            .lock()
+        lock.lock()
             .await
             .record(ensure_fingerprint(app_handle, &internal));
     }
@@ -410,39 +421,46 @@ async fn subscribe_or_start(
     app_handle: &AppHandle,
     internal: &[PreinstallPluginInfo],
 ) -> EnsureSubscription {
-    let mut coordinator = ensure_lock().lock().await;
+    let profile = crate::service::profile::active_profile(app_handle);
+    let lock = ensure_lock(&profile);
+    let mut coordinator = lock.lock().await;
     match coordinator.subscribe() {
         Some(subscription) => subscription,
         None => {
             let (id, owner, result_tx, result_rx, cancel_tx, cancel_rx) = coordinator.start();
             let app_handle = app_handle.clone();
             let internal = internal.to_vec();
-            tauri::async_runtime::spawn(async move {
-                let mut outcome =
-                    run_ensure_operation(&app_handle, &internal, owner, cancel_tx, cancel_rx).await;
-                // 强杀返回不等于持有句柄的 wait 已完成；必须等精确 owner 的 PID
-                // 守卫随 wait 退出，才能发布结果并允许 Retry 创建下一次 flight。
+            let lock = lock.clone();
+            tauri::async_runtime::spawn(crate::service::workflow::instances::scope(
+                profile,
+                async move {
+                    let mut outcome =
+                        run_ensure_operation(&app_handle, &internal, owner, cancel_tx, cancel_rx)
+                            .await;
+                    // 强杀返回不等于持有句柄的 wait 已完成；必须等精确 owner 的 PID
+                    // 守卫随 wait 退出，才能发布结果并允许 Retry 创建下一次 flight。
 
-                if !wait_for_owner_release(owner, ENSURE_OWNER_DRAIN_TIMEOUT).await {
-                    let reason = format!(
+                    if !wait_for_owner_release(owner, ENSURE_OWNER_DRAIN_TIMEOUT).await {
+                        let reason = format!(
                         "INTERNAL_PLUGIN_PROCESS_REAP_TIMEOUT: plugin process owner {owner:?} remained active for {} seconds",
                         ENSURE_OWNER_DRAIN_TIMEOUT.as_secs()
                     );
-                    log::error!("{reason}");
-                    outcome = Err(reason.clone());
-                    let _ = result_tx.send(Some(outcome));
-                    ensure_lock().lock().await.mark_cleanup_failed(id, reason);
-                    // 保留 cleanup-failed flight 与唯一 owner；进程锁仍由 wait 线程持有。
-                    // 若系统最终完成 reap，再释放 flight 允许后续 Retry。
-                    while super::process::active_plugin_pid(owner).is_some() {
-                        tokio::time::sleep(ENSURE_OWNER_DRAIN_INTERVAL).await;
+                        log::error!("{reason}");
+                        outcome = Err(reason.clone());
+                        let _ = result_tx.send(Some(outcome));
+                        lock.lock().await.mark_cleanup_failed(id, reason);
+                        // 保留 cleanup-failed flight 与唯一 owner；进程锁仍由 wait 线程持有。
+                        // 若系统最终完成 reap，再释放 flight 允许后续 Retry。
+                        while super::process::active_plugin_pid(owner).is_some() {
+                            tokio::time::sleep(ENSURE_OWNER_DRAIN_INTERVAL).await;
+                        }
+                        lock.lock().await.finish(id);
+                        return;
                     }
-                    ensure_lock().lock().await.finish(id);
-                    return;
-                }
-                ensure_lock().lock().await.finish(id);
-                let _ = result_tx.send(Some(outcome));
-            });
+                    lock.lock().await.finish(id);
+                    let _ = result_tx.send(Some(outcome));
+                },
+            ));
             EnsureSubscription::Running(result_rx)
         }
     }
@@ -518,7 +536,10 @@ async fn receive_flight_result(
 /// 取消共享的内置插件安装并等待拥有者完成清理，确保 Retry 不会叠加新进程。
 pub(crate) async fn cancel() -> Result<(), String> {
     let mut result = {
-        let mut coordinator = ensure_lock().lock().await;
+        let profile =
+            crate::service::workflow::instances::current_profile().unwrap_or_else(|| "web".into());
+        let lock = ensure_lock(&profile);
+        let mut coordinator = lock.lock().await;
         let Some(active) = &coordinator.active else {
             return Ok(());
         };
@@ -609,7 +630,8 @@ fn emit_phase(
     completed: usize,
     total: usize,
 ) {
-    let _ = app_handle.emit(
+    crate::service::workflow::instances::emit(
+        app_handle,
         "internal-plugins-phase",
         InternalPluginsPhase {
             phase,
@@ -856,7 +878,8 @@ async fn ensure_inner(
         // 桌面端自建链接并补齐清单，让内置插件落盘、启动继续，而不是把应用永久
         // 卡在 Plugin installation 阶段（见 [`materialize`]）。
         if is_link_materialization_failure(&e, &need) {
-            let _ = app_handle.emit(
+            crate::service::workflow::instances::emit(
+                app_handle,
                 PREINSTALL_LOG_EVENT,
                 PreinstallLogPayload {
                     line: "[harness] pnpm 无法回读新建的插件链接，改由应用直接建立链接…"
@@ -1143,6 +1166,42 @@ fn is_legacy_profile_fallback_target(target: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn unscoped_flight_cleanup_uses_the_acquired_coordinator() {
+        use crate::service::workflow::instances;
+        let acquired = super::ensure_lock("ensure-stored-profile");
+        let (id, _, _, _, _, _) = acquired.lock().await.start();
+        instances::scope("ensure-stored-profile".into(), async {
+            let spawned = super::ensure_lock(&instances::current_profile().unwrap());
+            assert!(std::sync::Arc::ptr_eq(&acquired, &spawned));
+            spawned.lock().await.finish(id);
+        })
+        .await;
+        assert!(acquired.lock().await.subscribe().is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_plugin_flights_are_shared_only_within_profile() {
+        use crate::service::workflow::instances;
+        instances::scope("ensure-profile-a".into(), async {
+            let first = super::ensure_lock(&instances::current_profile().unwrap());
+            assert!(std::sync::Arc::ptr_eq(
+                &first,
+                &super::ensure_lock(&instances::current_profile().unwrap())
+            ));
+            let (id, _, _, _, _, _) = first.lock().await.start();
+            instances::scope("ensure-profile-b".into(), async {
+                let second = super::ensure_lock(&instances::current_profile().unwrap());
+                assert!(!std::sync::Arc::ptr_eq(&first, &second));
+                assert!(second.lock().await.subscribe().is_none());
+            })
+            .await;
+            assert!(first.lock().await.subscribe().is_some());
+            first.lock().await.finish(id);
+        })
+        .await;
+    }
+
     use super::*;
 
     #[test]

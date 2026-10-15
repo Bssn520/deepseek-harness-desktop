@@ -19,13 +19,32 @@ pub(super) fn harness_pid_path<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> std::path::PathBuf {
     let channel = usize::from(app_handle.config().identifier == "dsh-tauri-nightly");
-    config::get_dsh_data_path(app_handle).join(config::HARNESS_PID_MARKER_NAMES[channel])
+    let root = config::get_dsh_data_path(app_handle);
+    let name = config::HARNESS_PID_MARKER_NAMES[channel];
+    match super::instances::current_profile() {
+        Some(profile) => root.join("profiles").join(profile).join(name),
+        None => root.join(name),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::harness_pid_path;
     use tauri::test::{mock_builder, mock_context, noop_assets};
+
+    #[test]
+    fn harness_markers_are_isolated_by_profile() {
+        let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+        let a = super::super::instances::scope_sync("marker-profile-a".into(), || {
+            harness_pid_path(app.handle())
+        });
+        let b = super::super::instances::scope_sync("marker-profile-b".into(), || {
+            harness_pid_path(app.handle())
+        });
+        assert_ne!(a, b);
+        assert_eq!(a.parent().unwrap().file_name().unwrap(), "marker-profile-a");
+        assert_eq!(a.file_name(), b.file_name());
+    }
 
     #[test]
     fn harness_pid_marker_is_isolated_by_channel() {
@@ -57,6 +76,18 @@ pub(super) fn persist_harness_pid(app_handle: &tauri::AppHandle, pid: u32, port:
 /// - 其余情况（标记不可解析、端口被其他程序占用、无法探测占用者）一律不动，
 ///   绝不凭端口猜进程、绝不杀未知进程。
 pub fn sweep_orphan_harness(app_handle: &tauri::AppHandle) {
+    if super::instances::current_profile().is_none() {
+        let root = config::get_dsh_data_path(app_handle).join("profiles");
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
+                if let Some(profile) = entry.file_name().to_str() {
+                    super::instances::scope_sync(profile.into(), || {
+                        sweep_orphan_harness(app_handle)
+                    });
+                }
+            }
+        }
+    }
     if has_owned_process() {
         return;
     }

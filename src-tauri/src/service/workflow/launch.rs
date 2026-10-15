@@ -19,8 +19,8 @@ use super::process::set_owned_process_with_handle;
 #[cfg(unix)]
 use super::process::warn_if_inotify_watch_limit_low;
 use super::process::{
-    has_owned_process, on_owned_process_exit, stop, take_startup_sweep,
-    terminate_stale_harness_processes, LaunchGuard, LAUNCH_GUARD,
+    has_owned_process, launch_guard, on_owned_process_exit, stop, take_startup_sweep,
+    terminate_stale_harness_processes, LaunchGuard,
 };
 use super::status;
 use super::sweep::persist_harness_pid;
@@ -309,6 +309,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
         *phase_started = now;
     };
     let mut setting = config::get_store_dat_setting(&app_handle);
+    setting.port = super::instances::port(&app_handle);
     let node_binary_path = config::get_node_binary_path(&app_handle);
     let _transition_guard = super::process::acquire_core_transition().await?;
     let dsh_binary_path = crate::service::core::active_dsh_binary(&app_handle);
@@ -333,7 +334,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
         log::info!("Owned Harness process is already running, skipping launch");
         return Ok(());
     }
-    if LAUNCH_GUARD
+    if launch_guard()
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
@@ -353,19 +354,22 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 一次全量枚举约 0.3–0.6s），因此只在尚未清扫时才执行。
     {
         let handle = app_handle.clone();
+        let profile = crate::service::profile::active_profile(&app_handle);
         tauri::async_runtime::spawn_blocking(move || {
-            if take_startup_sweep() {
-                let result = terminate_stale_harness_processes(&handle);
-                if result.is_err() {
-                    super::process::retry_startup_sweep();
+            super::instances::scope_sync(profile, || {
+                if take_startup_sweep() {
+                    let result = terminate_stale_harness_processes(&handle);
+                    if result.is_err() {
+                        super::process::retry_startup_sweep();
+                    }
+                    result
+                } else {
+                    log::debug!(
+                        "Skipping pre-launch stale Harness sweep: already swept during this launch"
+                    );
+                    Ok(())
                 }
-                result
-            } else {
-                log::debug!(
-                    "Skipping pre-launch stale Harness sweep: already swept during this launch"
-                );
-                Ok(())
-            }
+            })
         })
         .await
         .map_err(|error| format!("HARNESS_SWEEP_FAILED: {error}"))??;
@@ -377,9 +381,12 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // wait_for_port_release 探测：既然放弃旧端口，就无需等它释放。
     let heal_target = setting.manual_port.unwrap_or(config::default_port());
     let entry = dsh_binary_path.clone();
+    let profile = crate::service::profile::active_profile(&app_handle);
     let heal_target_free = tauri::async_runtime::spawn_blocking(move || {
-        wait_for_port_release(heal_target, PORT_RELEASE_WAIT);
-        prepare_port(&entry, heal_target)
+        super::instances::scope_sync(profile, || {
+            wait_for_port_release(heal_target, PORT_RELEASE_WAIT);
+            prepare_port(&entry, heal_target)
+        })
     })
     .await
     .map_err(|error| format!("HARNESS_CLEANUP_FAILED: {error}"))??;
@@ -391,7 +398,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             healed_port
         );
         setting.port = healed_port;
-        config::set_store_dat_setting(&app_handle, setting.clone());
+        super::instances::set_port(setting.port);
     }
 
     // 端口冲突时从当前值开始逐个递增，并持久化最终选择供所有调用方复用。
@@ -403,11 +410,14 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 有界轮询是阻塞等待，交给阻塞线程池，避免占用启动所在的 Tokio 执行线程。
     let port = setting.port;
     let entry = dsh_binary_path.clone();
+    let profile = crate::service::profile::active_profile(&app_handle);
     let available_port = tauri::async_runtime::spawn_blocking(move || {
-        if port != heal_target {
-            wait_for_port_release(port, PORT_RELEASE_WAIT);
-        }
-        find_available_port(port, &entry)
+        super::instances::scope_sync(profile, || {
+            if port != heal_target {
+                wait_for_port_release(port, PORT_RELEASE_WAIT);
+            }
+            find_available_port(port, &entry)
+        })
     })
     .await
     .map_err(|error| format!("HARNESS_CLEANUP_FAILED: {error}"))??;
@@ -418,8 +428,9 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             available_port
         );
         setting.port = available_port;
-        config::set_store_dat_setting(&app_handle, setting.clone());
+        super::instances::set_port(setting.port);
     }
+    super::instances::set_port(setting.port);
     mark_phase("stale_sweep_and_port", &mut phase_started);
 
     // 构造环境变量：隔离的 $DSH_HOME + 隐私默认（关闭遥测）
@@ -912,26 +923,29 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 set_owned_process_with_handle(pid, handle_value);
                 let exit_app_handle = app_handle.clone();
                 let exit_log_path = log_path.clone();
-                std::thread::spawn(move || unsafe {
-                    let process_handle = handle_value as HANDLE;
-                    WaitForSingleObject(process_handle, INFINITE);
-                    // 进程确已退出：清空持有 PID 并把 Status 从 Running 回落为
-                    // Stopped（原有实现只清 PID、状态永远停留在 Running）。
-                    // 仅当该 PID 仍是当前登记才取出——旧监视线程不会误清新进程。
-                    // take 返回值里的句柄由本线程负责关闭（不会与
-                    // terminate_owned_process 重复 close——进程已 exit，
-                    // 通常是本线程取走）。
-                    let owned = on_owned_process_exit(&exit_app_handle, pid, |owned| {
-                        log_fatal_report(&exit_log_path, &report_path);
-                        let handle = owned.handle as HANDLE;
-                        let mut exit_code: u32 = 0;
-                        (GetExitCodeProcess(handle, &mut exit_code) != 0)
-                            .then_some(i64::from(exit_code))
-                    });
-                    if let Some(owned) = owned {
-                        let h = owned.handle as HANDLE;
-                        CloseHandle(h);
-                    }
+                let exit_profile = active_profile.clone();
+                std::thread::spawn(move || {
+                    super::instances::scope_sync(exit_profile, || unsafe {
+                        let process_handle = handle_value as HANDLE;
+                        WaitForSingleObject(process_handle, INFINITE);
+                        // 进程确已退出：清空持有 PID 并把 Status 从 Running 回落为
+                        // Stopped（原有实现只清 PID、状态永远停留在 Running）。
+                        // 仅当该 PID 仍是当前登记才取出——旧监视线程不会误清新进程。
+                        // take 返回值里的句柄由本线程负责关闭（不会与
+                        // terminate_owned_process 重复 close——进程已 exit，
+                        // 通常是本线程取走）。
+                        let owned = on_owned_process_exit(&exit_app_handle, pid, |owned| {
+                            log_fatal_report(&exit_log_path, &report_path);
+                            let handle = owned.handle as HANDLE;
+                            let mut exit_code: u32 = 0;
+                            (GetExitCodeProcess(handle, &mut exit_code) != 0)
+                                .then_some(i64::from(exit_code))
+                        });
+                        if let Some(owned) = owned {
+                            let h = owned.handle as HANDLE;
+                            CloseHandle(h);
+                        }
+                    })
                 });
                 (Some(stdout), Some(stderr), pid)
             })
@@ -1033,12 +1047,15 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             set_owned_process(pid);
             let exit_app_handle = app_handle.clone();
             let exit_log_path = log_path.clone();
+            let exit_profile = active_profile.clone();
             std::thread::spawn(move || {
-                let code = child.wait().ok().and_then(|status| status.code());
-                let _ = on_owned_process_exit(&exit_app_handle, pid, |_| {
-                    log_fatal_report(&exit_log_path, &report_path);
-                    code.map(i64::from)
-                });
+                super::instances::scope_sync(exit_profile, || {
+                    let code = child.wait().ok().and_then(|status| status.code());
+                    let _ = on_owned_process_exit(&exit_app_handle, pid, |_| {
+                        log_fatal_report(&exit_log_path, &report_path);
+                        code.map(i64::from)
+                    });
+                })
             });
             Ok((stdout, stderr, pid))
         }

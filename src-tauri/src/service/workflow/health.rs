@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 
 use crate::config;
 
-use super::process::{has_owned_process, LAUNCH_GUARD};
+use super::process::{has_owned_process, launch_guard};
 use super::startup;
 use super::utils;
 
@@ -134,7 +134,7 @@ async fn probe_client_bundles(
 /// 健康检查（通过 Rust 代理，避免 WebView CORS 问题）
 pub async fn proxy_health_check(port: u16) -> Result<String, String> {
     if !has_owned_process() {
-        return Err(not_owned_probe_signal(LAUNCH_GUARD.load(Ordering::SeqCst)).to_string());
+        return Err(not_owned_probe_signal(launch_guard().load(Ordering::SeqCst)).to_string());
     }
     let client = utils::loopback_http_client(config::HEALTH_CHECK_TIMEOUT)
         .map_err(|e| format!("HARNESS_HEALTH_CLIENT_FAILED: {e}"))?;
@@ -166,7 +166,7 @@ fn ownership_recheck_signal(owned: bool, launch_in_progress: bool) -> Result<(),
 /// 这里重跑完整健康探测，代价是重新拉取全部客户端 bundle（实测 93 个 / 18MB / 311ms），
 /// 而 ownership 只取决于进程槽位与启动守卫，故改用这条查询。
 pub fn recheck_ownership() -> Result<(), String> {
-    ownership_recheck_signal(has_owned_process(), LAUNCH_GUARD.load(Ordering::SeqCst))
+    ownership_recheck_signal(has_owned_process(), launch_guard().load(Ordering::SeqCst))
 }
 
 #[cfg(test)]
@@ -230,7 +230,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (release, mut hold) = tokio::sync::oneshot::channel::<()>();
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = [0; 4096];

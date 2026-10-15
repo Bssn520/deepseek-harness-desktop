@@ -766,6 +766,31 @@ export const harness = defineStore({
       this.serviceRunning = keepServiceRunning
     },
 
+    async switchProfile(id: string) {
+      if (this.busyAction)
+        return
+      this.busyAction = 'start'
+      ++bootToken
+      const healthy = this.serviceHealthy
+      this.serviceHealthy = false
+      try {
+        await invoke<Profile>('set_active_profile', { id })
+      }
+      catch (error) {
+        this.serviceHealthy = healthy
+        this.busyAction = null
+        throw error
+      }
+      try {
+        this.serviceRunning = false
+        void hooks['config.dialog.hidden'].trigger()
+        await this.boot()
+      }
+      finally {
+        this.busyAction = null
+      }
+    },
+
     /** 重启服务：先强杀再拉起，最终回到就绪/错误态 */
     restart(): Promise<void> {
       return restartFlight.run(async () => {
@@ -870,7 +895,10 @@ export const harness = defineStore({
       finally {
         this.busyAction = null
       }
-      await this.restart()
+      if (action === 'safe-mode')
+        await this.start()
+      else
+        await this.restart()
     },
 
     /** 停止服务并回到停止态界面 */

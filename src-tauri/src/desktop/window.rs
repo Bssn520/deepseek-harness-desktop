@@ -122,11 +122,22 @@ pub fn on_page_load(
 #[tauri::command]
 pub async fn create_app_window(
     app_handle: AppHandle<Wry>,
+    window: WebviewWindow<Wry>,
     session_id: Option<String>,
     iframe_url: Option<String>,
 ) -> Result<(), String> {
-    let path = session_window_path(session_id.as_deref(), iframe_url.as_deref())?;
-    crate::desktop::builder::build_extra_window(&app_handle, path)
+    let _transition = crate::service::workflow::acquire_core_transition().await?;
+    let profile = crate::service::workflow::instances::window_profile(&app_handle, window.label());
+    let path = crate::service::workflow::instances::scope_sync(profile.clone(), || {
+        let origin =
+            config::get_dsh_service_url(crate::service::workflow::instances::port(&app_handle));
+        session_window_path(
+            session_id.as_deref(),
+            session_id.as_ref().map(|_| origin.as_str()),
+        )
+    })?;
+    let _ = iframe_url;
+    crate::desktop::builder::build_extra_window(&app_handle, path, &profile)
         .map(|_| ())
         .map_err(|error| format!("WINDOW_CREATE_FAILED: {error}"))
 }

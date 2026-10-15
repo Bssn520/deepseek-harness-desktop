@@ -159,7 +159,10 @@ pub(crate) fn ensure_profile_pnpm_policy(app_handle: &AppHandle) -> Result<(), S
         .iter()
         .map(|package| (*package).to_string())
         .collect();
-    release_age_excludes_at(&profile_dir_of(app_handle, &active_profile(app_handle)), &entries)
+    release_age_excludes_at(
+        &profile_dir_of(app_handle, &active_profile(app_handle)),
+        &entries,
+    )
 }
 
 /// 档案的 `minimumReleaseAgeExclude` 里是否已经有这个精确 `包名@版本`。
@@ -311,6 +314,9 @@ pub(crate) fn release_age_excludes_at(dir: &Path, entries: &[String]) -> Result<
 /// 清理），回退默认 web。全新机器上 `profiles/` 尚未初始化时同样回退 web
 /// （web 由 dsh 启动/插件操作时按需初始化）。
 pub fn active_profile(app_handle: &AppHandle) -> String {
+    if let Some(profile) = crate::service::workflow::instances::current_profile() {
+        return profile;
+    }
     let stored = config::get_store_dat_setting(app_handle).active_profile;
     if !stored.is_empty()
         && stored != DEFAULT_PROFILE
@@ -645,7 +651,7 @@ pub fn remove(app_handle: &AppHandle, id: &str) -> Result<(), String> {
             "PROFILE_DEFAULT_NOT_REMOVABLE: the default profile cannot be removed".to_string(),
         );
     }
-    if id == active_profile(app_handle) {
+    if id == active_profile(app_handle) || crate::service::workflow::instances::is_attached(id) {
         return Err(
             "PROFILE_ACTIVE_NOT_REMOVABLE: the active profile cannot be removed".to_string(),
         );
