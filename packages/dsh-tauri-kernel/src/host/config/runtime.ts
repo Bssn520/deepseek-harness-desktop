@@ -1,11 +1,10 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
-import type { NativeActivityState } from '../../shared/activity'
 import type { NativeModelCatalog, NativeTurnOptions } from '../../shared/native-model'
 import type { BackendDetection, KernelBinding } from '../../shared/types'
 import type { NativeSink } from '../backends/types'
 import type { OfficialSink } from '../service/sink.types'
-import type { AdmittedStep, BridgeRecordType, NativeEntry, NativePending, RecordWatermark, RuntimeModules } from '../types'
+import type { AdmittedStep, BridgeRecordType, NativeEntry, NativePending, RecordWatermark } from '../types'
 
 export const runtime = {
   detections: new Map<string, BackendDetection>(),
@@ -24,9 +23,6 @@ export const runtime = {
   bindingSchema: undefined as z.ZodType<KernelBinding> | undefined,
   optionsSchema: undefined as z.ZodType<NativeTurnOptions> | undefined,
   catalogSchema: undefined as z.ZodType<NativeModelCatalog> | undefined,
-  activitySchema: undefined as z.ZodType<NativeActivityState> | undefined,
-  appendActivity: undefined as RuntimeModules['appendPluginRecord'],
-  activityPlans: new WeakMap<Agent, Map<string, NativeActivityState['plan']>>(),
   ready: false,
   lifetime: new AbortController(),
 }
@@ -36,9 +32,6 @@ export async function resetRuntime(): Promise<void> {
   runtime.bindingSchema = undefined
   runtime.optionsSchema = undefined
   runtime.catalogSchema = undefined
-  runtime.activitySchema = undefined
-  runtime.appendActivity = undefined
-  runtime.activityPlans = new WeakMap()
   runtime.lifetime.abort(new Error('BRIDGE_DISPOSED'))
   for (const controller of runtime.controllers.values())
     controller.abort(new Error('BRIDGE_DISPOSED'))

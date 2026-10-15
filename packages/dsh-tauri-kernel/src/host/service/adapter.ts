@@ -53,7 +53,6 @@ export const adapter = defineService({
       }
     }
     const dispose = ctx.llm.registerAdapter([BRIDGE_PROVIDER], new NativeAdapter() as LlmAdapter)
-    runtime.appendActivity = modules.appendPluginRecord
     runtime.ready = true
     return () => {
       runtime.ready = false
