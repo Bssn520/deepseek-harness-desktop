@@ -52,6 +52,17 @@ describe('harness health probe logging', () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
+  it('logs ownership loss without claiming the shared probe ran before readiness', async () => {
+    invokeMock.mockRejectedValue(new Error('HARNESS_NOT_OWNED: no Harness process is owned by this app'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const result = await checkHealthViaProxy()
+
+    expect(result.notOwned).toBe(true)
+    expect(result.healthy).toBe(false)
+    expect(warn).toHaveBeenCalledExactlyOnceWith('[Harness] no owned dsh process, failing health check')
+  })
+
   it('still records one retry line with the reason when the probe fails', async () => {
     invokeMock.mockRejectedValue(new Error('HARNESS_NOT_READY: boot page returned 404 Not Found'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})

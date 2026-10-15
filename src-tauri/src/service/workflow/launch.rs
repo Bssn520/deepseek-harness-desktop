@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(not(windows))]
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
@@ -27,7 +27,7 @@ use super::sweep::persist_harness_pid;
 #[cfg(windows)]
 use super::sweep::{dsh_bin_open_error, relaunch_marker_path, relaunch_via_shell_escape};
 use super::utils::{
-    is_port_in_use, rotate_service_log, spawn_output_readers, wait_for_port_release,
+    append_log, is_port_in_use, rotate_service_log, spawn_output_readers, wait_for_port_release,
 };
 use super::win_inspector;
 
@@ -71,20 +71,46 @@ fn harness_library_path(
     )
 }
 
-/// 组装启动 Harness 的参数：`[--max-old-space-size] <dsh> --profile <档案>
-/// [--patch <补丁层>] --port <端口> --no-open`。
-///
-/// `--patch` 必须排在子命令参数之前（`dsh` 的选项收集器把第一个非选项参数之后
-/// 的内容整段透传给内层应用，排在后面的 `--patch` 会被判为 `unknown option`）。
+fn fatal_report_path(log_path: &Path) -> PathBuf {
+    static NEXT_REPORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT_REPORT.fetch_add(1, Ordering::Relaxed);
+    log_path.with_file_name(format!(
+        "harness-fatal-{}-{timestamp}-{sequence}.json",
+        std::process::id()
+    ))
+}
+
+fn log_fatal_report(log_path: &PathBuf, report_path: &Path) {
+    if report_path.is_file() {
+        let line = format!("ERROR HARNESS_FATAL_REPORT: {}", report_path.display());
+        append_log(log_path, &line);
+        log::error!("{line}");
+    }
+}
+
 fn build_harness_args(
     dsh_binary: &Path,
     profile: &str,
     patch: Option<&Path>,
     port: u16,
     heap_mb: Option<u32>,
+    report_path: &Path,
 ) -> Vec<OsString> {
-    let mut args = Vec::with_capacity(9);
+    let mut args = Vec::with_capacity(12);
     args.extend(super::heap::heap_option_arg(heap_mb));
+    let mut directory = OsString::from("--report-directory=");
+    directory.push(report_path.parent().unwrap_or(Path::new(".")));
+    let mut filename = OsString::from("--report-filename=");
+    filename.push(report_path.file_name().unwrap_or_default());
+    args.extend([
+        OsString::from("--report-on-fatalerror"),
+        directory,
+        filename,
+    ]);
     args.extend([
         dsh_binary.as_os_str().to_os_string(),
         OsString::from("--profile"),
@@ -312,7 +338,9 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             if take_startup_sweep() {
                 terminate_stale_harness_processes(&handle);
             } else {
-                log::debug!("Skipping pre-launch stale Harness sweep: already swept during this launch");
+                log::debug!(
+                    "Skipping pre-launch stale Harness sweep: already swept during this launch"
+                );
             }
         })
         .await
@@ -349,9 +377,10 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 有界轮询是阻塞等待，交给阻塞线程池，避免占用启动所在的 Tokio 执行线程。
     {
         let port = setting.port;
-        let _ =
-            tauri::async_runtime::spawn_blocking(move || wait_for_port_release(port, PORT_RELEASE_WAIT))
-                .await;
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            wait_for_port_release(port, PORT_RELEASE_WAIT)
+        })
+        .await;
     }
     let available_port = find_available_port(setting.port)?;
     if available_port != setting.port {
@@ -773,26 +802,22 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 GetExitCodeProcess, WaitForSingleObject, INFINITE,
             };
 
-            let args = build_harness_args(
-                &dsh_binary_path,
-                active_profile.as_str(),
-                hmr_patch.as_deref(),
-                setting.port,
-                heap_mb,
-            );
-
-            // 只负责 spawn 并返回管道/PID/句柄：探测与重试期间不登记、不挂
-            // 监视线程——只有最终采用的那个进程才登记，否则旧监视线程会通过
-            // `on_owned_process_exit` 把刚启动的新进程误当作已退出而回落状态。
-            let spawn_harness =
-                || -> std::io::Result<(std::fs::File, std::fs::File, u32, HANDLE)> {
-                    super::win_spawn::spawn_with_hidden_console_owned(
-                        &node_binary_path,
-                        &args,
-                        Some(&core_dir),
-                        &envs,
-                    )
-                };
+            let spawn_harness = |report_path: &Path| {
+                let args = build_harness_args(
+                    &dsh_binary_path,
+                    active_profile.as_str(),
+                    hmr_patch.as_deref(),
+                    setting.port,
+                    heap_mb,
+                    report_path,
+                );
+                super::win_spawn::spawn_with_hidden_console_owned(
+                    &node_binary_path,
+                    &args,
+                    Some(&core_dir),
+                    &envs,
+                )
+            };
 
             // 早期退出重试：崩溃的上一轮 dsh 回写 `cordis.yml` 落在「新进程
             // prepareProfile 重置之后、Include 读取之前」时，新 boot 会把已含
@@ -802,7 +827,8 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             //（最多 3 次，第二次 boot 基于干净状态必然成功）；仍在运行则视为
             // 健康立即放行登记。探测期间最长阻塞 2.5s，之后才返回给调用方。
             let mut attempt = 0u32;
-            let mut outcome = spawn_harness();
+            let mut report_path = fatal_report_path(&log_path);
+            let mut outcome = spawn_harness(&report_path);
             loop {
                 attempt += 1;
                 let (stdout, stderr, pid, handle) = match outcome {
@@ -837,8 +863,10 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                          (pid={pid}, code={exit_code}); resetting profile root and relaunching \
                          (attempt {attempt}/3)"
                     );
+                    log_fatal_report(&log_path, &report_path);
                     reset_active_profile_root(&app_handle);
-                    outcome = spawn_harness();
+                    report_path = fatal_report_path(&log_path);
+                    outcome = spawn_harness(&report_path);
                     continue;
                 }
                 // 非签名提前退出或重试耗尽：走正常路径——已捕获的 stderr 补写
@@ -855,6 +883,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 let handle_value = handle as usize;
                 set_owned_process_with_handle(pid, handle_value);
                 let exit_app_handle = app_handle.clone();
+                let exit_log_path = log_path.clone();
                 std::thread::spawn(move || unsafe {
                     let process_handle = handle_value as HANDLE;
                     WaitForSingleObject(process_handle, INFINITE);
@@ -865,6 +894,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                     // terminate_owned_process 重复 close——进程已 exit，
                     // 通常是本线程取走）。
                     let owned = on_owned_process_exit(&exit_app_handle, pid, |owned| {
+                        log_fatal_report(&exit_log_path, &report_path);
                         let handle = owned.handle as HANDLE;
                         let mut exit_code: u32 = 0;
                         (GetExitCodeProcess(handle, &mut exit_code) != 0)
@@ -881,6 +911,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
         #[cfg(not(windows))]
         {
             use std::os::unix::process::CommandExt;
+            let mut report_path = fatal_report_path(&log_path);
             let mut cmd = Command::new(&node_binary_path);
             cmd.args(build_harness_args(
                 &dsh_binary_path,
@@ -888,6 +919,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 hmr_patch.as_deref(),
                 setting.port,
                 heap_mb,
+                &report_path,
             ));
             #[cfg(target_os = "linux")]
             if let Some(path) = &library_path {
@@ -916,6 +948,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                                     if let Some(mut stderr) = child.stderr.take() {
                                         let _ = stderr.read_to_string(&mut stderr_text);
                                     }
+                                    log_fatal_report(&log_path, &report_path);
                                     if exit.code() == Some(1)
                                         && stderr_text.contains("duplicate loader entry")
                                         && attempt < 3
@@ -927,6 +960,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                                             child.id()
                                         );
                                         reset_active_profile_root(&app_handle);
+                                        report_path = fatal_report_path(&log_path);
                                         cmd = Command::new(&node_binary_path);
                                         cmd.args(build_harness_args(
                                             &dsh_binary_path,
@@ -934,6 +968,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                                             hmr_patch.as_deref(),
                                             setting.port,
                                             heap_mb,
+                                            &report_path,
                                         ));
                                         #[cfg(target_os = "linux")]
                                         if let Some(path) = &library_path {
@@ -969,9 +1004,13 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             let stderr = child.stderr.take();
             set_owned_process(pid);
             let exit_app_handle = app_handle.clone();
+            let exit_log_path = log_path.clone();
             std::thread::spawn(move || {
                 let code = child.wait().ok().and_then(|status| status.code());
-                let _ = on_owned_process_exit(&exit_app_handle, pid, |_| code.map(i64::from));
+                let _ = on_owned_process_exit(&exit_app_handle, pid, |_| {
+                    log_fatal_report(&exit_log_path, &report_path);
+                    code.map(i64::from)
+                });
             });
             Ok((stdout, stderr, pid))
         }
@@ -1152,10 +1191,14 @@ mod tests {
             Some(patch),
             3080,
             None,
+            Path::new("D:/app-data/logs/fatal.json"),
         );
         assert_eq!(
             text_args(&args),
             vec![
+                "--report-on-fatalerror".to_string(),
+                "--report-directory=D:/app-data/logs".to_string(),
+                "--report-filename=fatal.json".to_string(),
                 "D:/core/lib/bin.js".to_string(),
                 "--profile".to_string(),
                 "tauri".to_string(),
@@ -1169,6 +1212,58 @@ mod tests {
     }
 
     #[test]
+    fn fatal_report_flags_precede_the_script_path() {
+        let args = build_harness_args(
+            Path::new("D:/core/lib/bin.js"),
+            "tauri",
+            None,
+            3081,
+            None,
+            Path::new("D:/用户 data/logs/fatal.json"),
+        );
+        let text = text_args(&args);
+        assert_eq!(text[0], "--report-on-fatalerror");
+        assert_eq!(text[1], "--report-directory=D:/用户 data/logs");
+        assert_eq!(text[2], "--report-filename=fatal.json");
+        assert_eq!(text[3], "D:/core/lib/bin.js");
+    }
+
+    #[test]
+    fn fatal_report_paths_are_distinct_for_each_spawn_attempt() {
+        let log = Path::new("D:/用户 data/logs/dsh-web.log");
+        let first = fatal_report_path(log);
+        let second = fatal_report_path(log);
+        assert_eq!(first.parent(), Some(Path::new("D:/用户 data/logs")));
+        assert_eq!(first.extension(), Some(std::ffi::OsStr::new("json")));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn fatal_report_log_only_names_this_attempts_existing_file_without_reading_it() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("dsh-web.log");
+        fs::write(&log, "existing error\n").unwrap();
+        let stale = fatal_report_path(&log);
+        fs::write(&stale, b"secret environment").unwrap();
+        let report = fatal_report_path(&log);
+        log_fatal_report(&log, &report);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "existing error\n");
+        fs::create_dir(&report).unwrap();
+        log_fatal_report(&log, &report);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "existing error\n");
+        fs::remove_dir(&report).unwrap();
+        fs::write(&report, b"\xffsecret environment").unwrap();
+        log_fatal_report(&log, &report);
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            format!(
+                "existing error\nERROR HARNESS_FATAL_REPORT: {}\n",
+                report.display()
+            )
+        );
+    }
+
+    #[test]
     fn heap_option_stays_ahead_of_the_script_path() {
         let args = build_harness_args(
             Path::new("D:/core/lib/bin.js"),
@@ -1176,10 +1271,12 @@ mod tests {
             None,
             3081,
             Some(4096),
+            Path::new("D:/logs/fatal.json"),
         );
         let text = text_args(&args);
         assert_eq!(text[0], "--max-old-space-size=4096");
-        assert_eq!(text[1], "D:/core/lib/bin.js");
+        assert_eq!(text[1], "--report-on-fatalerror");
+        assert_eq!(text[4], "D:/core/lib/bin.js");
         assert!(!text.contains(&"--patch".to_string()));
     }
 

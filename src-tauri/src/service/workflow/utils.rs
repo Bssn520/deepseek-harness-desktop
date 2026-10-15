@@ -270,20 +270,16 @@ fn log_level_name(level: log::Level) -> &'static str {
     }
 }
 
-fn append_log(log_path: &PathBuf, line: &str) {
+pub(super) fn append_log(log_path: &PathBuf, line: &str) {
     // 与 `logger` 的 `desktop.log` / `desktop.frontdesk.log` 保持一致：5MiB × 3 轮转
     let _guard = dsh_log_lock().lock().unwrap_or_else(|e| e.into_inner());
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        let _ = writeln!(file, "{}", line);
-        let _ = file.flush();
-    }
-    // 超阈值则按大小轮转（与启动次轮转 `rotate_service_log` 互补，避免单次运行无限增长）
     if let Ok(meta) = std::fs::metadata(log_path) {
-        if meta.len() > DSH_MAX_LOG_BYTES {
+        if meta
+            .len()
+            .saturating_add(line.len() as u64)
+            .saturating_add(1)
+            > DSH_MAX_LOG_BYTES
+        {
             let _ = std::fs::remove_file(indexed_log_path(log_path, DSH_MAX_BACKUPS));
             for i in (1..DSH_MAX_BACKUPS).rev() {
                 let from = indexed_log_path(log_path, i);
@@ -296,12 +292,15 @@ fn append_log(log_path: &PathBuf, line: &str) {
             if log_path.exists() {
                 let _ = std::fs::rename(log_path, indexed_log_path(log_path, 1));
             }
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(log_path);
         }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
     }
 }
 
@@ -425,6 +424,28 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn append_keeps_the_new_line_in_current_log_when_size_limit_is_reached() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("dsh-web.log");
+        let previous = vec![b'x'; 5 * 1024 * 1024];
+        fs::write(&log, &previous).unwrap();
+        let marker = "ERROR HARNESS_FATAL_REPORT: C:/logs/harness-fatal-42.json";
+
+        append_log(&log, marker);
+
+        assert_eq!(fs::read_to_string(&log).unwrap(), format!("{marker}\n"));
+        assert_eq!(
+            fs::read(root.path().join("dsh-web.log.1")).unwrap(),
+            previous
+        );
+        append_log(&log, "next output");
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            format!("{marker}\nnext output\n")
+        );
+    }
+
     /// 模拟连续 5 次启动，验证磁盘上始终只保留最近 `keep` 份日志，
     /// 且每次启动都会新建当前日志文件。
     #[test]
@@ -516,10 +537,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let started = std::time::Instant::now();
-        assert!(!wait_for_port_release(
-            port,
-            Duration::from_millis(200)
-        ));
+        assert!(!wait_for_port_release(port, Duration::from_millis(200)));
         assert!(
             started.elapsed() >= Duration::from_millis(200),
             "an occupied port must be waited on until the budget runs out"
