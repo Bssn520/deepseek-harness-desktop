@@ -227,6 +227,30 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   const post = useIframePost(iframeRef)
   // 握手兜底：帧内接收器异常时不能让 iframe 永久藏住，超时后按「未确认」直接揭开。
   const appearancePending = translucent && bootFrame !== frameKey
+  const iframeHidden = appearancePending || remoteLoading || harness.showIframeError
+  const mounted = remoteMode || harness.serviceHealthy
+  const showIframeError = !remoteMode && harness.showIframeError
+  const documentWaiting = !remoteMode && mounted && !harness.iframeAlive && !showIframeError && !appearancePending
+  const serviceStatusKey = harness.busyAction === 'restart' ? 'status.service_restarting' : 'status.service_waiting'
+  const branch = !mounted ? 'service-wait' : showIframeError ? 'iframe-error' : remoteLoading ? 'remote-loading' : appearancePending ? 'appearance-wait' : documentWaiting ? 'document-wait' : remoteMode ? 'remote-frame' : 'local-frame'
+  useWatch([branch, harness.status, remoteMode, harness.serviceHealthy, harness.serviceRunning, harness.iframeKey, harness.iframeLoaded, harness.iframeAlive, harness.iframeError, harness.startupPhase, harness.busyAction, appearancePending, documentWaiting, iframeHidden], () => {
+    console.warn('[Iframe] view', {
+      branch,
+      status: harness.status,
+      remoteMode,
+      serviceHealthy: harness.serviceHealthy,
+      serviceRunning: harness.serviceRunning,
+      iframeKey: harness.iframeKey,
+      iframeLoaded: harness.iframeLoaded,
+      iframeAlive: harness.iframeAlive,
+      iframeError: harness.iframeError,
+      startupPhase: harness.startupPhase,
+      busyAction: harness.busyAction,
+      appearancePending,
+      documentWaiting,
+      iframeHidden,
+    })
+  }, { immediate: true })
   const { start: armAppearanceFallback, stop: stopAppearanceFallback } = useTimeoutFn(
     () => setBootFrame(frameKey),
     APPEARANCE_HANDSHAKE_TIMEOUT,
@@ -581,8 +605,12 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   return (
     <div className="relative min-h-0 flex-1">
       <If
-        cond={remoteMode || harness.serviceHealthy}
-        else={<Loadable subtitle={t(harness.startupStatusKey)} />}
+        cond={mounted}
+        else={(
+          <Loadable subtitle={t(harness.startupStatusKey)}>
+            <p role="status" className="text-xs leading-[18px] text-load-muted">{t(serviceStatusKey)}</p>
+          </Loadable>
+        )}
       >
         <iframe
           key={remoteMode ? `remote-${srcOverride}` : harness.iframeKey}
@@ -592,7 +620,7 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
           // 未确认收到启动期外观前先藏起来：帧内 boot 页（HARNESS + Loading plugins…）
           // 会先按不透明画一帧，露出那一下比等待更刺眼。上面的 Loadable 与之逐项同构，
           // 揭开时视觉无跳变，且有 4s 兜底不会永久藏住。
-          style={{ visibility: appearancePending || remoteLoading || harness.showIframeError ? 'hidden' : 'visible' }}
+          style={{ visibility: iframeHidden ? 'hidden' : 'visible' }}
           src={remoteMode ? srcOverride : harness.iframeSrc}
           allow="accelerometer; ambient-light-sensor; autoplay; battery; camera; clipboard-read; clipboard-write; display-capture; document-domain; encrypted-media; fullscreen; gamepad; geolocation; gyroscope; hid; idle-detection; keyboard-map; magnetometer; microphone; midi; payment; picture-in-picture; publickey-credentials-get; screen-wake-lock; serial; speaker-selection; usb; web-share; xr-spatial-tracking"
           sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-downloads allow-storage-access-by-user-activation"
@@ -604,6 +632,12 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
           onError={store.harness.markIframeError}
           title={t('app.open_editor')}
         />
+      </If>
+
+      <If cond={documentWaiting}>
+        <p role="status" className="absolute bottom-4 inset-x-4 text-center text-xs leading-[18px] text-load-muted pointer-events-none">
+          {t('status.document_waiting')}
+        </p>
       </If>
 
       {/* 远端机器勾选「边框着色」时，用标识色给内容区描边：当前处于远端一眼可辨 */}
