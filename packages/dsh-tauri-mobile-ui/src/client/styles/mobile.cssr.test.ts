@@ -74,6 +74,19 @@ describe('mobile conversation layout', () => {
     return values
   }
 
+  it('prevents document scrolling only while the touch layout owns the mobile sidebar', () => {
+    const selector = 'html[data-dsh-mobile-sidebar], html[data-dsh-mobile-sidebar] body'
+    expect(declarations(selector)).toMatchObject({ overflow: 'hidden' })
+    const rules: unknown[] = []
+    root.walkRules(selector, (rule) => {
+      rules.push(rule)
+      expect(rule.parent?.type).toBe('atrule')
+      if (rule.parent?.type === 'atrule')
+        expect(rule.parent.params).toBe('(hover: none) and (any-pointer: coarse) and (any-hover: none)')
+    })
+    expect(rules).toHaveLength(1)
+  })
+
   it('keeps the sidebar stationary behind a raised rounded main panel without a gray shade', () => {
     expect(declarations('html[data-dsh-mobile-sidebar] [class$="_sidebarCol"]')).toMatchObject({
       'z-index': '0',

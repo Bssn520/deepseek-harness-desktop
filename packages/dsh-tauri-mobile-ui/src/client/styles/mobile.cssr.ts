@@ -4,6 +4,9 @@ import { MOBILE_MEDIA_QUERIES } from 'dsh-tauri/client'
 const { c } = cssr
 
 export default c(`@media ${MOBILE_MEDIA_QUERIES.join(' and ')}`, [
+  c('html[data-dsh-mobile-sidebar], html[data-dsh-mobile-sidebar] body', {
+    overflow: 'hidden',
+  }),
   c('[data-dsh-mobile-preferences]', {
     display: 'flex',
     flex: '1',
