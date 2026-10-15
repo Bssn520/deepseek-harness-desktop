@@ -87,6 +87,9 @@ export default c([
       fontSize: '12px',
     }),
   ]),
+  c('[data-dsh-dock-fallback]', {
+    display: 'none !important',
+  }),
   c('[data-dsh-toggle-cluster], .nArs4W_toggleCluster', {
     top: '6px !important',
     right: '6px !important',

@@ -3,6 +3,15 @@ import postcss from 'postcss'
 import { describe, expect, it } from 'vitest'
 import globalStyle from './global.cssr'
 
+it('始终隐藏 better-sidebar 的 dock fallback 入口', () => {
+  const rules = postcss.parse(globalStyle.render()).nodes.filter(node =>
+    node.type === 'rule' && node.selector === '[data-dsh-dock-fallback]',
+  )
+  expect(rules).toMatchObject([{
+    nodes: [{ type: 'decl', prop: 'display', value: 'none', important: true }],
+  }])
+})
+
 describe('conversation input dock stack', () => {
   const rules: Record<string, Record<string, string>> = {}
   postcss.parse(globalStyle.render()).walkRules((rule) => {
