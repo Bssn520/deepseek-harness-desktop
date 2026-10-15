@@ -678,35 +678,38 @@ pub(super) fn warn_if_inotify_watch_limit_low() {
 
 /// 停止 Harness 服务
 pub async fn stop(app_handle: tauri::AppHandle) -> Result<(), String> {
-    log::info!("Stopping Harness service...");
-    // 重置启动守卫，确保后续 launch 可以重新拉起；仅结束持有的根进程树。
-    // 进程终止涉及 WaitForSingleObject（至多 5s）与 taskkill/kill 等同步阻塞
-    // 调用，移出 Tokio 执行线程避免卡住其他并发任务（WARN-7/P2-#20）。
-    launch_guard().store(false, Ordering::SeqCst);
     let profile = super::instances::current_profile()
         .unwrap_or_else(|| crate::service::profile::active_profile(&app_handle));
-    tauri::async_runtime::spawn_blocking(move || {
-        super::instances::scope_sync(profile, terminate_owned_process)
+    super::instances::scope(profile.clone(), async move {
+        log::info!("Stopping Harness service...");
+        // 重置启动守卫，确保后续 launch 可以重新拉起；仅结束持有的根进程树。
+        // 进程终止涉及 WaitForSingleObject（至多 5s）与 taskkill/kill 等同步阻塞
+        // 调用，移出 Tokio 执行线程避免卡住其他并发任务（WARN-7/P2-#20）。
+        launch_guard().store(false, Ordering::SeqCst);
+        tauri::async_runtime::spawn_blocking(move || {
+            super::instances::scope_sync(profile, terminate_owned_process)
+        })
+        .await
+        .map_err(|e| format!("STOP_FAILED: {e}"))?
+        .map_err(|()| "STOP_FAILED: Harness process did not stop".to_string())?;
+        // 清理孤儿清扫标记：正常停止的实例不应被下次启动当作残留
+        let _ = fs::remove_file(harness_pid_path(&app_handle));
+
+        // 端口释放滞后是毫秒级，固定睡眠只会把这段时间放大成白等；以端口真正
+        // 回落为准，最坏情况仍退化为原先的等待上限。
+        {
+            let port = super::instances::port(&app_handle);
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                wait_for_port_release(port, PORT_RELEASE_WAIT)
+            })
+            .await;
+        }
+
+        status::set_status(status::Status::Stopped);
+        status::emit_status(&app_handle);
+        Ok(())
     })
     .await
-    .map_err(|e| format!("STOP_FAILED: {e}"))?
-    .map_err(|()| "STOP_FAILED: Harness process did not stop".to_string())?;
-    // 清理孤儿清扫标记：正常停止的实例不应被下次启动当作残留
-    let _ = fs::remove_file(harness_pid_path(&app_handle));
-
-    // 端口释放滞后是毫秒级，固定睡眠只会把这段时间放大成白等；以端口真正
-    // 回落为准，最坏情况仍退化为原先的等待上限。
-    {
-        let port = super::instances::port(&app_handle);
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            wait_for_port_release(port, PORT_RELEASE_WAIT)
-        })
-        .await;
-    }
-
-    status::set_status(status::Status::Stopped);
-    status::emit_status(&app_handle);
-    Ok(())
 }
 
 /// 交付安装包前的同步停服：结束持有的 Harness 进程树 → 等端口释放 → 清清扫标记。
@@ -748,6 +751,39 @@ pub fn stop_on_exit(app_handle: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_keeps_all_instance_effects_in_resolved_profile_scope() {
+        let source = include_str!("process.rs");
+        let stop = source
+            .split("pub async fn stop(")
+            .nth(1)
+            .unwrap()
+            .split("/// 交付安装包前")
+            .next()
+            .unwrap();
+        let scope = stop
+            .find("super::instances::scope(profile.clone(), async move {")
+            .unwrap();
+        for effect in [
+            "launch_guard().store",
+            "spawn_blocking",
+            "harness_pid_path",
+            "super::instances::port",
+            "status::set_status",
+            "status::emit_status",
+        ] {
+            assert!(
+                stop.find(effect).unwrap() > scope,
+                "{effect} must run inside resolved profile scope"
+            );
+        }
+        assert!(stop
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .ends_with("}).await}"));
+    }
 
     /// 构造一个测试用 `OwnedProcess`（跨平台处理 Windows 句柄字段）。
     #[cfg(windows)]

@@ -82,6 +82,19 @@ pub fn shell_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> 
     })
 }
 
+pub fn operation_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    use crate::service::workflow::instances;
+    let profile = instances::current_profile()?;
+    app.get_webview_window("main")
+        .filter(|window| instances::window_uses_profile(window.label(), &profile))
+        .or_else(|| {
+            app.webview_windows().into_values().find(|window| {
+                (window.label().starts_with("window-") || window.label().starts_with("remote-"))
+                    && instances::window_uses_profile(window.label(), &profile)
+            })
+        })
+}
+
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = shell_window(app) {
         // 关窗驻留用的是应用级 hide（NSApp hide:，见 builder 的 CloseRequested），
@@ -273,6 +286,38 @@ mod tests {
     use super::decode_process_line;
     #[cfg(windows)]
     use super::{decode_multibyte, encode_multibyte, short_path};
+
+    #[tokio::test]
+    async fn operation_window_never_falls_back_to_another_profile() {
+        use crate::service::workflow::instances;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        for label in ["main", "window-operation-test", "remote-operation-test"] {
+            tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::default())
+                .build()
+                .unwrap();
+        }
+        instances::bind_window("main", "operation-main-profile");
+        instances::bind_window("window-operation-test", "operation-extra-profile");
+        instances::bind_window("remote-operation-test", "operation-remote-profile");
+        assert!(super::operation_window(app.handle()).is_none());
+        for (profile, expected) in [
+            ("operation-main-profile", Some("main")),
+            ("operation-extra-profile", Some("window-operation-test")),
+            ("operation-remote-profile", Some("remote-operation-test")),
+            ("operation-missing-profile", None),
+        ] {
+            instances::scope(profile.into(), async {
+                let window = super::operation_window(app.handle());
+                assert_eq!(window.as_ref().map(|window| window.label()), expected);
+            })
+            .await;
+        }
+        for label in ["main", "window-operation-test", "remote-operation-test"] {
+            instances::release_window(label);
+        }
+    }
 
     #[test]
     fn keeps_valid_utf8_untouched() {

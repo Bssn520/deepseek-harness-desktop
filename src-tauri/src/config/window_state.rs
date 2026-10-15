@@ -152,7 +152,7 @@ pub fn save_geometry<R: Runtime>(window: &Window<R>) {
 
 /// 正常退出前主动采样主窗口，兜底最后一次移动/缩放事件尚未落盘的情况。
 pub fn save_main_window_geometry<R: Runtime>(app_handle: &AppHandle<R>) {
-    if let Some(webview_window) = crate::utils::shell_window(app_handle) {
+    if let Some(webview_window) = app_handle.get_webview_window("main") {
         let window = webview_window.as_ref().window();
         save_geometry(&window);
     }
@@ -389,6 +389,20 @@ pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_geometry_does_not_sample_extra_or_remote_windows_without_main() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        for label in ["window-geometry-test", "remote-geometry-test"] {
+            tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::default())
+                .build()
+                .unwrap();
+        }
+        assert!(crate::utils::shell_window(app.handle()).is_some());
+        save_main_window_geometry(app.handle());
+    }
 
     #[test]
     fn window_state_default_matches_builder_default() {

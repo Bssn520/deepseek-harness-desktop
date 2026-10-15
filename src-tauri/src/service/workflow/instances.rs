@@ -83,6 +83,15 @@ pub fn window_profile(app: &tauri::AppHandle, label: &str) -> String {
         .clone()
 }
 
+pub fn window_uses_profile(label: &str, profile: &str) -> bool {
+    registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .windows
+        .get(label)
+        .is_some_and(|value| value == profile)
+}
+
 pub fn bind_window(label: &str, profile: &str) -> Option<String> {
     registry()
         .lock()

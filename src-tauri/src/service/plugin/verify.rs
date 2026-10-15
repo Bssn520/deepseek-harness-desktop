@@ -152,8 +152,8 @@ async fn repair_with_pnpm_install(app_handle: &AppHandle, profile: &Path) -> Res
         .any(|arg| arg.as_os_str() == bundled.as_os_str());
     args.push(OsString::from("install"));
 
-    let window =
-        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
     let envs = build_plugin_envs(app_handle, prefer_bundled);
     log::info!(
         "repairing profile node_modules via pnpm install in {}",

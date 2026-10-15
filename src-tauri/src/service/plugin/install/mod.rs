@@ -392,8 +392,8 @@ async fn install_with_cancel(
         return Err("HARNESS_NOT_FOUND: dsh CLI missing".to_string());
     }
 
-    let window =
-        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
 
     // 选定/补齐安装用的 pnpm：返回是否应强制使用捆绑版（版本感知，见 ensure_pnpm）
     let prefer_bundled_pnpm = ensure_pnpm(app_handle, &window, owner).await?;
@@ -640,8 +640,8 @@ pub async fn allow_version_exemptions(
     if versions.is_empty() {
         return Err("PLUGIN_EXEMPTION_EMPTY: no plugin version exemption to grant".to_string());
     }
-    let window =
-        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
     let node = config::get_node_binary_path(app_handle);
     let dsh_bin = core::active_dsh_binary(app_handle);
     if !node.exists() {

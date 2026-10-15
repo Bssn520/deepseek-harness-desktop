@@ -43,7 +43,8 @@ pub async fn install(
         .map_err(|e| format!("STOP_FAILED: {e}"))?;
     }
 
-    let window = crate::utils::shell_window(app_handle).ok_or("Failed to get main window")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
     log::debug!("Main window obtained");
     // 依赖任务清单的唯一构造点在下载层，安装流程与映射回写共用同一组任务。
     let tasks = download::tasks();

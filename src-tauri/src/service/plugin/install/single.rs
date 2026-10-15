@@ -684,8 +684,8 @@ async fn run_plugin_command(
     if ids.is_empty() {
         return Err("PLUGIN_EMPTY_ID: plugin id is empty".to_string());
     }
-    let window =
-        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
 
     cli::ensure_shims(app_handle)?;
 
@@ -883,8 +883,8 @@ async fn verify_update_landed(
         log::warn!("plugin {id} not resolvable to a package name, skipping entry verify");
         return Ok(());
     };
-    let window =
-        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window = crate::utils::operation_window(app_handle)
+        .ok_or("WINDOW_NOT_FOUND: current profile window missing")?;
     let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle).await?);
     let pkg_dir = profile_dir(app_handle).join("node_modules").join(name);
     if let Err(e) = ensure_plugin_entry_built(app_handle, id, &pkg_dir, &envs, &window).await {
