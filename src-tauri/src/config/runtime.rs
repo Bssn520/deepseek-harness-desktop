@@ -70,22 +70,24 @@ pub fn get_node_download_url() -> Result<String, String> {
 }
 
 /// Harness 发行版资产文件名（按平台与架构）
-fn dsh_pkg_asset_filename() -> Result<String, String> {
-    let arch = env::consts::ARCH;
-    let os = env::consts::OS;
-
+fn dsh_pkg_asset_filename(os: &str, arch: &str) -> Result<String, String> {
     match (os, arch) {
         ("windows", _) => Ok("deepseek-harness-pkg-windows.zip".to_string()),
         ("macos", "aarch64") => Ok("deepseek-harness-pkg-macos-arm64.zip".to_string()),
         ("macos", "x86_64") => Ok("deepseek-harness-pkg-macos-x64.zip".to_string()),
-        ("linux", _) => Ok("deepseek-harness-pkg-linux.zip".to_string()),
+        ("linux", "x86_64") => Ok("deepseek-harness-pkg-linux.zip".to_string()),
+        ("linux", "aarch64") => Ok("deepseek-harness-pkg-linux-arm64.zip".to_string()),
         _ => Err(format!("Unsupported platform: {} {}", os, arch)),
     }
 }
 
 /// 打包的 DeepSeek Harness 发行版下载地址（GitHub 官方直连，首选源）
 pub fn get_dsh_download_url() -> Result<String, String> {
-    Ok(format!("{}{}", DSH_CORE_URL, dsh_pkg_asset_filename()?))
+    Ok(format!(
+        "{}{}",
+        DSH_CORE_URL,
+        dsh_pkg_asset_filename(env::consts::OS, env::consts::ARCH)?
+    ))
 }
 
 /// 为任意 GitHub Release 资产 URL 生成全部镜像兜底地址
@@ -107,7 +109,11 @@ pub fn get_dsh_download_url_for_tag(tag: &str) -> Result<String, String> {
         "releases/latest/download/",
         &format!("releases/download/{tag}/"),
     );
-    Ok(format!("{}{}", base, dsh_pkg_asset_filename()?))
+    Ok(format!(
+        "{}{}",
+        base,
+        dsh_pkg_asset_filename(env::consts::OS, env::consts::ARCH)?
+    ))
 }
 
 /// 在 PATH 及常见安装目录中查找 node 可执行文件（不校验版本）
@@ -738,6 +744,19 @@ mod tests {
         assert_eq!(MINGIT_X64_SHA256.len(), 64);
         assert_eq!(MINGIT_ARM64_SHA256.len(), 64);
         assert_ne!(MINGIT_X64_SHA256, MINGIT_ARM64_SHA256);
+    }
+
+    #[test]
+    fn dsh_pkg_asset_filename_matches_linux_architecture() {
+        assert_eq!(
+            dsh_pkg_asset_filename("linux", "x86_64").unwrap(),
+            "deepseek-harness-pkg-linux.zip"
+        );
+        assert_eq!(
+            dsh_pkg_asset_filename("linux", "aarch64").unwrap(),
+            "deepseek-harness-pkg-linux-arm64.zip"
+        );
+        assert!(dsh_pkg_asset_filename("linux", "riscv64").is_err());
     }
 
     #[test]
