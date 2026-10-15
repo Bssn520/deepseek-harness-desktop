@@ -10,7 +10,6 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { HostContext as DesktopHostContext } from 'dsh-tauri'
-import type { NativeActivityState } from '../../shared/activity'
 import type { NativeTurnOptions } from '../../shared/native-model'
 import type { KernelBinding } from '../../shared/types'
 import type { NativeSession } from '../backends/types'
@@ -25,7 +24,7 @@ export interface RuntimeModules {
   ToolCallId: typeof LlmRuntime.ToolCallId
   LlmAdapter: typeof LlmRuntime.LlmAdapter
   isAgentLoopRequest: typeof LlmRuntime.isAgentLoopRequest
-  appendPluginRecord?: (session: Session, type: 'plugin:dsh-tauri-kernel/kernel' | 'plugin:dsh-tauri-kernel/model' | 'plugin:dsh-tauri-kernel/activity', data: KernelBinding | NativeTurnOptions | NativeActivityState) => number
+  appendPluginRecord?: (session: Session, type: 'plugin:dsh-tauri-kernel/kernel' | 'plugin:dsh-tauri-kernel/model', data: KernelBinding | NativeTurnOptions) => number
   pluginRecordOf?: (event: SessionEvent) => { type: string, data: unknown } | undefined
 }
 

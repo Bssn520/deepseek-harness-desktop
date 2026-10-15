@@ -461,12 +461,6 @@ class ClaudeSession implements NativeSession {
           this.startupModel ??= message.model
       }
     }
-    try {
-      this.sink.activity?.(message)
-    }
-    catch {
-      // Visibility must not affect native execution.
-    }
     if (!run) {
       if (type === 'assistant' || type === 'stream_event' || (type === 'system' && message.subtype === 'task_started'))
         throw new NativeBridgeError('BRIDGE_UNEXPECTED_TURN', 'Claude produced work outside the official agent turn')
