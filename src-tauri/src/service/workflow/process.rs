@@ -99,18 +99,6 @@ fn take_owned_process() -> Option<OwnedProcess> {
         .take()
 }
 
-/// 仅当当前持有进程的 PID 与 `pid` 匹配时才取出（成对 PID+句柄）。
-///
-/// 保留 base 代码 `compare_exchange(pid, 0)` 的防护语义：退出监视线程只能清掉
-/// 属于自己那一条登记，绝不误取/误清「刚启动的新进程」的登记——否则会把它
-/// 当作已退出而错误回落 Status，并把新进程的句柄误关（WARN-6 合并引入的回退）。
-fn take_owned_process_if(pid: u32) -> Option<OwnedProcess> {
-    let mut guard = owned_process_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    take_owned_process_if_matching(&mut guard, pid)
-}
-
 /// 纯函数部分：便于单测，不触碰全局状态。
 fn take_owned_process_if_matching(
     owned: &mut Option<OwnedProcess>,
@@ -181,8 +169,8 @@ pub fn owned_process_pid() -> Option<u32> {
 
 /// 处理「持有的 dsh 进程退出」这一事实（由退出监视线程与健康检查 tick 共用）：
 ///
-/// - 仅当退出的 PID 仍是当前登记的那个进程时才清空持有（`take_owned_process_if`
-///   按 pid 匹配），PID/句柄作为整体成对取出——杜绝「读 PID」与「清句柄」
+/// - 仅当退出的 PID 仍是当前登记的那个进程时才清空持有（按 pid 匹配），
+///   PID/句柄作为整体成对取出——杜绝「读 PID」与「清句柄」
 ///   之间的跨原子竞态（WARN-6），也杜绝旧监视线程误清新启动进程的登记；
 /// - 匹配成功后无条件回落到 Stopped——进程可能在 Starting 或 Running 阶段
 ///   退出，任何情况下都不能继续广播一个已经失效的运行状态（WARN-5）。
@@ -190,15 +178,20 @@ pub fn owned_process_pid() -> Option<u32> {
 /// 返回被取出的进程记录（含 Windows 句柄），取到者负责 `CloseHandle`——保证
 /// 「取走进程」与「关闭句柄」同属一个调用者，杜绝重复 close。幂等：多次调用
 /// （tick 与监视线程并发）只会生效一次，后续调用返回 None。
-pub(super) fn on_owned_process_exit(
-    app_handle: &AppHandle,
+pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
     pid: u32,
     exit_code: impl FnOnce(&OwnedProcess) -> Option<i64>,
 ) -> Option<OwnedProcess> {
-    let owned = take_owned_process_if(pid)?;
-    // 必须在成功取走当前 PID 后才读取 Windows 句柄：正常停止会先取走并关闭
-    // 句柄，旧监视线程不得再查询该句柄，更不得发送“意外退出”事件。
-    let exit_code = exit_code(&owned);
+    let (owned, exit_code) = {
+        let mut guard = owned_process_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let owned = take_owned_process_if_matching(&mut guard, pid)?;
+        // issue #1075：报告路径落盘前不让健康探测观察到 ownership 丢失。
+        let exit_code = exit_code(&owned);
+        (owned, exit_code)
+    };
 
     if let Some(code) = exit_code {
         log::warn!(
@@ -391,7 +384,7 @@ fn is_windows_harness_command_line(cmdline: &str, dsh_bin: &str) -> bool {
     let path = dsh_bin.replace('/', "\\");
     // node 选项（`--max-old-space-size` 等）合法地夹在 node 与入口之间（issue #751）。
     let boundary = format!(
-        r#"(?i)^\s*(?:"[^"]*\\node(?:\.exe)?"|[^\s"]*node(?:\.exe)?)(?:\s+-[^\s"]*)*\s+"?{}(?:"|\s|$)"#,
+        r#"(?i)^\s*(?:"[^"]*\\node(?:\.exe)?"|[^\s"]*node(?:\.exe)?)(?:\s+(?:"-[^"]*"|-[^\s"]*(?:"[^"]*")?))*\s+"?{}(?:"|\s|$)"#,
         regex::escape(&path)
     );
     regex::Regex::new(&boundary).is_ok_and(|pattern| pattern.is_match(&normalized))
@@ -769,6 +762,46 @@ mod tests {
         // 幂等：已清空后再次取出返回 None
         let mut slot: Option<OwnedProcess> = None;
         assert!(take_owned_process_if_matching(&mut slot, 42).is_none());
+    }
+
+    #[test]
+    fn exit_diagnostics_finish_before_ownership_loss_is_observable() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let app = tauri::test::mock_app();
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("fatal-report.log");
+        *owned_process_lock().lock().unwrap() = Some(test_owned(42));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let timeout = Duration::from_secs(5);
+
+        std::thread::scope(|scope| {
+            let callback_marker = marker.clone();
+            let handle = app.handle().clone();
+            let exit = scope.spawn(move || {
+                on_owned_process_exit(&handle, 42, |_| {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(timeout).unwrap();
+                    fs::write(callback_marker, "ERROR HARNESS_FATAL_REPORT: fatal.json\n").unwrap();
+                    Some(1)
+                })
+            });
+            entered_rx.recv_timeout(timeout).unwrap();
+            let callback_holds_ownership = matches!(
+                owned_process_lock().try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            let observer = scope.spawn(|| {
+                let owned = has_owned_process();
+                (owned, marker.is_file())
+            });
+            resume_tx.send(()).unwrap();
+            assert_eq!(exit.join().unwrap().map(|owned| owned.pid), Some(42));
+            assert!(callback_holds_ownership);
+            assert_eq!(observer.join().unwrap(), (false, true));
+        });
     }
 
     /// 退出载荷保留退出码（含 0），无法取得时显式序列化为 null。
@@ -1214,16 +1247,38 @@ mod tests {
         assert!(is_windows_harness_command_line(&command, bin));
         // 回归 issue #751：node 与入口之间夹着堆选项时仍须命中孤儿。
         assert!(is_windows_harness_command_line(
-            &command.replace(r#""C:\node.exe" "#, r#""C:\node.exe" --max-old-space-size=8192 "#),
+            &command.replace(
+                r#""C:\node.exe" "#,
+                r#""C:\node.exe" --max-old-space-size=8192 "#
+            ),
             bin
         ));
         assert!(is_windows_harness_command_line(
-            &format!(r#"node.exe --max-old-space-size=8192 "{bin}" --profile web --port 3081 --no-open"#),
+            &format!(
+                r#"node.exe --max-old-space-size=8192 "{bin}" --profile web --port 3081 --no-open"#
+            ),
             bin
         ));
+        for flags in [
+            r#"--report-on-fatalerror "--report-directory=C:\用户 data\logs" --report-filename=fatal.json"#,
+            r#"--report-on-fatalerror --report-directory="C:\用户 data\logs" --report-filename=fatal.json"#,
+        ] {
+            assert!(is_windows_harness_command_line(
+                &format!(r#"node.exe {flags} "{bin}" --profile web --port 3081 --no-open"#),
+                bin
+            ));
+            assert!(!is_windows_harness_command_line(
+                &format!(
+                    r#"node.exe unrelated.js {flags} "{bin}" --profile web --port 3081 --no-open"#
+                ),
+                bin
+            ));
+        }
         // 入口前还夹着别的脚本参数时不得命中，避免误伤外来的 node 进程。
         assert!(!is_windows_harness_command_line(
-            &format!(r#"node.exe unrelated.js --max-old-space-size=8192 "{bin}" --profile web --port 3081 --no-open"#),
+            &format!(
+                r#"node.exe unrelated.js --max-old-space-size=8192 "{bin}" --profile web --port 3081 --no-open"#
+            ),
             bin
         ));
         assert!(!is_windows_harness_command_line(
