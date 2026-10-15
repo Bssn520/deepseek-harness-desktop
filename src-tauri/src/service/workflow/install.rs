@@ -4,7 +4,6 @@
 use crate::config;
 use crate::service::download;
 use crate::service::download::Installable;
-use tauri::Manager;
 
 use super::process::{has_owned_process, stop, terminate_stale_harness_processes};
 
@@ -17,6 +16,7 @@ pub async fn install(
     app_handle: &tauri::AppHandle,
     mut dsh_latest: Option<download::LatestDshPkg>,
 ) -> Result<bool, String> {
+    super::instances::require_exclusive_profile()?;
     log::info!("Starting installation process");
     // dsh 任务实际下载解压时置 true
     let mut dsh_updated = false;
@@ -43,9 +43,7 @@ pub async fn install(
         .map_err(|e| format!("STOP_FAILED: {e}"))?;
     }
 
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("Failed to get main window")?;
+    let window = crate::utils::shell_window(app_handle).ok_or("Failed to get main window")?;
     log::debug!("Main window obtained");
     // 依赖任务清单的唯一构造点在下载层，安装流程与映射回写共用同一组任务。
     let tasks = download::tasks();

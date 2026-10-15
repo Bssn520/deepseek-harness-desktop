@@ -195,11 +195,19 @@ impl EnsureCoordinator {
     }
 }
 
-static ENSURE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<EnsureCoordinator>> =
-    std::sync::OnceLock::new();
-
-fn ensure_lock() -> &'static tokio::sync::Mutex<EnsureCoordinator> {
-    ENSURE_LOCK.get_or_init(|| tokio::sync::Mutex::new(EnsureCoordinator::default()))
+fn ensure_lock() -> std::sync::Arc<tokio::sync::Mutex<EnsureCoordinator>> {
+    static COORDINATORS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<EnsureCoordinator>>>>,
+    > = std::sync::OnceLock::new();
+    let profile =
+        crate::service::workflow::instances::current_profile().unwrap_or_else(|| "web".into());
+    COORDINATORS
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(profile)
+        .or_default()
+        .clone()
 }
 
 /// 在启动 Harness 前修复旧桌面目录遗留的 profile loader 状态。
@@ -410,39 +418,45 @@ async fn subscribe_or_start(
     app_handle: &AppHandle,
     internal: &[PreinstallPluginInfo],
 ) -> EnsureSubscription {
-    let mut coordinator = ensure_lock().lock().await;
+    let lock = ensure_lock();
+    let mut coordinator = lock.lock().await;
     match coordinator.subscribe() {
         Some(subscription) => subscription,
         None => {
             let (id, owner, result_tx, result_rx, cancel_tx, cancel_rx) = coordinator.start();
             let app_handle = app_handle.clone();
             let internal = internal.to_vec();
-            tauri::async_runtime::spawn(async move {
-                let mut outcome =
-                    run_ensure_operation(&app_handle, &internal, owner, cancel_tx, cancel_rx).await;
-                // 强杀返回不等于持有句柄的 wait 已完成；必须等精确 owner 的 PID
-                // 守卫随 wait 退出，才能发布结果并允许 Retry 创建下一次 flight。
+            let profile = crate::service::profile::active_profile(&app_handle);
+            tauri::async_runtime::spawn(crate::service::workflow::instances::scope(
+                profile,
+                async move {
+                    let mut outcome =
+                        run_ensure_operation(&app_handle, &internal, owner, cancel_tx, cancel_rx)
+                            .await;
+                    // 强杀返回不等于持有句柄的 wait 已完成；必须等精确 owner 的 PID
+                    // 守卫随 wait 退出，才能发布结果并允许 Retry 创建下一次 flight。
 
-                if !wait_for_owner_release(owner, ENSURE_OWNER_DRAIN_TIMEOUT).await {
-                    let reason = format!(
+                    if !wait_for_owner_release(owner, ENSURE_OWNER_DRAIN_TIMEOUT).await {
+                        let reason = format!(
                         "INTERNAL_PLUGIN_PROCESS_REAP_TIMEOUT: plugin process owner {owner:?} remained active for {} seconds",
                         ENSURE_OWNER_DRAIN_TIMEOUT.as_secs()
                     );
-                    log::error!("{reason}");
-                    outcome = Err(reason.clone());
-                    let _ = result_tx.send(Some(outcome));
-                    ensure_lock().lock().await.mark_cleanup_failed(id, reason);
-                    // 保留 cleanup-failed flight 与唯一 owner；进程锁仍由 wait 线程持有。
-                    // 若系统最终完成 reap，再释放 flight 允许后续 Retry。
-                    while super::process::active_plugin_pid(owner).is_some() {
-                        tokio::time::sleep(ENSURE_OWNER_DRAIN_INTERVAL).await;
+                        log::error!("{reason}");
+                        outcome = Err(reason.clone());
+                        let _ = result_tx.send(Some(outcome));
+                        ensure_lock().lock().await.mark_cleanup_failed(id, reason);
+                        // 保留 cleanup-failed flight 与唯一 owner；进程锁仍由 wait 线程持有。
+                        // 若系统最终完成 reap，再释放 flight 允许后续 Retry。
+                        while super::process::active_plugin_pid(owner).is_some() {
+                            tokio::time::sleep(ENSURE_OWNER_DRAIN_INTERVAL).await;
+                        }
+                        ensure_lock().lock().await.finish(id);
+                        return;
                     }
                     ensure_lock().lock().await.finish(id);
-                    return;
-                }
-                ensure_lock().lock().await.finish(id);
-                let _ = result_tx.send(Some(outcome));
-            });
+                    let _ = result_tx.send(Some(outcome));
+                },
+            ));
             EnsureSubscription::Running(result_rx)
         }
     }
@@ -518,7 +532,8 @@ async fn receive_flight_result(
 /// 取消共享的内置插件安装并等待拥有者完成清理，确保 Retry 不会叠加新进程。
 pub(crate) async fn cancel() -> Result<(), String> {
     let mut result = {
-        let mut coordinator = ensure_lock().lock().await;
+        let lock = ensure_lock();
+        let mut coordinator = lock.lock().await;
         let Some(active) = &coordinator.active else {
             return Ok(());
         };
@@ -609,7 +624,8 @@ fn emit_phase(
     completed: usize,
     total: usize,
 ) {
-    let _ = app_handle.emit(
+    crate::service::workflow::instances::emit(
+        app_handle,
         "internal-plugins-phase",
         InternalPluginsPhase {
             phase,
@@ -1143,6 +1159,25 @@ fn is_legacy_profile_fallback_target(target: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn internal_plugin_flights_are_shared_only_within_profile() {
+        use crate::service::workflow::instances;
+        instances::scope("ensure-profile-a".into(), async {
+            let first = super::ensure_lock();
+            assert!(std::sync::Arc::ptr_eq(&first, &super::ensure_lock()));
+            let (id, _, _, _, _, _) = first.lock().await.start();
+            instances::scope("ensure-profile-b".into(), async {
+                let second = super::ensure_lock();
+                assert!(!std::sync::Arc::ptr_eq(&first, &second));
+                assert!(second.lock().await.subscribe().is_none());
+            })
+            .await;
+            assert!(super::ensure_lock().lock().await.subscribe().is_some());
+            first.lock().await.finish(id);
+        })
+        .await;
+    }
+
     use super::*;
 
     #[test]

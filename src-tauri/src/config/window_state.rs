@@ -152,7 +152,7 @@ pub fn save_geometry<R: Runtime>(window: &Window<R>) {
 
 /// 正常退出前主动采样主窗口，兜底最后一次移动/缩放事件尚未落盘的情况。
 pub fn save_main_window_geometry<R: Runtime>(app_handle: &AppHandle<R>) {
-    if let Some(webview_window) = app_handle.get_webview_window("main") {
+    if let Some(webview_window) = crate::utils::shell_window(app_handle) {
         let window = webview_window.as_ref().window();
         save_geometry(&window);
     }

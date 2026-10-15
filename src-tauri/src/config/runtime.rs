@@ -503,7 +503,11 @@ pub fn get_service_log_path<R: Runtime>(app_handle: &AppHandle<R>) -> PathBuf {
     } else {
         "dsh-web.log"
     };
-    get_base_dir(app_handle).join("logs").join(name)
+    let logs = get_base_dir(app_handle).join("logs");
+    match crate::service::workflow::instances::current_profile() {
+        Some(profile) => logs.join(profile).join(name),
+        None => logs.join(name),
+    }
 }
 
 /// 捆绑的 Node.js 版本号

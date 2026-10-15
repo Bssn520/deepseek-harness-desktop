@@ -64,10 +64,14 @@ beforeEach(() => {
   preinstall.error = ''
   preinstall.installing = false
   preinstall.policyBlocked = []
-  invoke.mockImplementation(async (command: string) => {
+  invoke.mockImplementation(async (command: string, args?: { id: string }) => {
     switch (command) {
-      case 'get_runtime_info': return { service_url: 'http://127.0.0.1:3081' }
+      case 'set_active_profile':
+        activeProfile = args!.id
+        return { id: activeProfile, active: true }
+      case 'get_runtime_info': return { service_url: activeProfile === 'other' ? 'http://127.0.0.1:3082' : 'http://127.0.0.1:3081' }
       case 'get_app_config': return { installed: true }
+      case 'enter_safe_mode': return { quarantined: [], failures: [] }
       case 'runtime_ready': return true
       case 'get_profiles': return [{ id: activeProfile, active: true }]
       case 'ensure_internal_plugins':
@@ -99,6 +103,52 @@ afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
   vi.restoreAllMocks()
+})
+
+describe('window profile connection', () => {
+  it('connects the selected profile without restarting either shared runtime', async () => {
+    ensureFailure = undefined
+    harness.serviceHealthy = true
+    harness.serviceRunning = true
+    await harness.switchProfile('other')
+
+    expect(activeProfile).toBe('other')
+    expect(harness.serviceUrl).toBe('http://127.0.0.1:3082')
+    expect(harness.iframeSrc).toContain('http://127.0.0.1:3082')
+    expect(harness.serviceHealthy).toBe(true)
+    expect(harness.busyAction).toBe(null)
+    expect(invoke).toHaveBeenCalledWith('set_active_profile', { id: 'other' })
+    expect(invoke).toHaveBeenCalledWith('launch_harness')
+    expect(invoke).not.toHaveBeenCalledWith('shutdown_harness')
+    expect(invoke).not.toHaveBeenCalledWith('restart_harness')
+  })
+
+  it('enters the safe profile without restarting another window already using it', async () => {
+    ensureFailure = undefined
+    await harness.enterSafeMode()
+
+    expect(invoke).toHaveBeenCalledWith('enter_safe_mode')
+    expect(invoke).toHaveBeenCalledWith('launch_harness')
+    expect(invoke).not.toHaveBeenCalledWith('shutdown_harness')
+    expect(harness.serviceHealthy).toBe(true)
+    expect(harness.busyAction).toBe(null)
+  })
+
+  it('keeps the previous connection when profile binding fails', async () => {
+    harness.serviceHealthy = true
+    harness.serviceRunning = true
+    harness.serviceUrl = 'http://127.0.0.1:3081'
+    invoke.mockRejectedValueOnce(new Error('PROFILE_NOT_FOUND: missing'))
+    await expect(harness.switchProfile('missing')).rejects.toThrow('PROFILE_NOT_FOUND')
+
+    expect(activeProfile).toBe('web')
+    expect(harness.serviceUrl).toBe('http://127.0.0.1:3081')
+    expect(harness.serviceHealthy).toBe(true)
+    expect(harness.serviceRunning).toBe(true)
+    expect(harness.busyAction).toBe(null)
+    expect(invoke).not.toHaveBeenCalledWith('launch_harness')
+    expect(invoke).not.toHaveBeenCalledWith('shutdown_harness')
+  })
 })
 
 describe('harness boot policy refusal recovery', () => {

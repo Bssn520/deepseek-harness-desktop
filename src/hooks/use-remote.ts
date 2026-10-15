@@ -22,10 +22,13 @@ interface SwitcherTargets {
 function initialMachineId(): string | null {
   if (!('__TAURI_INTERNALS__' in window))
     return null
+  const parameters = new URLSearchParams(window.location.hash.slice(1))
+  const machineId = parameters.get('remoteMachineId')
+  if (machineId)
+    return machineId
   const label = getCurrentWindow().label
   if (label.startsWith('remote-'))
     return label.slice('remote-'.length) || null
-  const parameters = new URLSearchParams(window.location.hash.slice(1))
   const url = parameters.has('sessionId') ? parameters.get('iframeUrl') : null
   return url && URL.canParse(url) ? new URL(url).origin : null
 }

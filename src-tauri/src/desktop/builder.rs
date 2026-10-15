@@ -128,6 +128,7 @@ pub fn setup(app_handle: tauri::AppHandle) {
     crate::service::profile::migrate_desktop_profile_name(&app_handle);
 
     // 启动进程监控（tick 检测 dsh 服务状态）
+    crate::service::workflow::instances::window_profile(&app_handle, MAIN_WINDOW_LABEL);
     crate::service::scheduler::start(&app_handle);
 
     // `dsh://` 深链（成功页「打开应用」按钮）：仅打包态注册协议并接管 open-url
@@ -143,7 +144,14 @@ pub fn setup(app_handle: tauri::AppHandle) {
             log::debug!("auto_start disabled, skipping startup");
             return;
         }
-        if let Err(e) = crate::service::workflow::start(app_for_start).await {
+        let profile =
+            crate::service::workflow::instances::window_profile(&app_for_start, MAIN_WINDOW_LABEL);
+        if let Err(e) = crate::service::workflow::instances::scope(
+            profile,
+            crate::service::workflow::start(app_for_start),
+        )
+        .await
+        {
             log::error!("start failed: {}", e);
         }
     });
@@ -1138,7 +1146,10 @@ pub fn build_main_window(app: &tauri::AppHandle<Wry>) -> tauri::Result<tauri::We
 /// macOS 未实现窗口底色接口，`set_background_color` 会返回错误并被忽略——那里由
 /// `config::apply_window_theme` 同步原生外观。
 fn apply_window_background(app: &tauri::AppHandle<Wry>, window: &tauri::WebviewWindow<Wry>) {
-    let background = if crate::config::get_store_dat_setting(app).appearance.transparency {
+    let background = if crate::config::get_store_dat_setting(app)
+        .appearance
+        .transparency
+    {
         Some(tauri::webview::Color(0, 0, 0, 0))
     } else {
         crate::config::window_background(crate::config::get_dsh_theme(app), window.theme().ok())
@@ -1215,14 +1226,16 @@ pub fn build_shell_window(
 pub fn build_extra_window(
     app: &tauri::AppHandle<Wry>,
     path: std::path::PathBuf,
+    profile: &str,
 ) -> tauri::Result<tauri::WebviewWindow<Wry>> {
     let sequence = EXTRA_WINDOW_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    build_shell_window(
-        app,
-        format!("window-{sequence}"),
-        crate::desktop::product_name(app),
-        path,
-    )
+    let label = format!("window-{sequence}");
+    crate::service::workflow::instances::bind_window(&label, profile);
+    let result = build_shell_window(app, label.clone(), crate::desktop::product_name(app), path);
+    if result.is_err() {
+        crate::service::workflow::instances::release_window(&label);
+    }
+    result
 }
 
 #[cfg(all(test, windows))]
@@ -1400,7 +1413,8 @@ mod security_tests {
     #[test]
     fn native_appearance_effects_are_local_shell_only() {
         let appearance: Value =
-            serde_json::from_str(include_str!("../../capabilities/appearance-effects.json")).unwrap();
+            serde_json::from_str(include_str!("../../capabilities/appearance-effects.json"))
+                .unwrap();
         // 这个能力一旦带上 remote，就会把窗口级 setEffects 暴露给回环承载的 Harness 页面。
         assert!(appearance.get("remote").is_none());
 
@@ -1408,9 +1422,9 @@ mod security_tests {
             .as_array()
             .expect("permissions must be an array")
             .clone();
-        assert!(!default_permissions.iter().any(|permission| {
-            permission.as_str() == Some("core:window:allow-set-effects")
-        }));
+        assert!(!default_permissions
+            .iter()
+            .any(|permission| { permission.as_str() == Some("core:window:allow-set-effects") }));
     }
 
     #[test]
@@ -1802,7 +1816,13 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
                 }
                 // 主窗口以外的附加窗口（「文件 → 新建窗口」）不驻留托盘：直接关闭
                 // 销毁。隐藏它们既没有恢复入口，也不符合「关掉这个窗口」的直觉。
-                if window.label() != MAIN_WINDOW_LABEL {
+                if (window.label() != MAIN_WINDOW_LABEL && !window.label().starts_with("window-"))
+                    || window.app_handle().webview_windows().values().any(|other| {
+                        other.label() != window.label()
+                            && (other.label() == MAIN_WINDOW_LABEL
+                                || other.label().starts_with("window-"))
+                    })
+                {
                     return;
                 }
                 // get_store_dat_setting 内部已归一化，取值只可能是 tray 或 quit
@@ -1850,6 +1870,26 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
                 // （已有的 `with_webview` 通路，webview2-com 已是直接依赖）。
                 #[cfg(not(target_os = "macos"))]
                 let _ = window.hide();
+            }
+            tauri::WindowEvent::Destroyed => {
+                if let Some(profile) =
+                    crate::service::workflow::instances::release_window(window.label())
+                {
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Ok(_transition) =
+                            crate::service::workflow::acquire_core_transition().await
+                        {
+                            if !crate::service::workflow::instances::is_attached(&profile) {
+                                let _ = crate::service::workflow::instances::scope(
+                                    profile,
+                                    crate::service::workflow::stop(app),
+                                )
+                                .await;
+                            }
+                        }
+                    });
+                }
             }
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 if window.label() == crate::desktop::pet::PET_WINDOW_LABEL {

@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::Path;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::config;
 use crate::service::cli;
@@ -16,13 +16,13 @@ use crate::service::workflow;
 
 use super::artifact::{ensure_plugin_entry_built, installed_package_name};
 use super::build_plugin_envs;
-use super::harness_prefer_bundled_pnpm;
 use super::diagnose::{
     git_transport_hint, incompatible_versions, network_error_hint, pick_error_message,
     policy_blocked_versions, policy_verification_network_failure, store_mismatch_hint,
     IncompatibleVersion, PolicyBlockedVersion,
 };
 use super::errors;
+use super::harness_prefer_bundled_pnpm;
 use super::installed_name;
 use super::is_actionable_plugin_ref;
 use super::is_installed;
@@ -49,10 +49,8 @@ use crate::service::profile::profile_release_age_excluded;
 /// 逐项核验的结果汇总成一条错误消息（见 [`update_failure_payload`]）：两个阶段各自的结算都
 /// 保留下来，前一段装上的目标不会被后一段的一般错误抹掉（见 [`UpdateFailure`]）。
 pub async fn update_many(app_handle: &AppHandle, specs: &[String]) -> Result<(), String> {
-    let mut requested: Vec<(String, Option<String>)> = specs
-        .iter()
-        .map(|spec| split_upgrade_spec(spec))
-        .collect();
+    let mut requested: Vec<(String, Option<String>)> =
+        specs.iter().map(|spec| split_upgrade_spec(spec)).collect();
     if requested.iter().any(|(_, version)| version.is_none()) {
         resolve_missing_targets(app_handle, &mut requested).await;
     }
@@ -100,7 +98,9 @@ async fn resolve_missing_targets(
         let Some(latest) = known_latest(app_handle, id) else {
             continue;
         };
-        if !is_registry_version(&latest) || installed_package_version(&profile, id).as_deref() == Some(latest.as_str()) {
+        if !is_registry_version(&latest)
+            || installed_package_version(&profile, id).as_deref() == Some(latest.as_str())
+        {
             continue;
         }
         *version = Some(latest);
@@ -246,7 +246,11 @@ fn policy_refusal_from_specs(specs: &[String], failure: &str) -> Option<String> 
 fn force_upgrade_spec(id: &str, failure: &str) -> Option<String> {
     let payload = failure.strip_prefix(UPDATE_HOLD_PREFIX)?;
     let payload: serde_json::Value = serde_json::from_str(payload).ok()?;
-    if payload.get("retryable").and_then(serde_json::Value::as_bool) != Some(false) {
+    if payload
+        .get("retryable")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
         return None;
     }
     let latest = payload.get("latest").and_then(serde_json::Value::as_str)?;
@@ -329,21 +333,22 @@ fn update_failure_payload(failures: Vec<UpdateFailure>) -> Option<String> {
     let mut blocked = Vec::new();
     let mut holds = Vec::new();
     let mut others = Vec::new();
-    let push_blocked = |entries: Vec<PolicyBlockedVersion>, blocked: &mut Vec<PolicyBlockedVersion>| {
+    let push_blocked = |entries: Vec<PolicyBlockedVersion>,
+                        blocked: &mut Vec<PolicyBlockedVersion>| {
         for entry in entries {
             if !blocked.contains(&entry) {
                 blocked.push(entry);
             }
         }
     };
-    let push_incompatible = |entries: Vec<IncompatibleVersion>,
-                             incompatible: &mut Vec<IncompatibleVersion>| {
-        for entry in entries {
-            if !incompatible.contains(&entry) {
-                incompatible.push(entry);
+    let push_incompatible =
+        |entries: Vec<IncompatibleVersion>, incompatible: &mut Vec<IncompatibleVersion>| {
+            for entry in entries {
+                if !incompatible.contains(&entry) {
+                    incompatible.push(entry);
+                }
             }
-        }
-    };
+        };
     for failure in failures {
         // 版本兼容性拒绝照原样提升到顶层：前端只认这一行里的载荷来挂「授权后重跑」的按钮，
         // 落进下面的逐项失败里用户就只能看着一条纯文本，无从授权（与批量安装路径同形状）。
@@ -652,7 +657,11 @@ pub(crate) async fn uninstall_deprecated_plugins(app_handle: &AppHandle) -> Resu
 ///
 /// 版本豁免授权（`allow-version`，见 [`super::allow_version_exemptions`]）同样走
 /// 这个形状：dsh 在转发给 pnpm 之前先拦下该动词，`--profile` 的拼装完全一致。
-pub(super) fn single_plugin_args(profile: &str, action: &str, sub_args: &[String]) -> Vec<OsString> {
+pub(super) fn single_plugin_args(
+    profile: &str,
+    action: &str,
+    sub_args: &[String],
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("plugin"),
         OsString::from("--profile"),
@@ -675,9 +684,8 @@ async fn run_plugin_command(
     if ids.is_empty() {
         return Err("PLUGIN_EMPTY_ID: plugin id is empty".to_string());
     }
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window =
+        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
 
     cli::ensure_shims(app_handle)?;
 
@@ -846,7 +854,9 @@ async fn verify_update_landed(
     expected: Option<&str>,
 ) -> Result<(), String> {
     let profile = profile_dir(app_handle);
-    match update_verify_step(&profile, id, before, expected, || known_latest(app_handle, id)) {
+    match update_verify_step(&profile, id, before, expected, || {
+        known_latest(app_handle, id)
+    }) {
         UpdateVerifyStep::Hold { detail, latest } => {
             // 只有「新版本太新」这一种成因有出路（授权那个精确版本即可过闸），因此把
             // 目标版本与「是否已在豁免清单里」一并带出去：已经授权过还是不动，说明成因
@@ -873,9 +883,8 @@ async fn verify_update_landed(
         log::warn!("plugin {id} not resolvable to a package name, skipping entry verify");
         return Ok(());
     };
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window =
+        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
     let envs = build_plugin_envs(app_handle, harness_prefer_bundled_pnpm(app_handle).await?);
     let pkg_dir = profile_dir(app_handle).join("node_modules").join(name);
     if let Err(e) = ensure_plugin_entry_built(app_handle, id, &pkg_dir, &envs, &window).await {
@@ -910,15 +919,16 @@ fn update_verify_step(
     if !reached {
         if let Some(before) = before {
             if dependency_fingerprint(profile, id).as_deref() == Some(before) {
-                let detail = installed_package_version(profile, id)
-                    .unwrap_or_else(|| before.to_string());
+                let detail =
+                    installed_package_version(profile, id).unwrap_or_else(|| before.to_string());
                 // 目标版本优先用本次请求带来的版本（面板显示的那个），探测缓存只在没有时
                 // 兜底：缓存没命中会让 `latest` 为空，用户点升级就只剩一句「没有变化」。
                 let latest = expected
                     .filter(|expected| *expected != detail && is_registry_version(expected))
                     .map(str::to_string)
                     .or_else(|| {
-                        known_latest().filter(|latest| latest != &detail && is_registry_version(latest))
+                        known_latest()
+                            .filter(|latest| latest != &detail && is_registry_version(latest))
                     });
                 log::warn!(
                     "dsh plugin update made no change for {id}, still at {detail}, newest {latest:?}"
@@ -1121,7 +1131,10 @@ mod tests {
         assert_eq!(force_upgrade_spec("a", &hold("0.1.174", true)), None);
         assert_eq!(force_upgrade_spec("a", &hold("main", false)), None);
         assert_eq!(force_upgrade_spec("a", &hold("", false)), None);
-        assert_eq!(force_upgrade_spec("a", "PLUGIN_ENTRY_MISSING: broken"), None);
+        assert_eq!(
+            force_upgrade_spec("a", "PLUGIN_ENTRY_MISSING: broken"),
+            None
+        );
     }
 
     /// 面板给的条目才带版本：`@scope` 包按最后一个 `@` 切，非 registry 版本（git ref、`next`）
@@ -1161,7 +1174,10 @@ mod tests {
                     .to_string()
             )
         );
-        assert_eq!(policy_refusal_from_specs(&specs, "PLUGIN_ENTRY_MISSING: broken"), None);
+        assert_eq!(
+            policy_refusal_from_specs(&specs, "PLUGIN_ENTRY_MISSING: broken"),
+            None
+        );
         assert_eq!(
             policy_refusal_from_specs(&["aaa@next".to_string()], failure),
             None
@@ -1234,7 +1250,8 @@ mod tests {
             serde_json::json!([{"name": "aaa", "version": "1.0.0", "runtime_version": "0.2.0-rc.2"}])
         );
 
-        let message = update_failure_payload(UpdateFailure::stage(&specs, refusal)).expect("message");
+        let message =
+            update_failure_payload(UpdateFailure::stage(&specs, refusal)).expect("message");
 
         let entries = payload_of(&message, INCOMPATIBLE_PREFIX);
         assert_eq!(entries.as_array().expect("array").len(), 1);
@@ -1441,7 +1458,9 @@ mod tests {
         assert!(is_registry_version("0.1.174"));
         assert!(is_registry_version("1.66.5"));
         assert!(!is_registry_version("next"));
-        assert!(!is_registry_version("b3a69187e1bac1bf6162e3d37d005e58bc2ee74e"));
+        assert!(!is_registry_version(
+            "b3a69187e1bac1bf6162e3d37d005e58bc2ee74e"
+        ));
         assert!(!is_registry_version(""));
     }
 
@@ -1592,7 +1611,10 @@ mod tests {
             Some("0.19.0"),
             || None,
         );
-        assert!(matches!(step, UpdateVerifyStep::Entry), "版本已达目标必须继续核验入口");
+        assert!(
+            matches!(step, UpdateVerifyStep::Entry),
+            "版本已达目标必须继续核验入口"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

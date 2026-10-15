@@ -11,8 +11,8 @@ use std::process::Command;
 #[cfg(windows)]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use std::sync::{Arc, OnceLock};
+use tauri::AppHandle;
 
 use super::status;
 use super::sweep::harness_pid_path;
@@ -33,7 +33,9 @@ pub(super) struct HarnessProcessExitedPayload {
 const PORT_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// 启动守卫：并发调用 `launch` 时只允许一个真正拉起 dsh 进程
-pub(crate) static LAUNCH_GUARD: AtomicBool = AtomicBool::new(false);
+pub(crate) fn launch_guard() -> Arc<AtomicBool> {
+    Arc::clone(&super::instances::instance().launching)
+}
 
 /// 当前进程内由桌面端创建的 Harness 根进程（PID + Windows 句柄）。
 ///
@@ -48,11 +50,6 @@ pub(super) struct OwnedProcess {
     /// 只在 Windows 存在；Unix 无句柄概念。
     #[cfg(windows)]
     pub(super) handle: usize,
-}
-
-fn owned_process_lock() -> &'static Mutex<Option<OwnedProcess>> {
-    static OWNED_PROCESS: OnceLock<Mutex<Option<OwnedProcess>>> = OnceLock::new();
-    OWNED_PROCESS.get_or_init(|| Mutex::new(None))
 }
 
 /// 本次启动是否已按 dsh 入口路径清扫过历史残留。
@@ -72,28 +69,25 @@ pub(super) fn take_startup_sweep() -> bool {
 /// 记录新持有的 Harness 根进程（Unix，启动成功后调用）。
 #[cfg(not(windows))]
 pub(super) fn set_owned_process(pid: u32) {
-    let mut guard = owned_process_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let instance = super::instances::instance();
+    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(OwnedProcess { pid });
-    STARTUP_SWEEP_DONE.store(false, Ordering::SeqCst);
 }
 
 /// 若调用方 owns 该进程（Windows 额外存句柄），记录之。
 #[cfg(windows)]
 pub(super) fn set_owned_process_with_handle(pid: u32, handle: usize) {
-    let mut guard = owned_process_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let instance = super::instances::instance();
+    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(OwnedProcess { pid, handle });
     // 本应用此后持有自己的 Harness：再次启动前必须重新确认没有残留
-    STARTUP_SWEEP_DONE.store(false, Ordering::SeqCst);
 }
 
 /// 原子取出持有的进程（PID+句柄一起）。取走者负责关闭 Windows 句柄；
 /// 无条件取出（停止/退出路径）。
 fn take_owned_process() -> Option<OwnedProcess> {
-    owned_process_lock()
+    crate::service::workflow::instances::instance()
+        .process
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
@@ -115,7 +109,7 @@ pub(crate) struct LaunchGuard;
 
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
-        LAUNCH_GUARD.store(false, Ordering::SeqCst);
+        launch_guard().store(false, Ordering::SeqCst);
     }
 }
 
@@ -153,14 +147,16 @@ pub async fn acquire_core_transition() -> Result<tokio::sync::OwnedMutexGuard<()
 /// 是否持有 Harness 进程。与其它访问器一致：锁被毒化（panic 残留）时取回
 /// 毒化守卫继续读取，而不是把「已登记进程」误报为「无」。
 pub fn has_owned_process() -> bool {
-    owned_process_lock()
+    crate::service::workflow::instances::instance()
+        .process
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .is_some()
 }
 
 pub fn owned_process_pid() -> Option<u32> {
-    owned_process_lock()
+    crate::service::workflow::instances::instance()
+        .process
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .as_ref()
@@ -184,7 +180,9 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
     exit_code: impl FnOnce(&OwnedProcess) -> Option<i64>,
 ) -> Option<OwnedProcess> {
     let (owned, exit_code) = {
-        let mut guard = owned_process_lock()
+        let instance = super::instances::instance();
+        let mut guard = instance
+            .process
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let owned = take_owned_process_if_matching(&mut guard, pid)?;
@@ -219,9 +217,7 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
         pid: owned.pid,
         exit_code,
     };
-    if let Err(error) = app_handle.emit(HARNESS_PROCESS_EXITED_EVENT, payload) {
-        log::warn!("Failed to emit Harness process exit event: {error}");
-    }
+    super::instances::emit(app_handle, HARNESS_PROCESS_EXITED_EVENT, payload);
     Some(owned)
 }
 
@@ -251,7 +247,9 @@ fn terminate_owned_process() -> Result<bool, ()> {
         }
         kill_pid_tree(owned.pid);
         if unsafe { WaitForSingleObject(handle, 5_000) } != WAIT_OBJECT_0 {
-            let mut guard = owned_process_lock()
+            let instance = super::instances::instance();
+            let mut guard = instance
+                .process
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             if guard.is_none() {
@@ -444,7 +442,9 @@ try {
             return;
         }
     };
-    let owned_pid = owned_process_lock()
+    let instance = super::instances::instance();
+    let owned_pid = instance
+        .process
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .as_ref()
@@ -618,6 +618,12 @@ fn is_harness_command_line(cmdline: &str, dsh_bin: &str) -> bool {
 /// 因此转发层与其下方的真身会被分别命中，不存在 Windows 的转发层漏杀问题
 /// （debug 构建跳过该分支，只按 `.harness.pid` 标记回收）。
 pub fn terminate_stale_harness_processes(app_handle: &tauri::AppHandle) {
+    if super::instances::profiles()
+        .into_iter()
+        .any(|profile| super::instances::scope_sync(profile, has_owned_process))
+    {
+        return;
+    }
     #[cfg(windows)]
     terminate_stale_harness_processes_at(&config::get_dsh_binary_path(app_handle));
     #[cfg(not(windows))]
@@ -676,18 +682,22 @@ pub async fn stop(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 重置启动守卫，确保后续 launch 可以重新拉起；仅结束持有的根进程树。
     // 进程终止涉及 WaitForSingleObject（至多 5s）与 taskkill/kill 等同步阻塞
     // 调用，移出 Tokio 执行线程避免卡住其他并发任务（WARN-7/P2-#20）。
-    LAUNCH_GUARD.store(false, Ordering::SeqCst);
-    tauri::async_runtime::spawn_blocking(terminate_owned_process)
-        .await
-        .map_err(|e| format!("STOP_FAILED: {e}"))?
-        .map_err(|()| "STOP_FAILED: Harness process did not stop".to_string())?;
+    launch_guard().store(false, Ordering::SeqCst);
+    let profile = super::instances::current_profile()
+        .unwrap_or_else(|| crate::service::profile::active_profile(&app_handle));
+    tauri::async_runtime::spawn_blocking(move || {
+        super::instances::scope_sync(profile, terminate_owned_process)
+    })
+    .await
+    .map_err(|e| format!("STOP_FAILED: {e}"))?
+    .map_err(|()| "STOP_FAILED: Harness process did not stop".to_string())?;
     // 清理孤儿清扫标记：正常停止的实例不应被下次启动当作残留
     let _ = fs::remove_file(harness_pid_path(&app_handle));
 
     // 端口释放滞后是毫秒级，固定睡眠只会把这段时间放大成白等；以端口真正
     // 回落为准，最坏情况仍退化为原先的等待上限。
     {
-        let port = config::get_store_dat_setting(&app_handle).port;
+        let port = super::instances::port(&app_handle);
         let _ = tauri::async_runtime::spawn_blocking(move || {
             wait_for_port_release(port, PORT_RELEASE_WAIT)
         })
@@ -710,14 +720,14 @@ pub async fn stop(app_handle: tauri::AppHandle) -> Result<(), String> {
 /// 同步、可在退出路径调用（无 async 运行时依赖）：进程从 SIGKILL 返回那一刻已死，
 /// 但内核回收监听套接字仍有短暂滞后，故结束过进程后补一次有界等待，让紧随其后的
 /// 安装器/新实例看到端口已释放。没持有进程时不等待，避免在用户可见路径上白耗。
-pub fn stop_for_installer(app_handle: &tauri::AppHandle) {
+fn stop_instance_for_installer(app_handle: &tauri::AppHandle) {
     if !matches!(terminate_owned_process(), Ok(true)) {
         return;
     }
     // 正常停止路径同样清理清扫标记（崩溃路径才需要下次启动清扫）
     let _ = fs::remove_file(harness_pid_path(app_handle));
     log::info!("Harness stopped and port released for installer handoff");
-    let port = config::get_store_dat_setting(app_handle).port;
+    let port = super::instances::port(app_handle);
     wait_for_port_release(port, PORT_RELEASE_WAIT);
 }
 
@@ -725,6 +735,12 @@ pub fn stop_for_installer(app_handle: &tauri::AppHandle) {
 ///
 /// 退出路径上不更新状态，只结束当前应用持有的 Harness 进程树（与安装器交接共用
 /// [`stop_for_installer`]，保证两条路径行为一致）。
+pub fn stop_for_installer(app_handle: &tauri::AppHandle) {
+    for profile in super::instances::profiles() {
+        super::instances::scope_sync(profile, || stop_instance_for_installer(app_handle));
+    }
+}
+
 pub fn stop_on_exit(app_handle: &tauri::AppHandle) {
     stop_for_installer(app_handle);
 }
@@ -772,7 +788,10 @@ mod tests {
         let app = tauri::test::mock_app();
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("fatal-report.log");
-        *owned_process_lock().lock().unwrap() = Some(test_owned(42));
+        *crate::service::workflow::instances::instance()
+            .process
+            .lock()
+            .unwrap() = Some(test_owned(42));
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let timeout = Duration::from_secs(5);
@@ -790,7 +809,9 @@ mod tests {
             });
             entered_rx.recv_timeout(timeout).unwrap();
             let callback_holds_ownership = matches!(
-                owned_process_lock().try_lock(),
+                crate::service::workflow::instances::instance()
+                    .process
+                    .try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
             );
             let observer = scope.spawn(|| {

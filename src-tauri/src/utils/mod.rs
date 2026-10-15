@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 
-use crate::config;
 use crate::service::core::active_core_dir;
 
 /// 对某个 dsh 包文件的一次性幂等补丁判定结果。
@@ -75,8 +74,16 @@ pub fn show_window<R: Runtime>(window: &WebviewWindow<R>) {
 /// 显示主窗口：托盘「打开面板」、托盘左键点击、macOS Dock 图标点击共用。
 /// 关闭按钮只隐藏窗口（见 builder 的 on_window_event），所以这里取到即可 show；
 /// 若窗口确实不存在（非预期路径），仅记录日志，不重建。
+pub fn shell_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    app.get_webview_window("main").or_else(|| {
+        app.webview_windows().into_values().find(|window| {
+            window.label().starts_with("window-") || window.label().starts_with("remote-")
+        })
+    })
+}
+
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = shell_window(app) {
         // 关窗驻留用的是应用级 hide（NSApp hide:，见 builder 的 CloseRequested），
         // 恢复前必须先 unhide 整个应用，否则 window.show() 在隐藏态应用上不可见。
         #[cfg(target_os = "macos")]
@@ -300,7 +307,10 @@ mod tests {
         assert!(!gbk.is_ascii());
         assert_eq!(decode_multibyte(&gbk, 936).as_deref(), Some(text));
         // UTF-8 代码页不看 `lpUsedDefaultChar`，直接给出等价字节。
-        assert_eq!(encode_multibyte(text, 65001).as_deref(), Some(text.as_bytes()));
+        assert_eq!(
+            encode_multibyte(text, 65001).as_deref(),
+            Some(text.as_bytes())
+        );
     }
 
     /// 该代码页表示不了的字符必须报 `None`，不能靠「近似字符」蒙混过关。

@@ -41,7 +41,7 @@ use crate::service::profile::{
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, WebviewWindow};
 
 // plugin 兄弟模块的再导出：子模块经 `super::` 统一从这里取，跨模块边界只在此定义。
 pub(crate) use super::ensure_profile_npmrc;
@@ -89,8 +89,8 @@ use diagnose::{
 };
 use pnpm::ensure_pnpm;
 use single::single_plugin_args;
-use spec::{bundled_dir_of, normalize_git_spec, preset_spec_for_install, spec_argument};
 pub(crate) use spec::local_spec_from_path;
+use spec::{bundled_dir_of, normalize_git_spec, preset_spec_for_install, spec_argument};
 
 /// 允许构建重试的上限。每次重试解决 pnpm 报出的一个允许键（git depPath 或
 /// 传递构建包名），多个 git 插件 / 多个原生依赖各占一次，上限封顶防死循环。
@@ -392,9 +392,8 @@ async fn install_with_cancel(
         return Err("HARNESS_NOT_FOUND: dsh CLI missing".to_string());
     }
 
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window =
+        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
 
     // 选定/补齐安装用的 pnpm：返回是否应强制使用捆绑版（版本感知，见 ensure_pnpm）
     let prefer_bundled_pnpm = ensure_pnpm(app_handle, &window, owner).await?;
@@ -641,9 +640,8 @@ pub async fn allow_version_exemptions(
     if versions.is_empty() {
         return Err("PLUGIN_EXEMPTION_EMPTY: no plugin version exemption to grant".to_string());
     }
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window =
+        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
     let node = config::get_node_binary_path(app_handle);
     let dsh_bin = core::active_dsh_binary(app_handle);
     if !node.exists() {
@@ -948,7 +946,10 @@ mod tests {
 
     /// 造一个真实存在的本地插件目录：本地 spec 的解析会 canonicalize，只有落盘
     /// 路径才能覆盖「尾斜杠 / 混用分隔符 / 短名」这些形态。
-    fn local_plugin_fixture(tag: &str, manifest: Option<&str>) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn local_plugin_fixture(
+        tag: &str,
+        manifest: Option<&str>,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("dsh-local-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("plugin");
@@ -1043,7 +1044,10 @@ mod tests {
 
         let target = local_target(&other_dir, &base).unwrap();
 
-        assert_eq!(target.spec, format!("link:{}", spec::forward_slashes(&other_dir)));
+        assert_eq!(
+            target.spec,
+            format!("link:{}", spec::forward_slashes(&other_dir))
+        );
         assert_ne!(
             target.spec,
             format!("link:{}", spec::forward_slashes(&base.join("plugin")))

@@ -103,12 +103,16 @@ async fn remote_request(
 
 #[tauri::command]
 pub async fn remote(
+    window: tauri::WebviewWindow,
     app_handle: AppHandle,
     method: String,
     payload: Option<Value>,
 ) -> Result<Value, String> {
     let (method, path) = remote_method(&method)?;
-    let port = crate::config::get_store_dat_setting(&app_handle).port;
+    let profile = crate::service::workflow::instances::window_profile(&app_handle, window.label());
+    let port = crate::service::workflow::instances::scope_sync(profile, || {
+        crate::service::workflow::instances::port(&app_handle)
+    });
     remote_request(port, method, path, payload).await
 }
 
@@ -178,18 +182,34 @@ fn open_window_args(machine_id: &str, url: &str) -> Result<(String, Option<tauri
     Ok((label, parsed_url))
 }
 
-/// 打开（已开则聚焦）`remote-<machineId>` 弹窗窗口，加载壳层应用。
+fn profile_window_label(profile: &str, machine_id: &str) -> String {
+    let profile: String = profile
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!(
+        "{REMOTE_WINDOW_LABEL_PREFIX}{profile}--{}",
+        sanitize_label_part(machine_id)
+    )
+}
+
+/// 打开（已开则聚焦）当前档案的远端窗口。
 ///
 /// 壳不自存机器状态：前端按窗口 label 自解析目标机器并切换（机器状态经
 /// `/api/tauri/remote/machines` 轮询获取）；`url` 只做回环校验。重复调用聚焦已有窗口（不
 /// 重复建窗）；失败返回带前缀的可读错误，由调用方（S4 面板按钮）呈现。
 #[tauri::command]
-pub fn remote_open_window(
+pub async fn remote_open_window(
+    window: tauri::WebviewWindow,
     app_handle: AppHandle,
     machine_id: String,
     url: String,
 ) -> Result<(), String> {
-    let (label, _validated_url) = open_window_args(&machine_id, &url)?;
+    let (_, _validated_url) = open_window_args(&machine_id, &url)?;
+    let _transition = crate::service::workflow::acquire_core_transition().await?;
+    let profile = crate::service::workflow::instances::window_profile(&app_handle, window.label());
+    let label = profile_window_label(&profile, &machine_id);
     // 已有窗口：聚焦即可（再次「打开」同一机器的语义）。
     if let Some(existing) = app_handle.get_webview_window(&label) {
         let _ = existing.set_focus();
@@ -199,8 +219,17 @@ pub fn remote_open_window(
     // 桥脚本按窗口注入、（Windows）WebView2 共用数据目录等，远端窗口与本体
     // 唯一区别是连接的后端。label 即机器寻址：前端 remote-<id> 自切换。
     let title = format!("DSH Remote · {machine_id}");
-    crate::desktop::builder::build_shell_window(&app_handle, label, &title, "index.html".into())
+    crate::service::workflow::instances::bind_window(&label, &profile);
+    let mut route = tauri::Url::parse("http://localhost/").expect("static URL");
+    route
+        .query_pairs_mut()
+        .append_pair("remoteMachineId", &machine_id);
+    let path = format!("index.html#{}", route.query().unwrap_or_default());
+    crate::desktop::builder::build_shell_window(&app_handle, label.clone(), &title, path.into())
         .map(|_| ())
+        .inspect_err(|_| {
+            crate::service::workflow::instances::release_window(&label);
+        })
         .map_err(|err| format!("REMOTE_WINDOW_FAILED: {err}"))
 }
 
@@ -210,6 +239,22 @@ mod tests {
     use serde_json::{json, Value};
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[test]
+    fn remote_windows_are_isolated_by_profile() {
+        assert_ne!(
+            super::profile_window_label("a", "machine"),
+            super::profile_window_label("b", "machine")
+        );
+        assert_eq!(
+            super::profile_window_label("a", "machine"),
+            super::profile_window_label("a", "machine")
+        );
+        assert_ne!(
+            super::profile_window_label("a-b", "machine"),
+            super::profile_window_label("a_b", "machine")
+        );
+    }
 
     async fn response_server(
         status: &str,

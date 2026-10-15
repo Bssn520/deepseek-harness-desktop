@@ -12,7 +12,7 @@ use crate::config;
 use crate::service::{download, fs_guard, workflow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use super::local::{find_user_dsh_bin, local_core};
 use super::source::{
@@ -170,7 +170,12 @@ fn rows_with_release_catalog(
                 tag: String::new(),
                 path: dir_str.clone(),
                 dir: dir_str,
-                present: dir.join(config::dependencies::entry_relative(app_handle, config::dependencies::DEP_DSH)).is_file(),
+                present: dir
+                    .join(config::dependencies::entry_relative(
+                        app_handle,
+                        config::dependencies::DEP_DSH,
+                    ))
+                    .is_file(),
                 active: bundled_active,
                 removable: false,
                 preview: false,
@@ -421,6 +426,7 @@ fn trusted_release_version(
 
 /// 停止并清扫旧核心进程，确保核心来源变更时不会继续使用旧入口。
 async fn stop_harness_for_core_switch(app_handle: &AppHandle) -> Result<(), String> {
+    workflow::instances::require_exclusive_profile()?;
     if workflow::has_owned_process() {
         workflow::stop(app_handle.clone()).await?;
     }
@@ -518,6 +524,7 @@ async fn switch_app_version(app_handle: &AppHandle, tag: &str) -> Result<(), Str
     // 从切换开始到目录互换完成持续持有与 launch 共用的转换锁，避免两个切换
     // 重叠，也避免 launch 在状态检查后插入并从旧的 dependencies/dsh 加载 DLL。
     let _transition_guard = workflow::acquire_core_transition().await?;
+    workflow::instances::require_exclusive_profile()?;
     let deps = dependencies_dir(app_handle);
     // 槽位互换只在托管根内进行（映射可能把激活核心指向安装目录的捆绑副本）；
     // 随包资源构建不互换，见下方分支。
@@ -702,9 +709,8 @@ pub async fn download_version(app_handle: &AppHandle, tag: &str) -> Result<Harne
 
     // 2. 下载 + 校验 + 原子解压到历史槽位（两阶段进度：下载 0-50，解压 50-100）
     //    下载默认走 GitHub 官方直连，失败自动切换代理镜像兜底。
-    let window = app_handle
-        .get_webview_window("main")
-        .ok_or("WINDOW_NOT_FOUND: main window missing")?;
+    let window =
+        crate::utils::shell_window(app_handle).ok_or("WINDOW_NOT_FOUND: main window missing")?;
     let mut tracker = download::ProgressTracker::new(&window, 2);
     tracker.start_phase("download", &format!("正在下载核心版本 {tag}"));
     let mut urls = vec![info.asset_url.clone()];
