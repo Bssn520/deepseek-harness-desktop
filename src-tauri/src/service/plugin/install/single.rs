@@ -3,6 +3,7 @@
 //! 卸载后核验 profile 清单，插件仍被引用时走离线卸载兜底（受保护包除外）。
 //! 另含启动期弃用插件自动卸载（`uninstall_deprecated_plugins`）。
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::Path;
@@ -23,7 +24,6 @@ use super::diagnose::{
 };
 use super::errors;
 use super::harness_prefer_bundled_pnpm;
-use super::installed_name;
 use super::is_actionable_plugin_ref;
 use super::is_installed;
 use super::load_deprecated_ids;
@@ -33,6 +33,7 @@ use super::pnpm::ensure_pnpm;
 use super::profile_dir;
 use super::run_plugin_with_allow_build_retry;
 use super::uninstall_recovery;
+#[cfg(test)]
 use super::PreinstallPluginInfo;
 use crate::service::plugin::update::known_latest;
 use crate::service::profile::profile_release_age_excluded;
@@ -552,79 +553,32 @@ pub async fn remove_many(app_handle: &AppHandle, ids: &[String]) -> Result<(), S
     }
 }
 
-/// 计算需要自动卸载的弃用插件已安装包名（纯函数，便于单测）。
-///
-/// 命中条件：id 登记在弃用名单（`resources/manifest.jsonc` 的 `plugins.depercated`，
-/// 见 [`super::super::preset::load_deprecated_ids`]）且当前已安装，或插件被当前核心
-/// 淘汰（[`PreinstallPluginInfo::retire_on`]：核心已超出清单声明的版本区间、或已安装
-/// 版本不再落在该核心对应的插件版本区间内）。返回实际安装包名——离线卸载
-/// （`uninstall_recovery`）以它为键从 profile 清单与 `node_modules` 精准移除
-/// （scoped 包名与预设 id 不一致时也能正确卸载）。
-///
-/// 两条来源缺一不可：
-/// 1. 预设仍声明该 id：以 `installed_name`（实际 npm 包名）为准；内部插件由启动
-///    自愈强制安装，不适用弃用语义，跳过。
-/// 2. 兜底——预设清单已不存在该 id（被整体删除，如 `dsh-tauri-panel` 并入核心后
-///    从 `plugins.built-in` 移除）：此时按弃用名单登记的 id 本身核对。少了
-///    这一步，弃用名单对「连预设条目一起删掉」的插件永远无效，其 `link:` 目标还会
-///    因安装目录残留而躲过失效链接清理，残留 bundle 直接拖垮启动。
-fn deprecated_installed_names(
-    presets: &[PreinstallPluginInfo],
-    deprecated_ids: &HashSet<String>,
-    core_version: Option<&str>,
-    installed: impl Fn(&str) -> bool,
-    installed_version: impl Fn(&str) -> Option<String>,
-) -> Vec<String> {
-    let mut names: Vec<String> = presets
-        .iter()
-        .filter(|p| {
-            let name = installed_name(p);
-            if !installed(name) {
-                return false;
-            }
-            if !p.internal && deprecated_ids.contains(&p.id) {
-                return true;
-            }
-            p.retire_on(core_version, installed_version(name).as_deref())
-        })
-        .map(|p| installed_name(p).to_string())
-        .collect();
-    for id in deprecated_ids {
-        if presets.iter().any(|p| p.id == *id) {
-            continue;
-        }
-        if installed(id) {
-            names.push(id.clone());
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// 弃用插件在 profile 中的残留判定：清单引用或 `node_modules` 入口。
-///
-/// 入口用 `symlink_metadata` 判定：junction / 符号链接的目标目录消失时 `exists()`
-/// 返回 false，但入口本身仍是 profile 解析路径上的残留，必须能被识别并清掉
-/// （`uninstall_recovery` 对已清空清单的 id 幂等，只清入口与 patch 层）。
-fn deprecated_residue_present(app_handle: &AppHandle, name: &str) -> bool {
-    is_installed(app_handle, name)
-        || std::fs::symlink_metadata(profile_dir(app_handle).join("node_modules").join(name))
-            .is_ok()
-}
+#[cfg(test)]
+use super::super::installed::deprecated_installed_names;
 
 pub(crate) async fn uninstall_deprecated_plugins(app_handle: &AppHandle) -> Result<(), String> {
     let presets = load_presets(app_handle);
     let core_version = core::active_version(app_handle);
     let deprecated_ids = load_deprecated_ids(app_handle);
     let profile = profile_dir(app_handle);
-    let names = deprecated_installed_names(
+    let manifest = match std::fs::read_to_string(profile.join("package.json")) {
+        Ok(raw) => serde_json::from_str::<super::super::installed::ProfilePackageJson>(&raw)
+            .map_err(|error| format!("DEPRECATED_PLUGIN_MANIFEST_PARSE_FAILED: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            super::super::installed::ProfilePackageJson {
+                dependencies: Default::default(),
+                dsh: None,
+            }
+        }
+        Err(error) => return Err(format!("DEPRECATED_PLUGIN_MANIFEST_READ_FAILED: {error}")),
+    };
+    let (names, _) = super::super::installed::deprecated_plugins_at(
+        &profile,
+        &manifest,
         &presets,
         &deprecated_ids,
         core_version.as_deref(),
-        |name| deprecated_residue_present(app_handle, name),
-        |name| installed_package_version(&profile, name),
-    );
+    )?;
     if names.is_empty() {
         return Ok(());
     }

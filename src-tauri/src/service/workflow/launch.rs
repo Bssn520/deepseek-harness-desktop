@@ -9,12 +9,15 @@ use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
+use tauri::Manager;
 
 #[cfg(unix)]
 use super::process::warn_if_inotify_watch_limit_low;
 use super::process::{
-    has_owned_process, launch_guard, on_owned_process_exit, register_owned_process, stop,
+    has_owned_process, launch_guard, on_owned_process_exit_at, register_owned_process, stop,
     take_startup_sweep, terminate_stale_harness_processes, LaunchGuard, OwnedProcess,
+    HARNESS_PROCESS_EXITED_EVENT,
 };
 use super::status;
 #[cfg(windows)]
@@ -26,6 +29,24 @@ use super::win_inspector;
 type HarnessChild = std::sync::Arc<std::os::windows::io::OwnedHandle>;
 #[cfg(unix)]
 type HarnessChild = std::process::Child;
+
+pub(super) struct LaunchPlan {
+    pub(super) setting: config::Setting,
+    pub(super) profile: String,
+    pub(super) node: PathBuf,
+    pub(super) dsh_binary: PathBuf,
+    pub(super) core_dir: PathBuf,
+    pub(super) profile_root: PathBuf,
+    pub(super) dsh_home: PathBuf,
+    pub(super) base: PathBuf,
+    pub(super) bin_dir: PathBuf,
+    pub(super) pnpm_root: PathBuf,
+    pub(super) pnpm_binary: PathBuf,
+    pub(super) pid_path: PathBuf,
+    pub(super) resources: Option<PathBuf>,
+    pub(super) git_dir: Option<PathBuf>,
+    pub(super) user_pnpm: Option<PathBuf>,
+}
 
 /// 端口释放等待上限：刚结束/清扫过上个会话的残留 dsh 进程后，TCP 端口释放
 /// 存在短暂滞后（taskkill 返回 ≠ 端口已可复用）。等待窗口内端口回落为空闲则
@@ -176,6 +197,7 @@ fn resolve_heal_port(configured: u16, heal_target: u16, heal_target_free: bool) 
 
 /// 检测并启动 Harness 服务
 pub async fn start(app_handle: tauri::AppHandle) -> Result<(), String> {
+    super::early::wait_preparation().await?;
     let setting = config::get_store_dat_setting(&app_handle);
     let node_binary_path = config::get_node_binary_path(&app_handle);
     // 活动核心的入口：本地核心存在时优先本地（需求 3），否则预打包
@@ -310,8 +332,8 @@ fn wait_harness(
     }
 }
 
-fn supervise_harness<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+fn supervise_harness(
+    mut on_exit: impl FnMut(u32, Option<i64>, Option<&Path>),
     log_path: &PathBuf,
     started: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     guards: (LaunchGuard, tokio::sync::OwnedMutexGuard<()>),
@@ -385,7 +407,7 @@ fn supervise_harness<R: tauri::Runtime>(
             Ok(None) => return Err("STARTUP_CANCELLED: Harness launch was stopped".into()),
             Err(error) => {
                 if let Some((pid, code)) = previous_exit {
-                    on_owned_process_exit(app, pid, |_| code);
+                    on_exit(pid, code, None);
                 }
                 return Err(error);
             }
@@ -417,10 +439,7 @@ fn supervise_harness<R: tauri::Runtime>(
                         .wait()
                         .map_err(|cleanup| format!("{error}; cleanup failed: {cleanup}"))?;
                 }
-                on_owned_process_exit(app, pid, |_| {
-                    log_fatal_report(log_path, &report_path);
-                    None
-                });
+                on_exit(pid, None, Some(&report_path));
             }
             result
         };
@@ -431,10 +450,7 @@ fn supervise_harness<R: tauri::Runtime>(
                 drop(launch);
                 drop(transition);
                 let code = wait(None)?.flatten();
-                on_owned_process_exit(app, pid, |_| {
-                    log_fatal_report(log_path, &report_path);
-                    code
-                });
+                on_exit(pid, code, Some(&report_path));
                 return Ok(());
             }
         };
@@ -443,8 +459,8 @@ fn supervise_harness<R: tauri::Runtime>(
             signature.recv_timeout(std::time::Duration::from_millis(250)),
             Ok(true)
         );
-        log_fatal_report(log_path, &report_path);
         if code == Some(1) && duplicate && attempt < 3 {
+            log_fatal_report(log_path, &report_path);
             log::warn!(
                 "DUPLICATE_LOADER_ENTRY: dsh exited early with duplicate loader entry \
                  (pid={pid}, code=1); resetting profile root and relaunching (attempt {attempt}/3)"
@@ -452,7 +468,7 @@ fn supervise_harness<R: tauri::Runtime>(
             previous_exit = Some((pid, code));
             continue;
         }
-        on_owned_process_exit(app, pid, |_| code);
+        on_exit(pid, code, Some(&report_path));
         return Ok(());
     }
     unreachable!()
@@ -460,6 +476,7 @@ fn supervise_harness<R: tauri::Runtime>(
 
 /// 启动 Harness 服务进程
 pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
+    super::early::wait_preparation().await?;
     // 启动分段计时（issue #766）：只写日志，不改控制流。每段一行 `STARTUP_PHASE`，
     // `ms` 是本段耗时、`total` 是本次 launch 的累计耗时。启动慢的归因过去只能靠
     // 时间戳猜测（同一进程内 auto_start 与前端 invoke 并发交错），埋点后可直接
@@ -811,6 +828,70 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             node_binary_path.display()
         ));
     }
+    let profile = crate::service::profile::active_profile(&app_handle);
+    let plan = LaunchPlan {
+        setting,
+        profile_root: crate::service::profile::profile_dir_of(&app_handle, &profile),
+        profile,
+        node: node_binary_path,
+        dsh_binary: dsh_binary_path,
+        core_dir: crate::service::core::active_core_dir(&app_handle),
+        dsh_home,
+        base: config::get_base_dir(&app_handle),
+        bin_dir: crate::service::cli::get_bin_dir(&app_handle),
+        pnpm_root: config::get_pnpm_install_path(&app_handle),
+        pnpm_binary: config::get_pnpm_binary_path(&app_handle),
+        pid_path: super::sweep::harness_pid_path(&app_handle),
+        resources: app_handle.path().resource_dir().ok(),
+        git_dir: config::get_git_cmd_dir(&app_handle),
+        user_pnpm: crate::service::cli::find_user_pnpm(&app_handle),
+    };
+    let notifications = Arc::new(OnceLock::new());
+    let _ = notifications.set(app_handle);
+    launch_prepared(
+        plan,
+        (_launch_guard, _transition_guard),
+        notifications,
+        #[cfg(windows)]
+        None,
+    )
+    .await
+}
+
+pub(super) async fn launch_prepared(
+    plan: LaunchPlan,
+    guards: (LaunchGuard, tokio::sync::OwnedMutexGuard<()>),
+    notifications: Arc<OnceLock<tauri::AppHandle>>,
+    #[cfg(windows)] job: Option<Arc<super::win_spawn::ProcessJob>>,
+) -> Result<(), String> {
+    let prepared_started = std::time::Instant::now();
+    let mut phase_started = prepared_started;
+    let mark_phase = |name: &str, phase_started: &mut std::time::Instant| {
+        let now = std::time::Instant::now();
+        log::info!(
+            "STARTUP_PHASE: name={name} ms={} prepared_total={}",
+            now.duration_since(*phase_started).as_millis(),
+            now.duration_since(prepared_started).as_millis()
+        );
+        *phase_started = now;
+    };
+    let LaunchPlan {
+        setting,
+        profile: active_profile,
+        node: node_binary_path,
+        dsh_binary: dsh_binary_path,
+        core_dir,
+        profile_root,
+        dsh_home,
+        base,
+        bin_dir,
+        pnpm_root,
+        pnpm_binary,
+        pid_path,
+        resources,
+        git_dir,
+        user_pnpm,
+    } = plan;
     let mut envs: HashMap<String, String> = HashMap::new();
     envs.insert(
         "DSH_HOME".to_string(),
@@ -850,9 +931,9 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
             for dir in &git_dirs {
                 log::debug!("harness service PATH prepend: {}", dir.to_string_lossy());
             }
-            let mut paths = vec![crate::service::cli::get_bin_dir(&app_handle)];
+            let mut paths = vec![bin_dir.clone()];
             paths.push(node_dir.to_path_buf());
-            if let Some(git_dir) = config::get_git_cmd_dir(&app_handle) {
+            if let Some(git_dir) = git_dir {
                 log::debug!(
                     "harness service Git PATH prepend: {}",
                     git_dir.to_string_lossy()
@@ -870,13 +951,10 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // GUI 进程可能启动在 pnpm 安装之前，继承的 PATH 因而没有 npm 全局目录。
     // 直接注入探测到的绝对路径，避免 dsh-market 的 pnpm --version 落到自身 shim
     // 后又因 PATH 看不到真正的 pnpm（issue #139）。
-    if let Some(user_pnpm) = crate::service::cli::find_user_pnpm(&app_handle) {
+    if let Some(user_pnpm) = user_pnpm.as_deref() {
         // Unix mise shim 依赖调用路径中的 argv[0]；只做字面绝对化，不能解析
         // `pnpm -> mise` 链接。Windows 仍由同一辅助函数处理连接点与 `\\?\`。
-        if let Some(pnpm_value) = crate::service::cli::pnpm_env_value(
-            &user_pnpm,
-            &crate::service::cli::get_bin_dir(&app_handle),
-        ) {
+        if let Some(pnpm_value) = crate::service::cli::pnpm_env_value(user_pnpm, &bin_dir) {
             envs.insert("DSH_PNPM".to_string(), pnpm_value);
         }
     }
@@ -885,7 +963,16 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // homebrew pnpm）。与插件安装路径的 ensure_pnpm 版本感知一致，但启动阶段绝不
     // 触发下载；捆绑版未安装或与 store 不匹配时不注入（交由用户 pnpm）。探测被正常
     // 安装占住或探针自身失败只告警，只有进程清理未确认才终止启动。
-    match crate::service::plugin::harness_prefer_bundled_pnpm(&app_handle).await {
+    match crate::service::plugin::harness_prefer_bundled_pnpm_from(
+        &profile_root,
+        &pnpm_root,
+        &pnpm_binary,
+        user_pnpm.as_deref(),
+        &node_binary_path,
+        &bin_dir,
+    )
+    .await
+    {
         Ok(true) => {
             envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
         }
@@ -920,7 +1007,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 日志文件（前端日志面板读取）。
     // 每次真实启动前轮转：只保留最近 3 次启动的日志，旧文件后退为
     // `dsh-web.log.1` / `dsh-web.log.2`，避免单文件随多次启动无限增长。
-    let log_path = config::get_service_log_path(&app_handle);
+    let log_path = config::service_log_path_from(&base, Some(&active_profile));
     fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")))
         .map_err(|e| format!("LOG_DIR_MKDIR_FAILED: create log dir failed: {e}"))?;
     rotate_service_log(&log_path, 3);
@@ -936,7 +1023,11 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // 是「补丁文件存在却应用不了就大声失败」，这里不改变契约，只把同一结果提前成
     // 一条可操作的错误（哪个文件、哪一行、哪个包），错误页据此给出「移除悬空条目」
     // 的一键恢复。必须在所有插件自愈之后：那些步骤会改变安装状态。
-    if let Err(e) = crate::service::plugin::preflight_active_patch_entries(&app_handle) {
+    if let Err(e) = crate::service::plugin::preflight_patch_entries_at(
+        &profile_root,
+        &dsh_home,
+        Some(&dsh_binary_path),
+    ) {
         log::error!("patch layer entry preflight failed: {e}");
         return Err(e);
     }
@@ -993,24 +1084,22 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     // `duplicate loader entry id: dsh-tauri-worktree`）。spawn 前最后一刻重置
     // profile 根关闭常见窗口；回写恰好落在探测窗口内的残余竞态由下方
     // Windows 分支的「早期退出重试」兜底。
-    let profile_root = crate::service::profile::profile_dir_of(
-        &app_handle,
-        &crate::service::profile::active_profile(&app_handle),
-    );
     reset_active_profile_root(&profile_root);
 
     // 本地插件热重载：把已挂载的本地路径插件源码目录折算成桌面端独占的补丁层，
     // 随启动以 `--patch` 注入核心 HMR（本地插件没有版本号可升级，改源码即时生效）。
     // 该层只在本次进程有效，每次启动都要按当前安装状态重算；没有本地插件时不传
     // `--patch`（指向不存在的文件会让核心在读取补丁层时直接失败）。
-    let hmr_patch = crate::service::plugin::local_plugin_hmr_sync(&app_handle);
+    let hmr_patch = crate::service::plugin::local_plugin_hmr_sync_at(
+        &base,
+        &profile_root,
+        resources.as_deref(),
+        setting.local_plugin_hmr,
+    );
     if let Some(path) = hmr_patch.as_deref() {
         log::info!("Injecting local plugin HMR layer: {}", path.display());
     }
 
-    let active_profile = crate::service::profile::active_profile(&app_handle);
-    let core_dir = crate::service::core::active_core_dir(&app_handle);
-    let pid_path = super::sweep::harness_pid_path(&app_handle);
     if let Some(parent) = pid_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -1018,14 +1107,33 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
     mark_phase("pre_spawn_setup", &mut phase_started);
     super::startup::note_spawn();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let guards = (_launch_guard, _transition_guard);
     std::thread::Builder::new()
         .name("harness-startup".into())
         .spawn(move || {
             super::instances::scope_sync(active_profile.clone(), || {
                 let mut started = Some(started_tx);
                 let result = supervise_harness(
-                    &app_handle,
+                    |pid, code, report_path| {
+                        on_owned_process_exit_at(
+                            pid,
+                            |_| {
+                                if let Some(report_path) = report_path {
+                                    log_fatal_report(&log_path, report_path);
+                                }
+                                code
+                            },
+                            |payload| {
+                                if let Some(app) = notifications.get() {
+                                    status::emit_status(app);
+                                    super::instances::emit(
+                                        app,
+                                        HARNESS_PROCESS_EXITED_EVENT,
+                                        payload,
+                                    );
+                                }
+                            },
+                        );
+                    },
                     &log_path,
                     &mut started,
                     guards,
@@ -1041,14 +1149,23 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                         #[cfg(windows)]
                         {
                             use std::os::windows::io::{FromRawHandle, OwnedHandle};
-                            use std::sync::Arc;
-                            let (stdout, stderr, pid, handle) =
+                            let spawned = if let Some(job) = job.as_deref() {
+                                super::win_spawn::spawn_with_hidden_console_in_job(
+                                    &node_binary_path,
+                                    &args,
+                                    Some(&core_dir),
+                                    &envs,
+                                    job,
+                                )
+                            } else {
                                 super::win_spawn::spawn_with_hidden_console_owned(
                                     &node_binary_path,
                                     &args,
                                     Some(&core_dir),
                                     &envs,
                                 )
+                            };
+                            let (stdout, stderr, pid, handle) = spawned
                                 .map_err(|error| format!("PROCESS_START_FAILED: {error}"))?;
                             let handle = Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) });
                             let signature =
@@ -1426,13 +1543,23 @@ mod tests {
             let spawn_count = attempts.clone();
             let reset_count = resets.clone();
             let worker = std::thread::spawn(move || {
-                let app = tauri::test::mock_app();
                 let log = path.join("dsh-web.log");
                 let mut started = Some(started_tx);
                 let result = super::super::utils::with_output_reader_failure(reader, || {
                     super::super::instances::scope_sync(profile, || {
                         supervise_harness(
-                            app.handle(),
+                            |pid, code, report_path| {
+                                on_owned_process_exit_at(
+                                    pid,
+                                    |_| {
+                                        if let Some(report_path) = report_path {
+                                            log_fatal_report(&log, report_path);
+                                        }
+                                        code
+                                    },
+                                    |_| {},
+                                );
+                            },
                             &log,
                             &mut started,
                             guards,

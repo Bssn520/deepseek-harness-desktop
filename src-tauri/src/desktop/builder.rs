@@ -99,73 +99,79 @@ fn webview_data_directory(app: &tauri::AppHandle<Wry>) -> std::path::PathBuf {
 
 /// setup app
 pub fn setup(app_handle: tauri::AppHandle) {
-    // 升级清理：内置插件已迁至 resources/node_modules（pnpm deploy 产物）；旧安装
-    // 可能残留 resources/preset-plugins 与 resources/internal-plugins 目录。仅删除
-    // 旧目录，失败告警并继续启动（查找回退见 preset::find_bundled_in_root）。
-    if let Err(e) = crate::service::plugin::remove_legacy_bundled_plugins(&app_handle) {
-        log::warn!("legacy bundled plugins cleanup skipped: {e}");
-    }
+    crate::service::workflow::early::setup(move |prepared| {
+        if !prepared {
+            // 升级清理：内置插件已迁至 resources/node_modules（pnpm deploy 产物）；旧安装
+            // 可能残留 resources/preset-plugins 与 resources/internal-plugins 目录。仅删除
+            // 旧目录，失败告警并继续启动（查找回退见 preset::find_bundled_in_root）。
+            if let Err(e) = crate::service::plugin::remove_legacy_bundled_plugins(&app_handle) {
+                log::warn!("legacy bundled plugins cleanup skipped: {e}");
+            }
 
-    // 启动前清扫上次崩溃残留的孤儿 Harness（端口/PID 双重确认，见
-    // workflow::sweep_orphan_harness），避免新实例一路漂移端口
-    crate::service::workflow::sweep_orphan_harness(&app_handle);
+            // 启动前清扫上次崩溃残留的孤儿 Harness（端口/PID 双重确认，见
+            // workflow::sweep_orphan_harness），避免新实例一路漂移端口
+            crate::service::workflow::sweep_orphan_harness(&app_handle);
 
-    // 启动自愈：清理指向旧位置的 pnpm `.modules.yaml`。老版本完成数据搬迁后该
-    // 文件仍记录旧 $DSH_HOME（AppData）下的绝对路径，导致任何 pnpm 操作抛
-    // `ERR_PNPM_UNEXPECTED_VIRTUAL_STORE`（插件安装/更新失败，issue #103）。
-    // 幂等、best-effort：仅在检测到失效路径时删除，下次 pnpm 操作自动重建。
-    let dsh_home = crate::config::get_dsh_data_path(&app_handle);
-    if let Err(e) = crate::service::migrate::heal_stale_pnpm_metadata(&dsh_home) {
-        log::warn!("pnpm modules metadata self-heal skipped: {e}");
-    }
+            // 启动自愈：清理指向旧位置的 pnpm `.modules.yaml`。老版本完成数据搬迁后该
+            // 文件仍记录旧 $DSH_HOME（AppData）下的绝对路径，导致任何 pnpm 操作抛
+            // `ERR_PNPM_UNEXPECTED_VIRTUAL_STORE`（插件安装/更新失败，issue #103）。
+            // 幂等、best-effort：仅在检测到失效路径时删除，下次 pnpm 操作自动重建。
+            let dsh_home = crate::config::get_dsh_data_path(&app_handle);
+            if let Err(e) = crate::service::migrate::heal_stale_pnpm_metadata(&dsh_home) {
+                log::warn!("pnpm modules metadata self-heal skipped: {e}");
+            }
 
-    // 档案迁移 + 首装引导：官方核心 0.1.5 起 `desktop` 档案名被保留给 Electron
-    // 应用（`--profile desktop` 直接报错），先把老用户的 `profiles/desktop` 改名到
-    // `tauri` 并改指 `active_profile`，再在桌面端首次安装时新建独立档案并切换
-    // （与 CLI 用户既有插件/补丁隔离，见 service::profile）。必须先于 scheduler/
-    // auto_start：它们启动服务/装插件时会带上 active_profile，迁移完成前 dsh
-    // spawn 必然失败。
-    crate::service::profile::migrate_desktop_profile_name(&app_handle);
-
-    // 启动进程监控（tick 检测 dsh 服务状态）
-    crate::service::workflow::instances::window_profile(&app_handle, MAIN_WINDOW_LABEL);
-    crate::service::scheduler::start(&app_handle);
-
-    // `dsh://` 深链（成功页「打开应用」按钮）：仅打包态注册协议并接管 open-url
-    // （debug 注册会把系统 `dsh:` 指向调试产物）。
-    #[cfg(not(debug_assertions))]
-    crate::desktop::deep_link::init(&app_handle);
-
-    // 开机自启动：已安装且开启 auto_start 时拉起服务
-    let app_for_start = app_handle.clone();
-    tauri::async_runtime::spawn(async move {
-        let setting = crate::config::get_store_dat_setting(&app_for_start);
-        if !setting.auto_start {
-            log::debug!("auto_start disabled, skipping startup");
-            return;
+            // 档案迁移 + 首装引导：官方核心 0.1.5 起 `desktop` 档案名被保留给 Electron
+            // 应用（`--profile desktop` 直接报错），先把老用户的 `profiles/desktop` 改名到
+            // `tauri` 并改指 `active_profile`，再在桌面端首次安装时新建独立档案并切换
+            // （与 CLI 用户既有插件/补丁隔离，见 service::profile）。必须先于 scheduler/
+            // auto_start：它们启动服务/装插件时会带上 active_profile，迁移完成前 dsh
+            // spawn 必然失败。
+            crate::service::profile::migrate_desktop_profile_name(&app_handle);
         }
-        let profile =
-            crate::service::workflow::instances::window_profile(&app_for_start, MAIN_WINDOW_LABEL);
-        if let Err(e) = crate::service::workflow::instances::scope(
-            profile,
-            crate::service::workflow::start(app_for_start),
-        )
-        .await
-        {
-            log::error!("start failed: {}", e);
-        }
-    });
 
-    // 命令行集成自愈：已安装且开启时，确保 shim 与 PATH 注册完整
-    // （shim 被删除、PATH 条目丢失等情况下自动重建）
-    tauri::async_runtime::spawn(async move {
-        let setting = crate::config::get_store_dat_setting(&app_handle);
-        if !setting.installed || !setting.cli_link_enabled {
-            return;
-        }
-        if let Err(e) = crate::service::cli::ensure(&app_handle) {
-            log::warn!("cli link self-heal failed: {e}");
-        }
+        // 启动进程监控（tick 检测 dsh 服务状态）
+        crate::service::workflow::instances::window_profile(&app_handle, MAIN_WINDOW_LABEL);
+        crate::service::scheduler::start(&app_handle);
+
+        // `dsh://` 深链（成功页「打开应用」按钮）：仅打包态注册协议并接管 open-url
+        // （debug 注册会把系统 `dsh:` 指向调试产物）。
+        #[cfg(not(debug_assertions))]
+        crate::desktop::deep_link::init(&app_handle);
+
+        // 开机自启动：已安装且开启 auto_start 时拉起服务
+        let app_for_start = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let setting = crate::config::get_store_dat_setting(&app_for_start);
+            if !setting.auto_start {
+                log::debug!("auto_start disabled, skipping startup");
+                return;
+            }
+            let profile = crate::service::workflow::instances::window_profile(
+                &app_for_start,
+                MAIN_WINDOW_LABEL,
+            );
+            if let Err(e) = crate::service::workflow::instances::scope(
+                profile,
+                crate::service::workflow::start(app_for_start),
+            )
+            .await
+            {
+                log::error!("start failed: {}", e);
+            }
+        });
+
+        // 命令行集成自愈：已安装且开启时，确保 shim 与 PATH 注册完整
+        // （shim 被删除、PATH 条目丢失等情况下自动重建）
+        tauri::async_runtime::spawn(async move {
+            let setting = crate::config::get_store_dat_setting(&app_handle);
+            if !setting.installed || !setting.cli_link_enabled {
+                return;
+            }
+            if let Err(e) = crate::service::cli::ensure(&app_handle) {
+                log::warn!("cli link self-heal failed: {e}");
+            }
+        });
     });
 }
 
@@ -1126,6 +1132,11 @@ pub fn build_main_window(app: &tauri::AppHandle<Wry>) -> tauri::Result<tauri::We
             log::info!("[notification] scheduling handler registration from setup");
             let webview_for_dialog = webview_window.clone();
             if let Err(e) = webview_window.with_webview(move |webview| {
+                if let Err(error) =
+                    crate::desktop::frontend_preload::install(&webview, &webview_for_dialog)
+                {
+                    log::warn!("FRONTEND_PRELOAD_UNAVAILABLE: {error}");
+                }
                 if let Err(e) = crate::desktop::notification::enable_notification_permissions(
                     webview,
                     webview_for_dialog,
@@ -1590,6 +1601,7 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::remove_core,
         crate::bridge::update_local_core,
         crate::bridge::proxy_health_check,
+        crate::desktop::frontend_preload::prepare_frontend_preload,
         crate::bridge::harness_ownership,
         crate::bridge::get_runtime_info,
         crate::bridge::runtime_ready,
@@ -1930,7 +1942,7 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
     // 因此开发环境跳过该插件。
     // `deep-link` feature 只在单例在场时起作用：把二次启动携带的 `dsh://` URL
     // （成功页「打开应用」按钮）转发给主实例派发 open-url。
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(windows), not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         crate::utils::show_main_window(app);
     }));

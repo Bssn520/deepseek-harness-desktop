@@ -19,6 +19,7 @@ pub fn patch_core_dir(core_dir: &std::path::Path) -> Result<(), String> {
 
 /// 应用入口：先做 Wayland 环境兼容，再初始化日志、装配桌面端并进入事件循环。
 pub fn run() -> Result<(), String> {
+    let started = std::time::Instant::now();
     desktop::startup::verify()?;
     // Wayland EGL workaround：仅 AppImage 需要（见 `should_apply_wayland_egl_workaround`）。
     if should_apply_wayland_egl_workaround(
@@ -58,15 +59,42 @@ pub fn run() -> Result<(), String> {
     }
     // 初始化日志系统
     logger::init();
+    log::info!(
+        "STARTUP_BOOT: name=logger_ready elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     // Unix：把持久化的 DSH_HOME 补回进程环境（issue #871）。必须在桌面端装配之前，
     // 否则首次 get_dsh_data_path 会落到默认目录，日志、store 与 shim 全部写错位置。
     service::data_dir::restore_process_env();
 
+    let context = tauri::generate_context!();
+    log::info!(
+        "STARTUP_BOOT: name=context_ready elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    #[cfg(all(windows, not(debug_assertions)))]
+    let single_instance = match desktop::single_instance::claim(&context.config().identifier)? {
+        Some(instance) => std::sync::Arc::new(instance),
+        None => return Ok(()),
+    };
+    let startup = service::workflow::early::Startup::begin(
+        &context,
+        #[cfg(all(windows, not(debug_assertions)))]
+        single_instance.clone(),
+    );
     desktop::builder()
         .invoke_handler(desktop::handler())
-        .build(tauri::generate_context!())
+        .build(context)
         .map_err(|error| format!("STARTUP_FAILED: {error}"))?
-        .run(|app_handle, event| match event {
+        .run(move |app_handle, event| match event {
+            tauri::RunEvent::Ready => {
+                startup.attach(app_handle);
+                #[cfg(all(windows, not(debug_assertions)))]
+                if let Err(error) = single_instance.attach(app_handle) {
+                    log::error!("SINGLE_INSTANCE_ATTACH_FAILED: {error}");
+                    app_handle.exit(1);
+                }
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::WindowEvent { event, .. } => {
                 desktop::builder::on_macos_titlebar_event(&event);
@@ -93,6 +121,7 @@ pub fn run() -> Result<(), String> {
             // 残留并把原生模块 DLL（如 sharp 的 libvips-42.dll）锁在内存，
             // 下次启动重新解压时会失败（Windows os error 32）
             tauri::RunEvent::Exit => {
+                startup.shutdown();
                 // 进行中的插件安装子进程是独立进程组，父进程退出不会连带回收；
                 // 不显式结束就会留下占着档案 / pnpm store 的孤儿，让下一次启动
                 // 永久卡在安装阶段（且日志无任何输出）。必须先于其它收尾动作。

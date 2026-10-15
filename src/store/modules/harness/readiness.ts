@@ -8,6 +8,8 @@ export type ReadinessTimeout = 'inactivity' | 'absolute'
 export interface ReadinessProbeResult {
   healthy: boolean
   notOwned: boolean
+  bootHtml?: string
+  bootOrigin?: string
   /**
    * 服务端口尚未被监听（本地门禁直接判定，探测几乎零成本）。
    *

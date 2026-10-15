@@ -80,10 +80,10 @@ export async function checkHealthViaProxy(): Promise<ReadinessProbeResult> {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('health check timeout')), 8000)
     })
-    const resultPromise = invoke<string>('proxy_health_check')
+    const resultPromise = invoke<string | { status: string, boot_html: string, service_url: string }>('proxy_health_check')
     const result = await Promise.race([resultPromise, timeoutPromise])
-
-    const lower = result.toLowerCase()
+    const status = typeof result === 'string' ? result : result.status
+    const lower = status.toLowerCase()
     if (lower.startsWith('healthy')) {
       // 正常路径不写日志：就绪轮询每 1s 成功一次，成功噪音只会盖住真正有用的
       // 失败重试行。
@@ -91,15 +91,16 @@ export async function checkHealthViaProxy(): Promise<ReadinessProbeResult> {
         healthy: true,
         notOwned: false,
         phase: 'client-modules',
-        reason: result,
+        reason: status,
+        ...(typeof result === 'string' ? {} : { bootHtml: result.boot_html, bootOrigin: result.service_url }),
       }
     }
-    console.warn('[Harness] health check returned:', result)
+    console.warn('[Harness] health check returned:', status)
     return {
       healthy: false,
       notOwned: false,
       phase: 'client-modules',
-      reason: result,
+      reason: status,
     }
   }
   catch (err) {

@@ -37,6 +37,19 @@ fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
 }
 
+pub(super) fn registration_gate() -> &'static Mutex<bool> {
+    static SHUTTING_DOWN: Mutex<bool> = Mutex::new(false);
+    &SHUTTING_DOWN
+}
+
+pub(crate) fn begin_shutdown() {
+    begin_shutdown_at(registration_gate());
+}
+
+pub(super) fn begin_shutdown_at(gate: &Mutex<bool>) {
+    *gate.lock().unwrap_or_else(|error| error.into_inner()) = true;
+}
+
 pub fn current_profile() -> Option<String> {
     PROFILE.try_with(Clone::clone).ok()
 }
@@ -117,15 +130,28 @@ pub fn attached_elsewhere(profile: &str, label: &str) -> bool {
 
 pub fn require_exclusive_profile() -> Result<(), String> {
     let profile = current_profile().unwrap_or_else(|| "web".into());
-    let registry = registry().lock().unwrap_or_else(|error| error.into_inner());
-    if registry.windows.values().any(|value| value != &profile)
-        || registry.instances.iter().any(|(id, instance)| {
-            id != &profile
-                && instance
-                    .process
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .is_some()
+    let _gate = registration_gate()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (foreign_window, instances) = {
+        let registry = registry().lock().unwrap_or_else(|error| error.into_inner());
+        (
+            registry.windows.values().any(|value| value != &profile),
+            registry
+                .instances
+                .iter()
+                .filter(|(id, _)| *id != &profile)
+                .map(|(_, instance)| Arc::clone(instance))
+                .collect::<Vec<_>>(),
+        )
+    };
+    if foreign_window
+        || instances.iter().any(|instance| {
+            instance
+                .process
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
         })
     {
         return Err("CORE_IN_USE: close windows using other profiles before changing shared core or data files".into());

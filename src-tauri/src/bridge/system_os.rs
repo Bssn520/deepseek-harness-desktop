@@ -15,7 +15,7 @@ use tauri_plugin_opener::OpenerExt;
 pub async fn proxy_health_check(
     window: tauri::WebviewWindow,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<crate::service::workflow::HealthCheck, String> {
     let profile = crate::service::workflow::instances::window_profile(&app_handle, window.label());
     crate::service::workflow::instances::scope(profile, async move {
         let port = crate::service::workflow::instances::port(&app_handle);
