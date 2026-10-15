@@ -90,6 +90,17 @@ jobs:
       - name: Test iOS signing guards without credentials
         run: python3 -m unittest discover -s .github/scripts -p 'test_ios_testflight.py' -v
 
+      - name: Install alpha.3 core for desktop admission regression
+        run: npm install --prefix "$RUNNER_TEMP/dsh-cli-admission" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-alpha.3
+
+      - name: Test desktop admission against alpha.3 gateway
+        env:
+          DSH_E2E_DSH_BIN: ${{ runner.temp }}/dsh-cli-admission/node_modules/@deepseek-ai/dsh/lib/bin.js
+        run: |
+          for seed in 301 302 303 304 305; do
+            node node_modules/vitest/vitest.mjs run --project unit packages/dsh-tauri/src/host/service/gate.runtime.test.ts --sequence.shuffle --sequence.seed="$seed" || exit $?
+          done
+
       - name: Type check sources before generating declarations
         run: pnpm run typecheck
 
