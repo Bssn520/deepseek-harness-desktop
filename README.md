@@ -164,17 +164,17 @@ Windows 启动失败时会通过原生对话框显示具体错误。若出现 `S
 
 ## 社区推荐
 
-- [dsh-tauri-notify-webhook](https://github.com/iuuuuuuuu/dsh-tauri-notify-webhook) - 任务异常停止或完成时把通知转发到 webhook、邮件（SMTP）或 pushplus by @iuuuuuuuu
-- [dsh-pdf-reader](https://github.com/SkanderBog/dsh-pdf-reader) - 按页 PDF 阅读、本地 OCR、引用、搜索和视觉裁剪 by @SkanderBog
-- [dsh-context-manager](https://github.com/SkanderBog/dsh-context-manager) - 应用前审阅上下文，并按完整历史组选择保留、总结或省略较早内容 by @SkanderBog
-- [@ryuu-64/dsh-find-all](https://github.com/Ryuu-64/dsh-find-all) - 在当前对话中按 Ctrl+F，查找已保存的历史内容 by @Ryuu-64
+- [dsh-tauri-notify-webhook](https://github.com/iuuuuuuuu/dsh-tauri-notify-webhook) — 任务异常停止或完成时把通知转发到 webhook、邮件（SMTP）或 pushplus by @iuuuuuuuu
+- [dsh-pdf-reader](https://github.com/SkanderBog/dsh-pdf-reader) — 按页 PDF 阅读、本地 OCR、引用、搜索和视觉裁剪 by @SkanderBog
+- [dsh-context-manager](https://github.com/SkanderBog/dsh-context-manager) — 应用前审阅上下文，并按完整历史组选择保留、总结或省略较早内容 by @SkanderBog
+- [@ryuu-64/dsh-find-all](https://github.com/Ryuu-64/dsh-find-all) — 在当前对话中按 Ctrl+F，查找已保存的历史内容 by @Ryuu-64
 
 ## 相关项目
 
 - [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — 上游 `dsh` agent 平台
 - [deepseek-harness-pkg](https://github.com/dsh-tauri/deepseek-harness-pkg) — 预打包 Harness 发行版与下载源
 - [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) · [dsh-pet-mov](https://github.com/dsh-tauri/dsh-pet-mov) · [dsh-pet-component](https://github.com/dsh-tauri/dsh-pet-component) — 桌宠素材与渲染组件
-- [dsh-plugin-codex-pets](https://github.com/Skylarking/dsh-plugin-codex-pets) · [BongoCat](https://github.com/ayangweb/BongoCat) · [dsh-dafeiyu](https://github.com/QCYTSN/dsh-dafeiyu) · [codex-to-dsh-pet](https://github.com/Signalight/codex-to-dsh-pet) — 桌宠参考项目
+- [dsh-plugin-codex-pets](https://github.com/Skylarking/dsh-plugin-codex-pets) · [BongoCat](https://github.com/ayangweb/BongoCat) · [dsh-dafeiyu](https://github.com/QCYTSN/dsh-dafeiyu) · [codex-to-dsh-pet](https://github.com/Signalight/codex-to-dsh-pet) · [dsh-pet-sticker](https://github.com/PC2005-cloud/dsh-pet-sticker) — 桌宠参考项目
 
 ## Contributors
 
