@@ -366,8 +366,6 @@ function main() {
     report()
     return
   }
-  if (manifest.kind !== undefined && manifest.kind !== 'codex')
-    fail('PET_MANIFEST_INVALID: kind must be dsh or codex')
 
   let declared
   if (manifest.spriteVersionNumber !== undefined && manifest.spriteVersionNumber !== null) {
