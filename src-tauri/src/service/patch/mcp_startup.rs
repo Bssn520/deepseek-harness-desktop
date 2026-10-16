@@ -23,7 +23,8 @@ fn patch_source(source: &str) -> PatchOutcome {
     if !source.contains(READY_ANCHOR)
         || !source.contains(TRANSPORT_ANCHOR)
         || !source.contains("function createTransport(config) {")
-        || !source.contains("transport = createTransport(config);")
+        || !(source.contains("transport = createTransport(config);")
+            || source.contains("generation.connect(createTransport(config));"))
         || !source.contains("const inject = [\"tools\"];")
     {
         return PatchOutcome::AnchorMissing;
@@ -42,6 +43,11 @@ fn patch_source(source: &str) -> PatchOutcome {
         .replacen(
             "transport = createTransport(config);",
             "transport = createTransport(config, ctx.credentials);",
+            1,
+        )
+        .replacen(
+            "generation.connect(createTransport(config));",
+            "generation.connect(createTransport(config, ctx.credentials));",
             1,
         )
         .replacen(
@@ -71,6 +77,18 @@ mod tests {
         std::fs::create_dir_all(core.path().join(MCP_INDEX_JS)).unwrap();
         let error = apply_at(core.path()).expect_err("unreadable MCP file must fail");
         assert!(error.starts_with("DSH_PATCH_READ:"));
+    }
+
+    #[test]
+    fn legacy_transport_receives_credentials_and_remains_idempotent() {
+        let source = format!("function createTransport(config) {{\n{TRANSPORT_ANCHOR}\n}}\ngeneration.connect(createTransport(config));\nconst inject = [\"tools\"];\n{READY_ANCHOR}");
+        let PatchOutcome::Patched(patched) = patch_source(&source) else {
+            panic!("expected legacy transport patch")
+        };
+        assert!(patched.contains("generation.connect(createTransport(config, ctx.credentials));"));
+        assert!(patched.contains(TRANSPORT_PATCHED));
+        assert!(patched.contains("const inject = [\"tools\", \"credentials\"];"));
+        assert_eq!(patch_source(&patched), PatchOutcome::AlreadyPatched);
     }
 
     #[test]
