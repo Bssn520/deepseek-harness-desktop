@@ -163,6 +163,13 @@ See the [English development guide](<./docs/DEVELOPMENT.md>) or [Chinese develop
 > [!NOTE]
 > **Security** — `dsh` can execute code locally. For learning / research / testing only; run it in a trusted, isolated environment.
 
+## Community Picks
+
+- [dsh-tauri-notify-webhook](https://github.com/iuuuuuuuu/dsh-tauri-notify-webhook) - Forward notifications to webhook, email (SMTP) or pushplus when a task stops abnormally or finishes by @iuuuuuuuu
+- [dsh-pdf-reader](https://github.com/SkanderBog/dsh-pdf-reader) - Page-by-page PDF reading, local OCR, citations, search and visual cropping by @SkanderBog
+- [dsh-context-manager](https://github.com/SkanderBog/dsh-context-manager) - Review context before applying, and choose per full-history group to keep, summarize or omit earlier content by @SkanderBog
+- [@ryuu-64/dsh-find-all](https://github.com/Ryuu-64/dsh-find-all) - Ctrl+F in the current conversation to find saved history by @Ryuu-64
+
 ## Related
 
 - [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — upstream `dsh` agent platform

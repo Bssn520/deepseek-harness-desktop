@@ -162,6 +162,13 @@ Windows 启动失败时会通过原生对话框显示具体错误。若出现 `S
 > [!NOTE]
 > **安全声明** — `dsh` 具备本地代码执行能力。仅供学习 / 研究 / 测试，请在可信、隔离的环境中使用。
 
+## 社区推荐
+
+- [dsh-tauri-notify-webhook](https://github.com/iuuuuuuuu/dsh-tauri-notify-webhook) - 任务异常停止或完成时把通知转发到 webhook、邮件（SMTP）或 pushplus by @iuuuuuuuu
+- [dsh-pdf-reader](https://github.com/SkanderBog/dsh-pdf-reader) - 按页 PDF 阅读、本地 OCR、引用、搜索和视觉裁剪 by @SkanderBog
+- [dsh-context-manager](https://github.com/SkanderBog/dsh-context-manager) - 应用前审阅上下文，并按完整历史组选择保留、总结或省略较早内容 by @SkanderBog
+- [@ryuu-64/dsh-find-all](https://github.com/Ryuu-64/dsh-find-all) - 在当前对话中按 Ctrl+F，查找已保存的历史内容 by @Ryuu-64
+
 ## 相关项目
 
 - [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — 上游 `dsh` agent 平台
