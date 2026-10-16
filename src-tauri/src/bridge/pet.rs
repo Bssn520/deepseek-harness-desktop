@@ -855,9 +855,6 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<PetManifest, String> {
         }
     }
     match manifest.kind.as_deref() {
-        None | Some("codex") => {
-            safe_relative_path(&manifest.spritesheet_path)?;
-        }
         Some("dsh") => {
             for path in [
                 manifest.config_path.as_deref(),
@@ -895,7 +892,10 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<PetManifest, String> {
                 return Err("PET_MANIFEST_INVALID: size must be within 0..=4096".to_string());
             }
         }
-        _ => return Err("PET_MANIFEST_INVALID: kind must be dsh or codex".to_string()),
+        // 图集宠物不认 `kind`：外部生态用它标注宠物类别（如 person/pet），只以 `spritesheetPath` 为准。
+        _ => {
+            safe_relative_path(&manifest.spritesheet_path)?;
+        }
     }
     Ok(manifest)
 }
@@ -2754,6 +2754,34 @@ mod tests {
             webp
         );
         assert!(!directory.0.join("wrapper").exists());
+    }
+
+    #[test]
+    fn extraction_accepts_codex_manifest_with_unrecognized_kind() {
+        // 外部生成的 Codex 宠物会用 `kind` 标注自己的类别（如 person/pet），导入只认图集路径，
+        // 新增的白名单把这些宠物全部挡在门外。
+        let manifest = br#"{"id":"ene","kind":"person","spriteVersionNumber":2,"spritesheetPath":"spritesheet.webp"}"#;
+        let webp = valid_test_webp();
+        let archive = build_archive(&[
+            ("ene.codex-pet/pet.json", manifest),
+            ("ene.codex-pet/spritesheet.webp", &webp),
+        ]);
+        let directory = TestDirectory::new("unknown-kind");
+        let parsed = extract_pet_archive(&archive, &directory.0).unwrap();
+        assert_eq!(parsed.id, "ene");
+        assert_eq!(parsed.kind.as_deref(), Some("person"));
+
+        let installed = read_manifest(&directory.0).unwrap();
+        validate_pet_source(PetSource::Codex, &installed).unwrap();
+        let item = manifest_to_list_item(PetSource::Codex, &directory.0, installed);
+        assert_eq!(item.id, "codex:ene");
+        assert_eq!(item.source, "codex");
+        assert_eq!(item.kind, "codex");
+        assert_eq!(item.thumbnail_type, "spritesheet");
+        assert!(item
+            .thumbnail
+            .unwrap()
+            .starts_with("data:image/webp;base64,"));
     }
 
     #[test]

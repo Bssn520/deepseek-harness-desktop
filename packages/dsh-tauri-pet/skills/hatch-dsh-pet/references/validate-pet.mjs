@@ -356,7 +356,7 @@ function main() {
   }
 
   checkId(manifest.id)
-  for (const field of ['displayName', 'description']) {
+  for (const field of ['displayName', 'description', 'kind']) {
     if (manifest[field] !== undefined && manifest[field] !== null && typeof manifest[field] !== 'string')
       fail(`PET_MANIFEST_INVALID: ${field} must be a string`)
   }
@@ -366,8 +366,6 @@ function main() {
     report()
     return
   }
-  if (manifest.kind !== undefined && manifest.kind !== 'codex')
-    fail('PET_MANIFEST_INVALID: kind must be dsh or codex')
 
   let declared
   if (manifest.spriteVersionNumber !== undefined && manifest.spriteVersionNumber !== null) {
