@@ -510,9 +510,6 @@ const TAILWINDCSS_GENERATED = `
   .w-\\[min\\(760px\\,100\\%\\)\\]\\! {
     width: min(760px, 100%) !important;
   }
-  .w-\\[min\\(calc\\(var\\(--dsh-composer-card-max-width\\)_\\+_2_\\*_var\\(--dsh-composer-side-clearance\\)\\)\\,100\\%\\)\\] {
-    width: min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)), 100%);
-  }
   .w-\\[var\\(--dsh-settings-rail-width\\)\\] {
     width: var(--dsh-settings-rail-width);
   }
@@ -1565,15 +1562,6 @@ const TAILWINDCSS_GENERATED = `
   }
   .\\[--detail-gutter\\:24px\\] {
     --detail-gutter: 24px;
-  }
-  .\\[--dsh-chat-content-width\\:748px\\] {
-    --dsh-chat-content-width: 748px;
-  }
-  .\\[--dsh-composer-card-max-width\\:calc\\(var\\(--dsh-chat-content-width\\)_\\+_32px\\)\\] {
-    --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
-  }
-  .\\[--dsh-composer-side-clearance\\:16px\\] {
-    --dsh-composer-side-clearance: 16px;
   }
   .\\[--dsh-scrollbar-thumb-border\\:2px\\] {
     --dsh-scrollbar-thumb-border: 2px;
