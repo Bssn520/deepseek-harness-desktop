@@ -75,6 +75,8 @@ export function desktopMcpOAuth(sdk, credentials) {
           let locked = current?.payload ?? {}
           if (!locked.tokens?.refresh_token || locked.expiresAt === undefined || locked.expiresAt > Date.now() + 30000)
             return undefined
+          if (!locked.clientInformation)
+            throw new sdk.UnauthorizedError('MCP authorization required')
           const transaction = make(async () => locked, async (update) => {
             locked = update(locked)
           }, false)
@@ -102,6 +104,8 @@ export function desktopMcpOAuth(sdk, credentials) {
           let locked = current?.payload ?? {}
           if (locked.tokens?.access_token && locked.tokens.access_token !== sentToken)
             return undefined
+          if (!locked.tokens?.refresh_token || !locked.clientInformation)
+            throw new sdk.UnauthorizedError('MCP authorization required')
           const transaction = make(async () => locked, async (update) => {
             locked = update(locked)
           }, false)

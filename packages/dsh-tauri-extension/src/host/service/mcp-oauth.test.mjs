@@ -66,7 +66,7 @@ function sdk() {
 }
 
 it('refreshes rotating tokens under one credential lock and isolates endpoint identities', async () => {
-  const store = credentials({ tokens: { access_token: 'expired', refresh_token: 'rotate-once' }, expiresAt: 0 })
+  const store = credentials({ clientInformation: { client_id: 'desktop' }, tokens: { access_token: 'expired', refresh_token: 'rotate-once' }, expiresAt: 0 })
   const apiSdk = sdk()
   apiSdk.auth.mockImplementation(async (provider) => {
     expect((await provider.tokens()).refresh_token).toBe('rotate-once')
@@ -119,6 +119,14 @@ it.each([401, 405, 500])('http %i never reports connected and only 401 requests 
   const result = await desktopMcpOAuth(apiSdk, credentials()).check(row)
   expect(result).toEqual({ ok: false, detail: status === 401 ? 'MCP authorization required' : `MCP initialization failed (HTTP ${status})`, ...(status === 401 ? { requiresAuth: true } : {}) })
   expect(request).toHaveBeenCalledWith(new URL(row.url), expect.objectContaining({ method: 'POST', headers: row.headers }))
+})
+
+it.each([{}, { tokens: { access_token: 'manual' } }, { tokens: { access_token: 'expired', refresh_token: 'rotate' } }])('silent unauthorized probes do not register OAuth clients without a refresh grant', async (record) => {
+  const apiSdk = sdk()
+  const provider = desktopMcpOAuth(apiSdk, credentials(record)).provider(row)
+  await provider.token()
+  await expect(provider.onUnauthorized({ response: new Response(null, { status: 401 }) })).rejects.toThrow('MCP authorization required')
+  expect(apiSdk.auth).not.toHaveBeenCalled()
 })
 
 it('does not mark OAuth complete when post-authorization initialization fails', async () => {
