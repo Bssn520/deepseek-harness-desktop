@@ -2770,6 +2770,18 @@ mod tests {
         let parsed = extract_pet_archive(&archive, &directory.0).unwrap();
         assert_eq!(parsed.id, "ene");
         assert_eq!(parsed.kind.as_deref(), Some("person"));
+
+        let installed = read_manifest(&directory.0).unwrap();
+        validate_pet_source(PetSource::Codex, &installed).unwrap();
+        let item = manifest_to_list_item(PetSource::Codex, &directory.0, installed);
+        assert_eq!(item.id, "codex:ene");
+        assert_eq!(item.source, "codex");
+        assert_eq!(item.kind, "codex");
+        assert_eq!(item.thumbnail_type, "spritesheet");
+        assert!(item
+            .thumbnail
+            .unwrap()
+            .starts_with("data:image/webp;base64,"));
     }
 
     #[test]
