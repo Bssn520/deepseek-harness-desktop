@@ -36,7 +36,7 @@ use super::process::is_process_cleanup_failure;
 /// 命中条件：插件被 profile 清单引用（`dependencies` 键或 `dsh.profile.bundles`
 /// 列表，按实际 npm 包名 `installed_name`），但其包目录在 `node_modules` 下
 /// 缺少 `package.json`（目录不存在、被删、或只是残壳都不算就绪）。
-fn missing_plugin_ids(
+pub(super) fn missing_plugin_ids(
     presets: &[PreinstallPluginInfo],
     dependencies: &HashMap<String, String>,
     bundles: &[String],

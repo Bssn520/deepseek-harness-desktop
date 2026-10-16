@@ -22,6 +22,7 @@ vi.mock('@reause/core', () => ({
   useEventListener: vi.fn(),
   useWatch: vi.fn(),
   useTimeoutFn: () => ({ start: vi.fn(), stop: vi.fn() }),
+  useUnmountedRef: () => ({ current: false }),
 }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock('valtio-define', () => ({ useStore: (value: unknown) => value }))

@@ -6,6 +6,7 @@
 use crate::config;
 use std::fs;
 #[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::Path;
 use std::process::Command;
 #[cfg(windows)]
@@ -43,13 +44,11 @@ pub(crate) fn launch_guard() -> Arc<AtomicBool> {
 /// 「PID 清空」与「句柄关闭」之间不存在跨原子竞态（WARN-6）。历史上 PID/句柄
 /// 分两个 `Atomic*` 存储，`stop` 读 PID 与监视线程清句柄之间有微窗口可能导致
 /// 漏杀或重复 close。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct OwnedProcess {
     pub(super) pid: u32,
-    /// Windows 进程句柄（原始 HANDLE 转 usize 存储，避免 `*mut c_void` 非 Send）。
-    /// 只在 Windows 存在；Unix 无句柄概念。
     #[cfg(windows)]
-    pub(super) handle: usize,
+    pub(super) handle: Arc<OwnedHandle>,
 }
 
 /// 本次启动是否已按 dsh 入口路径清扫过历史残留。
@@ -70,31 +69,42 @@ pub(super) fn retry_startup_sweep() {
     STARTUP_SWEEP_DONE.store(false, Ordering::SeqCst);
 }
 
-/// 记录新持有的 Harness 根进程（Unix，启动成功后调用）。
-#[cfg(not(windows))]
-pub(super) fn set_owned_process(pid: u32) {
-    let instance = super::instances::instance();
-    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(OwnedProcess { pid });
+pub(super) fn register_owned_process<T>(
+    previous_pid: Option<u32>,
+    spawn: impl FnOnce() -> Result<(OwnedProcess, T), String>,
+) -> Result<Option<T>, String> {
+    register_owned_process_at(
+        &super::instances::instance(),
+        super::instances::registration_gate(),
+        previous_pid,
+        spawn,
+    )
 }
 
-/// 若调用方 owns 该进程（Windows 额外存句柄），记录之。
-#[cfg(windows)]
-pub(super) fn set_owned_process_with_handle(pid: u32, handle: usize) {
-    let instance = super::instances::instance();
+fn register_owned_process_at<T>(
+    instance: &super::instances::Instance,
+    shutdown: &std::sync::Mutex<bool>,
+    previous_pid: Option<u32>,
+    spawn: impl FnOnce() -> Result<(OwnedProcess, T), String>,
+) -> Result<Option<T>, String> {
+    let shutdown = shutdown.lock().unwrap_or_else(|error| error.into_inner());
     let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(OwnedProcess { pid, handle });
-    // 本应用此后持有自己的 Harness：再次启动前必须重新确认没有残留
+    if *shutdown
+        || !instance.launching.load(Ordering::SeqCst)
+        || guard.as_ref().map(|process| process.pid) != previous_pid
+    {
+        return Ok(None);
+    }
+    let (owned, value) = spawn()?;
+    *guard = Some(owned);
+    Ok(Some(value))
 }
 
-/// 原子取出持有的进程（PID+句柄一起）。取走者负责关闭 Windows 句柄；
-/// 无条件取出（停止/退出路径）。
 fn take_owned_process() -> Option<OwnedProcess> {
-    crate::service::workflow::instances::instance()
-        .process
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
+    let instance = super::instances::instance();
+    let mut guard = instance.process.lock().unwrap_or_else(|e| e.into_inner());
+    instance.launching.store(false, Ordering::SeqCst);
+    guard.take()
 }
 
 /// 纯函数部分：便于单测，不触碰全局状态。
@@ -109,11 +119,11 @@ fn take_owned_process_if_matching(
     }
 }
 
-pub(crate) struct LaunchGuard;
+pub(crate) struct LaunchGuard(pub(super) Arc<AtomicBool>);
 
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
-        launch_guard().store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -175,13 +185,23 @@ pub fn owned_process_pid() -> Option<u32> {
 /// - 匹配成功后无条件回落到 Stopped——进程可能在 Starting 或 Running 阶段
 ///   退出，任何情况下都不能继续广播一个已经失效的运行状态（WARN-5）。
 ///
-/// 返回被取出的进程记录（含 Windows 句柄），取到者负责 `CloseHandle`——保证
-/// 「取走进程」与「关闭句柄」同属一个调用者，杜绝重复 close。幂等：多次调用
-/// （tick 与监视线程并发）只会生效一次，后续调用返回 None。
+/// 幂等：多次调用只会生效一次，后续调用返回 None。
+#[cfg(test)]
 pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     pid: u32,
     exit_code: impl FnOnce(&OwnedProcess) -> Option<i64>,
+) -> Option<OwnedProcess> {
+    on_owned_process_exit_at(pid, exit_code, |payload| {
+        status::emit_status(app_handle);
+        super::instances::emit(app_handle, HARNESS_PROCESS_EXITED_EVENT, payload);
+    })
+}
+
+pub(super) fn on_owned_process_exit_at(
+    pid: u32,
+    exit_code: impl FnOnce(&OwnedProcess) -> Option<i64>,
+    notify: impl FnOnce(HarnessProcessExitedPayload),
 ) -> Option<OwnedProcess> {
     let (owned, exit_code) = {
         let instance = super::instances::instance();
@@ -192,6 +212,10 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
         let owned = take_owned_process_if_matching(&mut guard, pid)?;
         // issue #1075：报告路径落盘前不让健康探测观察到 ownership 丢失。
         let exit_code = exit_code(&owned);
+        *instance
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = status::Status::Stopped;
         (owned, exit_code)
     };
 
@@ -215,13 +239,10 @@ pub(super) fn on_owned_process_exit<R: tauri::Runtime>(
         );
     }
 
-    status::set_status(status::Status::Stopped);
-    status::emit_status(app_handle);
-    let payload = HarnessProcessExitedPayload {
+    notify(HarnessProcessExitedPayload {
         pid: owned.pid,
         exit_code,
-    };
-    super::instances::emit(app_handle, HARNESS_PROCESS_EXITED_EVENT, payload);
+    });
     Some(owned)
 }
 
@@ -237,13 +258,10 @@ fn terminate_owned_process() -> Result<bool, ()> {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        let handle = owned.handle as windows_sys::Win32::Foundation::HANDLE;
-        if handle.is_null() {
-            return Err(());
-        }
+        let handle = owned.handle.as_raw_handle();
         if let Err(error) = terminate_windows_process(owned.pid, handle, kill_pid_tree) {
             log::error!("{error}");
+            log::error!("Harness process {} is still running after stop", owned.pid);
             let instance = super::instances::instance();
             let mut guard = instance
                 .process
@@ -251,13 +269,9 @@ fn terminate_owned_process() -> Result<bool, ()> {
                 .unwrap_or_else(|error| error.into_inner());
             if guard.is_none() {
                 *guard = Some(owned);
-            } else {
-                unsafe { CloseHandle(handle) };
             }
-            log::error!("Harness process {} is still running after stop", owned.pid);
             return Err(());
         }
-        unsafe { CloseHandle(handle) };
     }
 
     #[cfg(unix)]
@@ -390,60 +404,216 @@ fn is_windows_harness_command_line(cmdline: &str, dsh_bin: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn windows_process_snapshot(target_pid: Option<u32>) -> Result<Vec<u8>, String> {
-    use std::os::windows::process::CommandExt;
-    // 候选进程连同其上方仍活着的祖先一起上报：垫片转发链是否孤儿，只有整条链能判断。
-    // 祖先链被层数上限截断时单独标记，调用方据此放弃清扫（上方仍可能有持有者）。
-    let script = r#"$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-try {
-  $all = Get-CimInstance Win32_Process
-  $byPid = @{}
-  foreach ($process in $all) { $byPid[$process.ProcessId] = $process }
-  foreach ($child in $all) {
-    if (-not $child.CommandLine -or -not $child.CommandLine.Contains('--no-open')) { continue }
-    $ancestors = @()
-    $parent = $byPid[$child.ParentProcessId]
-    for ($depth = 0; $depth -lt 8; $depth++) {
-      if (-not $parent) { break }
-      $ancestorCreated = 0
-      if ($parent.CreationDate) { $ancestorCreated = $parent.CreationDate.ToFileTimeUtc() }
-      $ancestors += [pscustomobject]@{ pid = $parent.ProcessId; name = $parent.Name; created = $ancestorCreated; commandLine = $parent.CommandLine }
-      $parent = $byPid[$parent.ParentProcessId]
-    }
-    $childCreated = 0
-    if ($child.CreationDate) { $childCreated = $child.CreationDate.ToFileTimeUtc() }
-    [pscustomobject]@{ pid = $child.ProcessId; created = $childCreated; commandLine = $child.CommandLine; ancestors = $ancestors; ancestorsTruncated = ($null -ne $parent) } | ConvertTo-Json -Compress -Depth 4
-  }
-} catch { Write-Error $_; exit 1 }"#;
-    let script = match target_pid {
-        Some(pid) => script.replace("if (-not $child.CommandLine -or -not $child.CommandLine.Contains('--no-open')) { continue }", &format!("if ($child.ProcessId -ne {pid}) {{ continue }}")),
-        None => script.to_string(),
-    };
-    let output = match Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .creation_flags(0x08000000)
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            log::warn!(
-                "Failed to enumerate orphan Harness processes: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Err("HARNESS_SWEEP_FAILED: process enumeration failed".to_string());
-        }
-        Err(error) => {
-            return Err(format!(
-                "HARNESS_SWEEP_FAILED: process enumeration failed: {error}"
-            ));
-        }
-    };
-    Ok(output.stdout)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WindowsCommandLine {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u16,
 }
 
 #[cfg(windows)]
-fn terminate_stale_harness_processes_at(dsh_bin: &Path) -> Result<(), String> {
+fn decode_windows_command_line(buffer: &[usize], returned: usize) -> Option<String> {
+    let header = std::mem::size_of::<WindowsCommandLine>();
+    if returned < header || returned > std::mem::size_of_val(buffer) {
+        return None;
+    }
+    let command = unsafe { std::ptr::read(buffer.as_ptr().cast::<WindowsCommandLine>()) };
+    let base = buffer.as_ptr() as usize;
+    let start = command.buffer as usize;
+    if command.length % 2 != 0
+        || command.maximum_length % 2 != 0
+        || command.length > command.maximum_length
+        || start % std::mem::align_of::<u16>() != 0
+        || start < base.checked_add(header)?
+        || start.checked_add(usize::from(command.maximum_length))? > base.checked_add(returned)?
+    {
+        return None;
+    }
+    let units = unsafe {
+        std::slice::from_raw_parts(
+            buffer.as_ptr().cast::<u16>().add((start - base) / 2),
+            usize::from(command.length) / 2,
+        )
+    };
+    if units.contains(&0) {
+        return None;
+    }
+    String::from_utf16(units).ok()
+}
+
+#[cfg(windows)]
+fn windows_process_snapshot(target_pid: Option<u32>) -> Result<Vec<u8>, String> {
+    use std::collections::HashMap;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_MORE_FILES, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    type QueryProcess =
+        unsafe extern "system" fn(HANDLE, u32, *mut std::ffi::c_void, u32, *mut u32) -> i32;
+    let module_name: Vec<_> = "ntdll.dll".encode_utf16().chain(Some(0)).collect();
+    let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+    if module.is_null() {
+        return Err("HARNESS_SWEEP_FAILED: process query unavailable".to_string());
+    }
+    let query: QueryProcess = unsafe {
+        std::mem::transmute(
+            GetProcAddress(module, b"NtQueryInformationProcess\0".as_ptr())
+                .ok_or("HARNESS_SWEEP_FAILED: process query unavailable")?,
+        )
+    };
+    let mut sampled: FILETIME = unsafe { std::mem::zeroed() };
+    // Toolhelp 不记录创建时间：快照开始后才创建的 PID 可能已复用旧父链。
+    unsafe { GetSystemTimePreciseAsFileTime(&mut sampled) };
+    let sampled = u64::from(sampled.dwHighDateTime) << 32 | u64::from(sampled.dwLowDateTime);
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "HARNESS_SWEEP_FAILED: process enumeration failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut processes = HashMap::new();
+    let mut present = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+    loop {
+        if present == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                return Err(format!(
+                    "HARNESS_SWEEP_FAILED: process enumeration failed: {error}"
+                ));
+            }
+            break;
+        }
+        let length = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        processes.insert(
+            entry.th32ProcessID,
+            (
+                entry.th32ParentProcessID,
+                WindowsProcessAncestor {
+                    pid: entry.th32ProcessID,
+                    created: 0,
+                    name: String::from_utf16(&entry.szExeFile[..length]).unwrap_or_default(),
+                    command_line: None,
+                },
+            ),
+        );
+        present = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+    }
+    for (_, process) in processes.values_mut() {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process.pid) };
+        if handle.is_null() {
+            continue;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+        let mut exit = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        if unsafe {
+            GetProcessTimes(
+                handle.as_raw_handle(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        } == 0
+        {
+            continue;
+        }
+        let created = u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime);
+        if created == 0 || created > sampled {
+            continue;
+        }
+        process.created = created;
+        let mut needed = 0;
+        let status = unsafe {
+            query(
+                handle.as_raw_handle(),
+                60,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        if ![0xc0000004u32 as i32, 0xc0000023u32 as i32].contains(&status)
+            || (needed as usize) < std::mem::size_of::<WindowsCommandLine>()
+            || (needed as usize) > std::mem::size_of::<WindowsCommandLine>() + usize::from(u16::MAX)
+        {
+            continue;
+        }
+        let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+        let mut returned = 0;
+        if unsafe {
+            query(
+                handle.as_raw_handle(),
+                60,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &mut returned,
+            )
+        } < 0
+            || returned > needed
+        {
+            continue;
+        }
+        process.command_line = decode_windows_command_line(&buffer, returned as usize);
+    }
+    let mut output = Vec::new();
+    for (&pid, (parent, process)) in &processes {
+        if target_pid.is_some_and(|target| target != pid) {
+            continue;
+        }
+        let Some(command_line) = &process.command_line else {
+            continue;
+        };
+        if target_pid.is_none() && !command_line.contains("--no-open") {
+            continue;
+        }
+        let mut next = *parent;
+        let mut ancestors = Vec::new();
+        for _ in 0..8 {
+            let Some((parent, ancestor)) = processes.get(&next) else {
+                break;
+            };
+            ancestors.push(ancestor.clone());
+            next = *parent;
+        }
+        let entry = WindowsProcessEntry {
+            pid,
+            created: process.created,
+            command_line: command_line.clone(),
+            ancestors,
+            ancestors_truncated: processes.contains_key(&next),
+        };
+        serde_json::to_writer(&mut output, &entry).map_err(|error| {
+            format!("HARNESS_SWEEP_FAILED: process snapshot serialization failed: {error}")
+        })?;
+        output.push(b'\n');
+    }
+    Ok(output)
+}
+
+#[cfg(windows)]
+pub(super) fn terminate_stale_harness_processes_at(dsh_bin: &Path) -> Result<(), String> {
     let output = windows_process_snapshot(None)?;
     let dsh_bin = dsh_bin
         .to_str()
@@ -533,7 +703,7 @@ fn terminate_confirmed_process(pid: u32, created: u64) -> Result<bool, String> {
 }
 
 #[cfg(windows)]
-fn terminate_windows_process(
+pub(super) fn terminate_windows_process(
     pid: u32,
     handle: windows_sys::Win32::Foundation::HANDLE,
     kill_tree: impl FnOnce(u32),
@@ -631,7 +801,7 @@ pub(super) fn reclaim_orphan_port(dsh_bin: &Path, port: u16) -> Result<bool, Str
 }
 
 #[cfg(windows)]
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct WindowsProcessEntry {
     pid: u32,
     created: u64,
@@ -644,7 +814,7 @@ struct WindowsProcessEntry {
 }
 
 #[cfg(windows)]
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct WindowsProcessAncestor {
     pid: u32,
     created: u64,
@@ -865,6 +1035,19 @@ pub async fn stop(app_handle: tauri::AppHandle) -> Result<(), String> {
 /// 但内核回收监听套接字仍有短暂滞后，故结束过进程后补一次有界等待，让紧随其后的
 /// 安装器/新实例看到端口已释放。没持有进程时不等待，避免在用户可见路径上白耗。
 fn stop_instance_for_installer(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    stop_instance_at(
+        &harness_pid_path(app_handle),
+        super::instances::port(app_handle),
+        #[cfg(windows)]
+        &crate::service::core::active_dsh_binary(app_handle),
+    )
+}
+
+pub(super) fn stop_instance_at(
+    pid_path: &Path,
+    port: u16,
+    #[cfg(windows)] entry: &Path,
+) -> Result<(), String> {
     let terminated = terminate_owned_process()
         .map_err(|()| "STOP_FAILED: Harness process did not stop".to_string())?;
     #[cfg(not(windows))]
@@ -873,13 +1056,11 @@ fn stop_instance_for_installer(app_handle: &tauri::AppHandle) -> Result<(), Stri
     }
     #[cfg(windows)]
     let _ = terminated;
-    // 正常停止路径同样清理清扫标记（崩溃路径才需要下次启动清扫）
-    let _ = fs::remove_file(harness_pid_path(app_handle));
-    let port = super::instances::port(app_handle);
+    let _ = fs::remove_file(pid_path);
     if !wait_for_port_release(port, PORT_RELEASE_WAIT) {
         #[cfg(windows)]
         {
-            reclaim_orphan_port(&crate::service::core::active_dsh_binary(app_handle), port)?;
+            reclaim_orphan_port(entry, port)?;
         }
     }
     log::info!("Harness stopped for installer handoff");
@@ -907,6 +1088,7 @@ pub fn stop_for_installer(app_handle: &tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn stop_on_exit(app_handle: &tauri::AppHandle) {
+    super::instances::begin_shutdown();
     if let Err(error) = stop_for_installer(app_handle) {
         log::error!("Harness exit cleanup failed: {error}");
     }
@@ -950,6 +1132,54 @@ mod tests {
     }
 
     #[test]
+    fn stop_instance_without_app_cancels_an_unowned_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("harness.pid");
+        fs::write(&marker, "stale marker").unwrap();
+        super::super::instances::scope_sync("stop-without-app-test".into(), || {
+            launch_guard().store(true, Ordering::SeqCst);
+            assert!(!has_owned_process());
+            assert_eq!(
+                stop_instance_at(
+                    &marker,
+                    0,
+                    #[cfg(windows)]
+                    &root.path().join("entry.js"),
+                ),
+                Ok(())
+            );
+            assert!(!launch_guard().load(Ordering::SeqCst));
+            assert!(!has_owned_process());
+        });
+        assert_eq!(marker.exists(), !cfg!(windows));
+    }
+
+    #[test]
+    fn exit_closes_registration_before_stop_but_installer_keeps_restarts_available() {
+        let source = include_str!("process.rs");
+        let exit = source
+            .split("pub fn stop_on_exit(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            exit.find("super::instances::begin_shutdown();").unwrap()
+                < exit.find("stop_for_installer(app_handle)").unwrap()
+        );
+        let installer = source
+            .split("fn stop_instance_for_installer(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn stop_on_exit(")
+            .next()
+            .unwrap();
+        assert!(installer.contains("stop_instance_at("));
+        assert!(!installer.contains("begin_shutdown"));
+    }
+
+    #[test]
     fn orphan_port_reclaim_preserves_every_registered_profile_process() {
         let source = include_str!("process.rs");
         let reclaim = source
@@ -970,7 +1200,15 @@ mod tests {
     /// 构造一个测试用 `OwnedProcess`（跨平台处理 Windows 句柄字段）。
     #[cfg(windows)]
     fn test_owned(pid: u32) -> OwnedProcess {
-        OwnedProcess { pid, handle: 0 }
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        assert!(!handle.is_null(), "{}", std::io::Error::last_os_error());
+        OwnedProcess {
+            pid,
+            handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }),
+        }
     }
     #[cfg(not(windows))]
     fn test_owned(pid: u32) -> OwnedProcess {
@@ -1003,13 +1241,12 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        let profile = "exit-diagnostics-test";
         let app = tauri::test::mock_app();
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("fatal-report.log");
-        *crate::service::workflow::instances::instance()
-            .process
-            .lock()
-            .unwrap() = Some(test_owned(42));
+        let instance = super::super::instances::instance_of(profile);
+        *instance.process.lock().unwrap() = Some(test_owned(42));
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let timeout = Duration::from_secs(5);
@@ -1018,28 +1255,230 @@ mod tests {
             let callback_marker = marker.clone();
             let handle = app.handle().clone();
             let exit = scope.spawn(move || {
-                on_owned_process_exit(&handle, 42, |_| {
-                    entered_tx.send(()).unwrap();
-                    resume_rx.recv_timeout(timeout).unwrap();
-                    fs::write(callback_marker, "ERROR HARNESS_FATAL_REPORT: fatal.json\n").unwrap();
-                    Some(1)
+                super::super::instances::scope_sync(profile.into(), || {
+                    on_owned_process_exit(&handle, 42, |_| {
+                        entered_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(timeout).unwrap();
+                        fs::write(callback_marker, "ERROR HARNESS_FATAL_REPORT: fatal.json\n")
+                            .unwrap();
+                        Some(1)
+                    })
                 })
             });
             entered_rx.recv_timeout(timeout).unwrap();
             let callback_holds_ownership = matches!(
-                crate::service::workflow::instances::instance()
-                    .process
-                    .try_lock(),
+                instance.process.try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
             );
             let observer = scope.spawn(|| {
-                let owned = has_owned_process();
-                (owned, marker.is_file())
+                super::super::instances::scope_sync(profile.into(), || {
+                    (has_owned_process(), marker.is_file())
+                })
             });
             resume_tx.send(()).unwrap();
             assert_eq!(exit.join().unwrap().map(|owned| owned.pid), Some(42));
             assert!(callback_holds_ownership);
             assert_eq!(observer.join().unwrap(), (false, true));
+        });
+    }
+
+    #[test]
+    fn registration_rejects_cancelled_launch_and_replaces_only_expected_pid() {
+        super::super::instances::scope_sync("registration-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            assert!(take_owned_process().is_none());
+            assert!(!launching.load(Ordering::SeqCst));
+            assert!(
+                register_owned_process::<()>(None, || panic!("cancelled spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), None);
+
+            launching.store(true, Ordering::SeqCst);
+            assert_eq!(
+                register_owned_process(None, || Ok((test_owned(41), 41))).unwrap(),
+                Some(41)
+            );
+            assert_eq!(
+                register_owned_process(Some(41), || Ok((test_owned(42), 42))).unwrap(),
+                Some(42)
+            );
+            assert!(
+                register_owned_process::<()>(Some(41), || panic!("stale retry spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(
+                register_owned_process::<()>(Some(42), || Err("spawn failed".into())).unwrap_err(),
+                "spawn failed"
+            );
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(take_owned_process().map(|owned| owned.pid), Some(42));
+            assert!(
+                register_owned_process::<()>(Some(42), || panic!("cancelled retry spawn"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(owned_process_pid(), None);
+        });
+    }
+
+    #[test]
+    fn shutdown_gate_rejects_every_profile_after_inflight_registration() {
+        use std::sync::{mpsc, Mutex, TryLockError};
+        use std::time::Duration;
+
+        let shutdown = Mutex::new(false);
+        let first = super::super::instances::Instance::default();
+        let second = super::super::instances::Instance::default();
+        first.launching.store(true, Ordering::SeqCst);
+        second.launching.store(true, Ordering::SeqCst);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let timeout = Duration::from_secs(5);
+        std::thread::scope(|scope| {
+            let first = &first;
+            let shutdown = &shutdown;
+            let registration = scope.spawn(move || {
+                register_owned_process_at(first, shutdown, None, || {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(timeout).unwrap();
+                    Ok((test_owned(41), 41))
+                })
+            });
+            entered_rx.recv_timeout(timeout).unwrap();
+            let holds_gate = matches!(shutdown.try_lock(), Err(TryLockError::WouldBlock));
+            let holds_slot = matches!(first.process.try_lock(), Err(TryLockError::WouldBlock));
+            let shutdown_thread = scope.spawn(move || {
+                super::super::instances::begin_shutdown_at(shutdown);
+            });
+            resume_tx.send(()).unwrap();
+            assert_eq!(registration.join().unwrap().unwrap(), Some(41));
+            shutdown_thread.join().unwrap();
+            assert!(holds_gate && holds_slot);
+        });
+        assert!(
+            register_owned_process_at::<()>(&first, &shutdown, Some(41), || {
+                panic!("shutdown must reject an existing profile retry")
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            register_owned_process_at::<()>(&second, &shutdown, None, || {
+                panic!("shutdown must reject another profile's first launch")
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            first
+                .process
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|owned| owned.pid),
+            Some(41)
+        );
+        assert!(second.process.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn launch_guard_clears_its_own_profile_outside_original_scope() {
+        let guard = super::super::instances::scope_sync("guard-owner-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            LaunchGuard(launching)
+        });
+        super::super::instances::scope_sync("guard-drop-test".into(), || {
+            let launching = launch_guard();
+            launching.store(true, Ordering::SeqCst);
+            drop(guard);
+            assert!(launching.load(Ordering::SeqCst));
+            assert!(!super::super::instances::instance_of("guard-owner-test")
+                .launching
+                .load(Ordering::SeqCst));
+            launching.store(false, Ordering::SeqCst);
+        });
+    }
+
+    #[test]
+    fn exit_holds_ownership_until_status_commit_and_preserves_new_registration() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let profile = "exit-status-commit-test";
+        let instance = super::super::instances::instance_of(profile);
+        instance.launching.store(true, Ordering::SeqCst);
+        *instance.process.lock().unwrap() = Some(test_owned(41));
+        let mut status_guard = instance.status.lock().unwrap();
+        *status_guard = status::Status::Running;
+        let (exiting_tx, exiting_rx) = mpsc::channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let (notified_tx, notified_rx) = mpsc::channel();
+        let timeout = std::time::Duration::from_secs(5);
+
+        std::thread::scope(|scope| {
+            let exit = scope.spawn(move || {
+                super::super::instances::scope_sync(profile.into(), || {
+                    on_owned_process_exit_at(
+                        41,
+                        |_| {
+                            exiting_tx.send(()).unwrap();
+                            Some(1)
+                        },
+                        |payload| {
+                            assert_eq!(owned_process_pid(), None);
+                            assert_eq!(status::get_status(), status::Status::Stopped);
+                            notified_tx.send(payload).unwrap();
+                        },
+                    )
+                })
+            });
+            exiting_rx.recv_timeout(timeout).unwrap();
+            let observer_instance = instance.clone();
+            let observer = scope.spawn(move || {
+                let guard = observer_instance.process.lock().unwrap();
+                observed_tx.send(guard.is_none()).unwrap();
+            });
+            let blocked_until_commit = observed_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err();
+            drop(status_guard);
+            assert_eq!(exit.join().unwrap().map(|owned| owned.pid), Some(41));
+            assert!(observed_rx.recv_timeout(timeout).unwrap());
+            observer.join().unwrap();
+            assert!(
+                blocked_until_commit,
+                "ownership must stay locked until Stopped is committed"
+            );
+            assert_eq!(
+                notified_rx.recv_timeout(timeout).unwrap(),
+                HarnessProcessExitedPayload {
+                    pid: 41,
+                    exit_code: Some(1)
+                }
+            );
+        });
+
+        super::super::instances::scope_sync(profile.into(), || {
+            assert_eq!(status::get_status(), status::Status::Stopped);
+            assert!(register_owned_process(None, || Ok((test_owned(42), ())))
+                .unwrap()
+                .is_some());
+            status::set_status(status::Status::Running);
+            assert!(on_owned_process_exit_at(
+                41,
+                |_| panic!("stale exit must not report"),
+                |_| panic!("stale exit must not notify"),
+            )
+            .is_none());
+            assert_eq!(owned_process_pid(), Some(42));
+            assert_eq!(status::get_status(), status::Status::Running);
+            take_owned_process();
         });
     }
 
@@ -1419,6 +1858,180 @@ mod tests {
             .unwrap_err()
             .starts_with("HARNESS_CLEANUP_FAILED: cannot terminate process"));
         assert!(alive);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_command_line_rejects_truncated_or_invalid_utf16() {
+        let header = std::mem::size_of::<WindowsCommandLine>();
+        let command: Vec<_> = r#"node.exe "path with spaces" "payload --no-open""#
+            .encode_utf16()
+            .collect();
+        let bytes = header + (command.len() + 1) * 2;
+        let mut buffer = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
+        let string = unsafe { buffer.as_mut_ptr().cast::<u8>().add(header).cast::<u16>() };
+        let valid = WindowsCommandLine {
+            length: (command.len() * 2) as u16,
+            maximum_length: ((command.len() + 1) * 2) as u16,
+            buffer: string,
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(command.as_ptr(), string, command.len());
+            buffer
+                .as_mut_ptr()
+                .cast::<WindowsCommandLine>()
+                .write(valid);
+        }
+        assert_eq!(
+            decode_windows_command_line(&buffer, bytes).as_deref(),
+            Some(r#"node.exe "path with spaces" "payload --no-open""#)
+        );
+        assert!(decode_windows_command_line(&buffer, header - 1).is_none());
+        assert!(decode_windows_command_line(&buffer, bytes - 1).is_none());
+        assert!(
+            decode_windows_command_line(&buffer, std::mem::size_of_val(buffer.as_slice()) + 1)
+                .is_none()
+        );
+        for invalid in [
+            WindowsCommandLine {
+                length: valid.length - 1,
+                ..valid
+            },
+            WindowsCommandLine {
+                maximum_length: valid.length - 2,
+                ..valid
+            },
+            WindowsCommandLine {
+                buffer: std::ptr::null(),
+                ..valid
+            },
+            WindowsCommandLine {
+                buffer: buffer.as_ptr().cast(),
+                ..valid
+            },
+            WindowsCommandLine {
+                buffer: usize::MAX as *const u16,
+                ..valid
+            },
+        ] {
+            unsafe {
+                buffer
+                    .as_mut_ptr()
+                    .cast::<WindowsCommandLine>()
+                    .write(invalid)
+            };
+            assert!(decode_windows_command_line(&buffer, bytes).is_none());
+        }
+        unsafe {
+            buffer
+                .as_mut_ptr()
+                .cast::<WindowsCommandLine>()
+                .write(valid);
+            string.write(0xd800);
+        }
+        assert!(decode_windows_command_line(&buffer, bytes).is_none());
+        unsafe { string.write(0) };
+        assert!(decode_windows_command_line(&buffer, bytes).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_process_snapshot_preserves_raw_command_line_and_filetime() {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+        let root = tempfile::Builder::new()
+            .prefix("process-snapshot 空格-")
+            .tempdir()
+            .unwrap();
+        let raw = format!(
+            r#""{}" "payload --no-open" "escaped\"quote" --no-open"#,
+            root.path().join("quoted path").join("entry.js").display()
+        );
+        let mut child = Command::new("node.exe")
+            .args(["-e", "process.stdin.resume()", "--"])
+            .raw_arg(&raw)
+            .current_dir(root.path())
+            .creation_flags(0x08000000)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn isolated snapshot probe");
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+            let mut exit = creation;
+            let mut kernel = creation;
+            let mut user = creation;
+            assert_ne!(
+                unsafe {
+                    GetProcessTimes(
+                        child.as_raw_handle(),
+                        &mut creation,
+                        &mut exit,
+                        &mut kernel,
+                        &mut user,
+                    )
+                },
+                0
+            );
+            let expected =
+                u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime);
+            let started = std::time::Instant::now();
+            let output = windows_process_snapshot(Some(child.id())).unwrap();
+            eprintln!("native target snapshot: {:?}", started.elapsed());
+            let entries = String::from_utf8(output).unwrap();
+            let entries: Vec<WindowsProcessEntry> = entries
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(entries.len(), 1);
+            let entry = &entries[0];
+            assert_eq!(entry.pid, child.id());
+            assert_eq!(
+                entry.created, expected,
+                "creation time must retain 100 ns precision"
+            );
+            assert!(
+                entry.command_line.ends_with(&raw),
+                "raw quoting must survive: {}",
+                entry.command_line
+            );
+            assert_eq!(entry.ancestors[0].pid, std::process::id());
+            assert_ne!(entry.ancestors[0].created, 0);
+            assert!(!entry.ancestors_truncated || entry.ancestors.len() == 8);
+            let started = std::time::Instant::now();
+            let output = windows_process_snapshot(None).unwrap();
+            eprintln!("native full snapshot: {:?}", started.elapsed());
+            let entries = String::from_utf8(output).unwrap();
+            let entry = entries
+                .lines()
+                .map(|line| serde_json::from_str::<WindowsProcessEntry>(line).unwrap())
+                .find(|entry| entry.pid == child.id())
+                .expect("full snapshot must retain the controlled probe");
+            assert_eq!(entry.created, expected);
+            assert!(entry.command_line.ends_with(&raw));
+
+            let source = include_str!("process.rs");
+            let snapshot = source
+                .split("fn windows_process_snapshot(")
+                .nth(1)
+                .unwrap()
+                .split("fn terminate_stale_harness_processes_at(")
+                .next()
+                .unwrap();
+            assert!(
+                !snapshot.contains("Command::new("),
+                "process snapshots must not spawn an interpreter"
+            );
+        }));
+        drop(child.stdin.take());
+        let exited = child.wait().expect("wait for isolated snapshot probe");
+        if let Err(error) = checked {
+            std::panic::resume_unwind(error);
+        }
+        assert!(exited.success());
     }
 
     #[cfg(windows)]

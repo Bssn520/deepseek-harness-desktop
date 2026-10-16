@@ -163,8 +163,17 @@ describe.skipIf(process.platform === 'darwin')('桌面端启动冒烟', () => {
       await browser.$(SHELL_ROOT).waitForExist({ timeout: 30_000 })
       return handle
     }
+    async function closeWindow(handle: string) {
+      const { protocol, hostname, port, path } = browser.options
+      // WDIO 的 closeWindow 回包会触发未等待的自动切窗，绕过该命令事件。
+      const response = await fetch(`${protocol}://${hostname}:${port}${(path ?? '').replace(/\/+$/, '')}/session/${encodeURIComponent(browser.sessionId)}/window`, { method: 'DELETE', signal: AbortSignal.timeout(30_000) })
+      const result = await response.json()
+      expect(response.ok, `关闭原生窗口 ${handle} HTTP ${response.status}: ${JSON.stringify(result)}`).toBe(true)
+      expect(result, `关闭原生窗口 ${handle} 协议失败`).toEqual({ value: expect.any(Array) })
+      await browser.waitUntil(async () => !(await browser.getWindowHandles()).includes(handle), { timeout: 30_000, timeoutMsg: `原生窗口 ${handle} 未销毁` })
+    }
     async function healthy() {
-      return invoke<string>('proxy_health_check')
+      return (await invoke<{ status: string }>('proxy_health_check')).status
     }
     let clonedProfile: string | undefined
     let switchedProfile = false
@@ -186,8 +195,8 @@ describe.skipIf(process.platform === 'darwin')('桌面端启动冒烟', () => {
       await invoke('launch_harness')
       await browser.waitUntil(async () => {
         const result = await browser.execute(async () => {
-          const bridge = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<string> } }).__TAURI_INTERNALS__
-          return bridge.invoke('proxy_health_check').then(value => value.startsWith('healthy - '), (error: unknown) => {
+          const bridge = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<{ status: string }> } }).__TAURI_INTERNALS__
+          return bridge.invoke('proxy_health_check').then(value => value.status.startsWith('healthy - '), (error: unknown) => {
             if (String(error).startsWith('HARNESS_NOT_READY:'))
               return false
             throw error
@@ -212,10 +221,10 @@ describe.skipIf(process.platform === 'darwin')('桌面端启动冒烟', () => {
       expect(readFileSync(originalMarkerPath, 'utf8'), '其他窗口切档案不得重启原核心').toBe(originalMarker)
       expect(await healthy(), '第二档案启动后原核心必须仍健康').toMatch(/^healthy - /)
       await browser.switchToWindow(third)
-      await browser.closeWindow()
+      await closeWindow(third)
       await browser.switchToWindow(second)
       expect(await healthy(), '关闭同档案的非最后窗口不得停止核心').toMatch(/^healthy - /)
-      await browser.closeWindow()
+      await closeWindow(second)
       await browser.switchToWindow('main')
       await browser.waitUntil(async () => !existsSync(clonedMarkerPath), { timeout: 30_000, timeoutMsg: '关闭档案最后窗口后核心 PID 标记未回收' })
       expect(readFileSync(originalMarkerPath, 'utf8'), '关闭其他档案窗口不得重启原核心').toBe(originalMarker)
@@ -225,7 +234,7 @@ describe.skipIf(process.platform === 'darwin')('桌面端启动冒烟', () => {
       for (const handle of windows.reverse()) {
         if ((await browser.getWindowHandles()).includes(handle)) {
           await browser.switchToWindow(handle)
-          await browser.closeWindow()
+          await closeWindow(handle)
         }
       }
       await browser.switchToWindow('main')

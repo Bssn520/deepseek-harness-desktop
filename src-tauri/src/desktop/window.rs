@@ -104,6 +104,9 @@ pub fn on_page_load(
         let parent = webview_window.clone();
         if let Err(e) = webview_window.with_webview(move |platform| {
             disable_external_drop(&platform);
+            if let Err(error) = crate::desktop::frontend_preload::install(&platform, &parent) {
+                log::warn!("FRONTEND_PRELOAD_UNAVAILABLE: {error}");
+            }
             if let Err(e) =
                 crate::desktop::notification::enable_notification_permissions(platform, parent)
             {
