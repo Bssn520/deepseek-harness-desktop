@@ -356,7 +356,7 @@ function main() {
   }
 
   checkId(manifest.id)
-  for (const field of ['displayName', 'description']) {
+  for (const field of ['displayName', 'description', 'kind']) {
     if (manifest[field] !== undefined && manifest[field] !== null && typeof manifest[field] !== 'string')
       fail(`PET_MANIFEST_INVALID: ${field} must be a string`)
   }

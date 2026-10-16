@@ -67,3 +67,11 @@ it('accepts a Codex atlas manifest whose kind uses a foreign vocabulary', () => 
   expect(result.status).toBe(0)
   expect(result.stdout).toContain('atlas image/webp 88x88 -> v2 8x11')
 })
+
+it.each([{ kind: false }, { kind: 1 }, { kind: {} }, { kind: [] }])('rejects a non-string kind $kind like the Rust importer', ({ kind }) => {
+  manifest = { kind, id: 'fixture', spritesheetPath: 'spritesheet.webp' }
+  writeFileSync(join(root, 'spritesheet.webp'), webpAtlas())
+  const result = validate()
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain('PET_MANIFEST_INVALID: kind must be a string')
+})
