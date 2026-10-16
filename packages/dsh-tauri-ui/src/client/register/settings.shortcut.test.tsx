@@ -336,4 +336,18 @@ describe('patched settings shortcut store route', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(modal.useModalLayer).not.toHaveBeenCalled()
   })
+
+  it('mirrors the conversation content width recorded before opening', () => {
+    const dock = document.createElement('div')
+    dock.dataset.slot = 'conversation.input.dock'
+    dock.style.setProperty('--dsh-chat-content-width', '912px')
+    document.body.append(dock)
+    disposers.push(() => dock.remove())
+    const host = activate()
+    render(<host.Overlays />)
+
+    act(() => store.settings.openAt('general'))
+
+    expect(screen.getByRole('dialog').style.getPropertyValue('--dsh-chat-content-width')).toBe('912px')
+  })
 })

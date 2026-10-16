@@ -112,6 +112,7 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
     <>
       <div
         ref={dialogRef}
+        style={ui.chatContentWidth === undefined ? undefined : { '--dsh-chat-content-width': ui.chatContentWidth } as CSSProperties}
         className="fixed inset-0 z-[1000] flex bg-[var(--dsw-specific-sidebar-fill)] text-primary [--dsh-chat-content-width:748px] [--dsh-composer-card-max-width:calc(var(--dsh-chat-content-width)_+_32px)] [--dsh-composer-side-clearance:16px]"
         data-slot-sidebar="dsh-tauri-ui"
         data-shortcut-modal="settings"
