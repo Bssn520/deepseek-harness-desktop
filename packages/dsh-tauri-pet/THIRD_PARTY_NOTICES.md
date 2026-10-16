@@ -30,6 +30,13 @@ Integration points:
 - License: MIT
 - Used: macOS reads this HEVC-alpha `.mov` mirror; it is our own re-encode of the upstream transparent WebM clips and carries no separate artwork.
 
+## hairyf/dsh-pet-sticker
+
+- Repository: <https://github.com/hairyf/dsh-pet-sticker>
+- Asset pin: `6634e0de9cace37ac6b747a960c833209ad015a3`
+- Streaming only: `pets.built-in` registers the remote configuration, GIF preview, VP9-alpha WebM and HEVC-alpha MOV URLs; no media assets are bundled.
+- Artwork source: resources provided in <https://www.bilibili.com/video/BV1V88G6TEvg>, as credited in the upstream README. Sticker copyright and commercial permissions remain with the original rights holders; the repository does not grant a separate artwork license.
+
 ## References (nothing shipped)
 
 - `source/dsh-pet`: reference copy at `4c097297ca773abb173198b1384b3a11dcf89409`, not the source of the play-time assets above.
