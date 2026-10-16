@@ -4,6 +4,11 @@ export interface SettingsUiState {
   query: string
   railWidth: number | undefined
   /**
+   * 打开设置前记录的会话内容宽度（`--dsh-chat-content-width` 的当值，可能是 `clamp(...)` 表达式）。
+   * 设置页打开后会话区被盖住会塌缩到 640px，此值只能在打开前取。
+   */
+  chatContentWidth: string | undefined
+  /**
    * 官方 `settings.launcher` 座位是否已声明（官方条目在注册时声明，早于本插件时装好）。
    * 未声明（更老核心）时触发器渲染自有按钮——`SlotOutlet` 对未声明的槽位返回空，绝不能让
    * 设置入口消失。

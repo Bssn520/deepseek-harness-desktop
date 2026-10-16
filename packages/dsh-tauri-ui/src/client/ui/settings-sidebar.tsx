@@ -4,8 +4,8 @@ import type { IconComponent } from '../components/icon'
 import type { SelectorHook } from '../types/selector'
 import { useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { SlotOutlet } from '@deepseek-ai/dsh-client-ui-renderer'
-import { clamp, cn, isEmpty, useEventListener, useResizeObserver, useStore, useWatch } from 'dsh-tauri/client'
-import { useRef, useState } from 'react'
+import { clamp, cn, isEmpty, useEventListener, useStore } from 'dsh-tauri/client'
+import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/icon'
 import { ArrowLeft, Cubes3Overlap, Database, Gear, Ghost, Globe, LayoutSplitSideContentRight, PersonPencil, Puzzle, Smartphone, Tray } from '../components/icons'
 import { Input } from '../components/official'
@@ -43,12 +43,6 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
   locale.useLocale()
   const searchRef = useRef<HTMLInputElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
-  useResizeObserver(contentRef, () => {
-    const conversation = document.querySelector('[data-slot="conversation.input.dock"]')
-    const width = conversation ? getComputedStyle(conversation).getPropertyValue('--dsh-chat-content-width') : ''
-    contentRef.current?.style.setProperty('--dsh-chat-content-width', width)
-  })
   // 官方 `Input` 的 props 类型没声明 ref（实现里 `...rest` 会落到 <input>），官方类型补全后可直接写 ref。
   const searchInputRefProps = { ref: searchRef }
   const [dragging, setDragging] = useState(false)
@@ -89,15 +83,15 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
       store.settings.close()
   })
 
-  useWatch(ui.open, (open) => {
-    if (!open)
+  useEffect(() => {
+    if (!ui.open)
       return
     const el = document.querySelector('[data-slot="sidebar"]')
     const width = el?.getBoundingClientRect().width
     if (typeof width === 'number' && width >= RAIL_WIDTH_MIN)
       store.settings.setRailWidth(clamp(width, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX))
     searchRef.current?.focus()
-  }, { immediate: true })
+  }, [ui.open])
 
   if (!ui.open)
     return null
@@ -118,7 +112,8 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
     <>
       <div
         ref={dialogRef}
-        className="fixed inset-0 z-[1000] flex bg-[var(--dsw-specific-sidebar-fill)] text-primary"
+        style={ui.chatContentWidth === undefined ? undefined : { '--dsh-chat-content-width': ui.chatContentWidth } as CSSProperties}
+        className="fixed inset-0 z-[1000] flex bg-[var(--dsw-specific-sidebar-fill)] text-primary [--dsh-chat-content-width:748px] [--dsh-composer-card-max-width:calc(var(--dsh-chat-content-width)_+_32px)] [--dsh-composer-side-clearance:16px]"
         data-slot-sidebar="dsh-tauri-ui"
         data-shortcut-modal="settings"
         role="dialog"
@@ -174,11 +169,10 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
           onPointerDown={onHandlePointerDown}
         />
         <div
-          ref={contentRef}
           data-slot="settings.content"
           className="flex-1 min-w-0 h-full box-border overflow-y-auto flex bg-[var(--dsw-alias-bg-base)] rounded-tl-[16px] [corner-shape:round]"
         >
-          <div className="w-full mx-auto box-border px-[36px] py-[28px]" style={{ maxWidth: 'calc(var(--dsh-chat-content-width, 748px) + 72px)' }}>
+          <div className="w-[min(calc(var(--dsh-composer-card-max-width)_+_2_*_var(--dsh-composer-side-clearance)),100%)] mx-auto box-border px-[36px] py-[28px]">
             {activeId !== undefined && (
               <SlotOutlet
                 slotKey={SETTINGS_SECTION_SLOT}
