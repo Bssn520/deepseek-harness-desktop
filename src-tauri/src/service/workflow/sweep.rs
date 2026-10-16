@@ -61,15 +61,6 @@ mod tests {
     }
 }
 
-/// 记录本次启动的 Harness PID 与端口，供下次启动清扫孤儿用。
-pub(super) fn persist_harness_pid(app_handle: &tauri::AppHandle, pid: u32, port: u16) {
-    let path = harness_pid_path(app_handle);
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let _ = fs::write(&path, format!("{pid}\n{port}\n"));
-}
-
 /// 启动前清扫上次崩溃残留的孤儿 Harness。Unix 标记回收经端口与 PID 双重确认：
 /// - 标记进程已死 → 仅清理陈旧标记；
 /// - 端口占用者正是标记中的 PID → 本应用残留，结束其进程树并清标记；

@@ -1,6 +1,6 @@
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import type { PolicyBlockedVersion } from '../preinstall'
-import type { StartupPhase } from './readiness'
+import type { ReadinessProbeResult, StartupPhase } from './readiness'
 import type {
   HarnessProcessExitedPayload,
   InstallerState,
@@ -113,6 +113,8 @@ export const harness = defineStore({
     serviceUrl: 'http://127.0.0.1:3080',
     /** 带时间戳的 iframe 地址（boot 时生成一次，避免缓存） */
     iframeSrc: '',
+    frontendGeneration: 0,
+    frontendBootHtml: null as string | null,
     iframeLoaded: false,
     iframeError: false,
     /**
@@ -153,6 +155,11 @@ export const harness = defineStore({
     },
   },
   actions: {
+    resetFrontendPreload() {
+      this.frontendGeneration++
+      this.frontendBootHtml = null
+    },
+
     /** 首次挂载时自动启动（StrictMode 重复挂载下保证只执行一次） */
     startup() {
       if (bootStarted)
@@ -214,6 +221,7 @@ export const harness = defineStore({
       }
 
       const exitToken = ++bootToken
+      this.resetFrontendPreload()
       const message = i18next.t(runtimeExitMessageKey(payload.exitCode), {
         code: payload.exitCode,
       })
@@ -415,7 +423,7 @@ export const harness = defineStore({
     },
 
     /** 服务探测通过后的统一收尾；token 用于阻止旧启动流程覆盖新状态 */
-    async completeReadiness(token: number): Promise<boolean> {
+    async completeReadiness(token: number, probe?: ReadinessProbeResult): Promise<boolean> {
       if (token !== bootToken)
         return false
 
@@ -443,6 +451,7 @@ export const harness = defineStore({
 
       this.serviceUrl = readyInfo.service_url
       this.iframeSrc = generateTimestampedUrl(readyInfo.service_url)
+      this.frontendBootHtml = probe?.bootOrigin === readyInfo.service_url ? probe.bootHtml ?? null : null
       resetPortConflictRestarts()
       this.serviceHealthy = true
       this.serviceRunning = true
@@ -475,6 +484,12 @@ export const harness = defineStore({
 
     /** 拉起服务并等待健康检查通过，通过后才允许挂载 iframe */
     async launchAndWait(token?: number) {
+      const launchToken = token ?? ++bootToken
+      if (launchToken !== bootToken)
+        return
+      if (token === undefined)
+        this.resetFrontendPreload()
+      this.frontendBootHtml = null
       this.status = 'ready'
       this.installer = initialInstaller
       this.errorMsg = ''
@@ -492,17 +507,21 @@ export const harness = defineStore({
       this.startupReason = i18next.t('status.loading_process')
       try {
         await invoke('launch_harness')
+        if (launchToken !== bootToken)
+          return
         this.serviceRunning = true
         this.startupPhase = 'process-boot'
         this.startupReason = i18next.t('status.loading_process')
         // 后端遇到端口占用时会自动递增并持久化端口，启动后重新读取真实地址。
         const runtimeInfo = await invoke<{ service_url: string }>('get_runtime_info')
+        if (launchToken !== bootToken)
+          return
         this.serviceUrl = runtimeInfo.service_url
         this.iframeSrc = generateTimestampedUrl(runtimeInfo.service_url)
 
         const result = await pollHarnessReadiness(
           STARTUP_ABSOLUTE_TIMEOUT,
-          () => token === undefined || token === bootToken,
+          () => launchToken === bootToken,
           (probe) => {
             if (probe.phase) {
               this.startupPhase = probe.phase
@@ -510,7 +529,7 @@ export const harness = defineStore({
             this.startupReason = probe.reason ?? ''
           },
         )
-        if (token !== undefined && token !== bootToken) {
+        if (launchToken !== bootToken) {
           return
         }
         if (!result.healthy) {
@@ -529,10 +548,10 @@ export const harness = defineStore({
         // （auto_start）而提前返回，此刻端口若尚未落库，上面读到的 service_url 会是
         // 旧端口；健康检查通过意味着服务已在最终端口就绪，此时读取必然准确。
         // 避免 iframe 挂载到一个无人监听的地址（表现为首次加载失败、刷新后恢复）。
-        const readinessToken = token ?? bootToken
+        const readinessToken = launchToken
         readinessCommitToken = readinessToken
         try {
-          await this.completeReadiness(readinessToken)
+          await this.completeReadiness(readinessToken, result)
         }
         finally {
           if (readinessCommitToken === readinessToken)
@@ -549,6 +568,7 @@ export const harness = defineStore({
     /** 启动流程：检测环境/安装依赖 → 拉起服务 → 已安装时后台检查更新 */
     async boot() {
       const token = ++bootToken
+      this.resetFrontendPreload()
       if (policyApprovalKey !== undefined) {
         toast.close(policyApprovalKey)
         policyApprovalKey = undefined
@@ -771,6 +791,7 @@ export const harness = defineStore({
         return
       this.busyAction = 'start'
       ++bootToken
+      this.resetFrontendPreload()
       const healthy = this.serviceHealthy
       this.serviceHealthy = false
       try {
@@ -797,6 +818,8 @@ export const harness = defineStore({
         if (this.busyAction)
           return
         this.busyAction = 'restart'
+        ++bootToken
+        this.resetFrontendPreload()
         // 重启旧进程前先撤下旧 iframe；这样延迟到达的旧进程退出事件不会被
         // 误当成新一代启动失败。新进程通过 completeReadiness 后再恢复 healthy。
         this.serviceHealthy = false
@@ -875,6 +898,7 @@ export const harness = defineStore({
       if (this.busyAction)
         return
       ++bootToken
+      this.resetFrontendPreload()
       this.busyAction = 'repair'
       try {
         await repair()
@@ -906,6 +930,8 @@ export const harness = defineStore({
       if (this.busyAction)
         return
       this.busyAction = 'shutdown'
+      ++bootToken
+      this.resetFrontendPreload()
       // 停止服务后应用回到「已停止」态，配置弹窗已无意义，与 restart 一致地关闭它
       void hooks['config.dialog.hidden'].trigger()
       try {

@@ -72,8 +72,8 @@ pub(crate) use env::build_plugin_envs;
 pub use inspect::inspect_specs;
 pub(crate) use inspect::packument;
 pub(crate) use pnpm::{
-    bundled_pnpm_major, harness_prefer_bundled_pnpm, pnpm_major_version_at_bounded,
-    profile_store_major,
+    bundled_pnpm_major, harness_prefer_bundled_pnpm, harness_prefer_bundled_pnpm_from,
+    pnpm_major_version_at_bounded, profile_store_major,
 };
 pub(crate) use single::uninstall_deprecated_plugins;
 pub use single::{remove_many, update_many};

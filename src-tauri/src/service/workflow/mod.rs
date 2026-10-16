@@ -19,6 +19,8 @@ pub(crate) mod win_inspector;
 #[cfg(windows)]
 pub(crate) mod win_spawn;
 
+pub(crate) mod early;
+mod early_plan;
 mod health;
 mod heap;
 mod install;
@@ -27,7 +29,7 @@ mod process;
 mod startup;
 mod sweep;
 
-pub use health::{proxy_health_check, recheck_ownership};
+pub use health::{proxy_health_check, recheck_ownership, HealthCheck};
 pub(crate) use heap::effective_heap_limit_mb;
 pub use install::install;
 pub use launch::{launch, restart, start};

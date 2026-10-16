@@ -11,7 +11,7 @@ import {
 import { CircleExclamation } from '@gravity-ui/icons'
 import { toast } from '@heroui/react'
 import { useOverlay } from '@overlastic/react'
-import { useEventListener, useTimeoutFn, useWatch } from '@reause/core'
+import { useEventListener, useTimeoutFn, useUnmountedRef, useWatch } from '@reause/core'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useRef, useState } from 'react'
@@ -217,8 +217,13 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   const remoteMode = srcOverride !== null && srcOverride !== ''
   const [loadedUrl, setLoadedUrl] = useState('')
   const remoteLoading = remoteMode && loadedUrl !== srcOverride
+  const preloadKey = `${harness.frontendGeneration}#${harness.iframeKey}#${harness.serviceUrl}`
+  const [preload, setPreload] = useState<{ key: string, src: string, id: string, waiting: boolean, applied: boolean } | null>(null)
+  const [preloadFailed, setPreloadFailed] = useState('')
+  const activePreload = !remoteMode && preload?.key === preloadKey && preloadFailed !== preloadKey ? preload : null
+  const frameSrc = remoteMode ? srcOverride : activePreload?.src ?? harness.iframeSrc
   // 换帧（本地重挂 / 换远端隧道 / 重载）即视为新一代文档：旧文档的外观确认不能替它背书。
-  const frameKey = `${remoteMode ? srcOverride : 'local'}#${harness.iframeKey}`
+  const frameKey = `${frameSrc}#${harness.iframeKey}`
   const [bootFrame, setBootFrame] = useState<string | null>(null)
   const appearance = normalizeAppearance(setting.appearance)
   const translucent = (window as Window & { __DSH_TRANSPARENT__?: boolean }).__DSH_TRANSPARENT__ === true
@@ -228,7 +233,7 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   // 握手兜底：帧内接收器异常时不能让 iframe 永久藏住，超时后按「未确认」直接揭开。
   const appearancePending = translucent && bootFrame !== frameKey
   const iframeHidden = appearancePending || remoteLoading || harness.showIframeError
-  const mounted = remoteMode || harness.serviceHealthy
+  const mounted = remoteMode || activePreload !== null || harness.serviceHealthy
   const showIframeError = !remoteMode && harness.showIframeError
   const documentWaiting = !remoteMode && mounted && !harness.iframeAlive && !showIframeError && !appearancePending
   const branch = !mounted ? 'service-wait' : showIframeError ? 'iframe-error' : remoteLoading ? 'remote-loading' : appearancePending ? 'appearance-wait' : documentWaiting ? 'document-wait' : remoteMode ? 'remote-frame' : 'local-frame'
@@ -251,12 +256,55 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
       iframeHidden,
     })
   }, { immediate: true })
+  const unmounted = useUnmountedRef()
+  const preloadRequestRef = useRef(0)
+  useWatch([preloadKey, remoteMode], () => {
+    const request = ++preloadRequestRef.current
+    if (remoteMode) {
+      setPreload(null)
+      return
+    }
+    if (store.harness.serviceHealthy)
+      return
+    void invoke<string | null>('prepare_frontend_preload').then((src) => {
+      if (unmounted.current || request !== preloadRequestRef.current || !src || store.harness.serviceHealthy)
+        return
+      const url = new URL(src)
+      const id = url.searchParams.get('_dshPreload')
+      if (id && url.origin === store.harness.serviceUrl)
+        setPreload({ key: preloadKey, src, id, waiting: false, applied: false })
+    }).catch(error => console.warn('[Iframe] native frontend preload unavailable:', error))
+  }, { immediate: true })
+  function fallbackPreload() {
+    store.harness.markIframeLeaving()
+    setPreloadFailed(preloadKey)
+  }
+  useWatch([activePreload?.id, activePreload?.waiting, harness.serviceHealthy, harness.frontendBootHtml], () => {
+    if (!activePreload?.waiting || activePreload.applied || !harness.serviceHealthy)
+      return
+    if (!harness.frontendBootHtml) {
+      fallbackPreload()
+      return
+    }
+    post({ type: 'dsh://frontend-preload:boot', id: activePreload.id, html: harness.frontendBootHtml })
+  }, { immediate: true })
+  const { start: armPreloadFallback, stop: stopPreloadFallback } = useTimeoutFn(
+    fallbackPreload,
+    8000,
+    { immediate: false },
+  )
+  useWatch([activePreload?.id, activePreload?.applied, harness.serviceHealthy], () => {
+    if (activePreload && !activePreload.applied && harness.serviceHealthy)
+      armPreloadFallback()
+    else
+      stopPreloadFallback()
+  }, { immediate: true })
   const { start: armAppearanceFallback, stop: stopAppearanceFallback } = useTimeoutFn(
     () => setBootFrame(frameKey),
     APPEARANCE_HANDSHAKE_TIMEOUT,
     { immediate: false },
   )
-  useWatch([frameKey, remoteMode || harness.serviceHealthy], ([, mounted]) => {
+  useWatch([frameKey, mounted], ([, mounted]) => {
     setBootFrame(null)
     if (mounted)
       armAppearanceFallback()
@@ -266,7 +314,7 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   // iframe 与外观投影同一次提交挂载：src 落定后立刻把启动期 CSS 交给帧内接收器
   // （帧内自己也会 document-start 主动请求一次，两条通路互为兜底）。
   useWatch(
-    [remoteMode ? srcOverride : harness.iframeSrc, bootCss],
+    [frameSrc, bootCss],
     ([src, css]) => {
       if (!src)
         return
@@ -301,6 +349,23 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
 
   // iframe → 宿主：iframe 自身的桥共用一个监听器，按 `data.type` 分发
   useIframeMessage<IframeBridgeMessage>(iframeRef, (data) => {
+    if (typeof data.type !== 'string')
+      return
+    if (data.type.startsWith('dsh://frontend-preload:')) {
+      if (!activePreload || data.id !== activePreload.id)
+        return
+      if (data.type === 'dsh://frontend-preload:waiting') {
+        setPreload({ ...activePreload, waiting: true })
+      }
+      else if (data.type === 'dsh://frontend-preload:applied') {
+        setPreload({ ...activePreload, applied: true })
+      }
+      else if (data.type === 'dsh://frontend-preload:failed') {
+        console.warn('[Iframe] native frontend preload failed; using live HTTP:', data.detail)
+        fallbackPreload()
+      }
+      return
+    }
     // 帧内文档离开（帧内导航）：旧确认立刻作废，等新文档自己重新自报（issue #705）；
     // 外观确认同样作废，并重新隐蔽 iframe + 重挂兜底，避免旧样式作用在新文档上。
     if (data.type === 'dsh://plugin-boot:leaving') {
@@ -345,6 +410,11 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
         store.harness.markIframeBootReady()
         break
       case 'dsh://plugin-boot:stalled':
+        if (activePreload && !activePreload.applied) {
+          if (harness.serviceHealthy)
+            fallbackPreload()
+          break
+        }
         void store.harness.recoverIframeBoot()
         break
       case 'dsh://plugin-boot:failed':
@@ -605,11 +675,11 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
   return (
     <div className="relative min-h-0 flex-1">
       <If
-        cond={remoteMode || harness.serviceHealthy}
+        cond={mounted}
         else={<Loadable subtitle={t(harness.startupStatusKey)} />}
       >
         <iframe
-          key={remoteMode ? `remote-${srcOverride}` : harness.iframeKey}
+          key={`${remoteMode ? `remote-${srcOverride}` : activePreload?.id ?? 'http'}#${harness.iframeKey}`}
           ref={iframeRef}
           data-testid="dsh-shell-iframe"
           className="h-full w-full"
@@ -617,7 +687,7 @@ export function Iframe({ iframeRef, srcOverride = null, borderTint = null }: Ifr
           // 会先按不透明画一帧，露出那一下比等待更刺眼。上面的 Loadable 与之逐项同构，
           // 揭开时视觉无跳变，且有 4s 兜底不会永久藏住。
           style={{ visibility: appearancePending || remoteLoading || harness.showIframeError ? 'hidden' : 'visible' }}
-          src={remoteMode ? srcOverride : harness.iframeSrc}
+          src={frameSrc}
           allow="accelerometer; ambient-light-sensor; autoplay; battery; camera; clipboard-read; clipboard-write; display-capture; document-domain; encrypted-media; fullscreen; gamepad; geolocation; gyroscope; hid; idle-detection; keyboard-map; magnetometer; microphone; midi; payment; picture-in-picture; publickey-credentials-get; screen-wake-lock; serial; speaker-selection; usb; web-share; xr-spatial-tracking"
           sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-downloads allow-storage-access-by-user-activation"
           onLoad={() => {

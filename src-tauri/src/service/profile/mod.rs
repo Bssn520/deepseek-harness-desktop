@@ -996,12 +996,18 @@ fn atomic_write(path: &Path, content: &str, code: &str) -> Result<(), String> {
 /// 形态：宿主不提供 webServer/connection，内置插件恒为 pending，服务必然启动
 /// 失败）时补齐并写回，令本轮启动即可恢复。
 pub fn ensure_active_profile_core_bundles(app_handle: &AppHandle) -> Result<bool, String> {
-    let id = active_profile(app_handle);
-    let dir = profile_dir_of(app_handle, &id);
+    prepare_at(
+        &config::get_dsh_data_path(app_handle),
+        &active_profile(app_handle),
+    )
+}
+
+pub(crate) fn prepare_at(data_home: &Path, id: &str) -> Result<bool, String> {
+    let dir = fs_guard::join_safe(&data_home.join("profiles"), id)?;
     if !dir.is_dir() {
         return Ok(false);
     }
-    ensure_profile_core_bundles(&dir, &id)
+    ensure_profile_core_bundles(&dir, id)
 }
 
 /// 初始化档案目录：与官方 `dsh-app-boot::initProfile` 的产物一致
@@ -1188,6 +1194,48 @@ mod clone_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_at_rereads_the_explicit_profile_without_creating_missing_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("profiles/beta");
+        assert!(!prepare_at(home.path(), "beta").unwrap());
+        assert!(!dir.exists());
+        assert!(prepare_at(home.path(), "../beta")
+            .unwrap_err()
+            .starts_with("INVALID_ID:"));
+
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.json");
+        fs::write(
+            &path,
+            r#"{"dependencies":{"user-plugin":"1.0.0"},"dsh":{"profile":{"bundles":["user-plugin"]}}}"#,
+        )
+        .unwrap();
+        let patch = dir.join("cordis.patch.yml");
+        fs::write(&patch, "# user patch\n[]\n").unwrap();
+        assert!(prepare_at(home.path(), "beta").unwrap());
+        let repaired = fs::read_to_string(&path).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+        assert_eq!(
+            manifest["dsh"]["profile"]["bundles"],
+            serde_json::json!([
+                "@deepseek-ai/dsh-base",
+                "@deepseek-ai/dsh-web-app",
+                "user-plugin"
+            ])
+        );
+        assert_eq!(manifest["dependencies"]["user-plugin"], "1.0.0");
+        assert!(!prepare_at(home.path(), "beta").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), repaired);
+
+        fs::write(&path, "{ broken").unwrap();
+        assert!(prepare_at(home.path(), "beta")
+            .unwrap_err()
+            .starts_with("PROFILE_MANIFEST_PARSE_FAILED:"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ broken");
+        assert_eq!(fs::read_to_string(patch).unwrap(), "# user patch\n[]\n");
+    }
 
     #[test]
     fn normalize_id_lowercases_and_joins() {
