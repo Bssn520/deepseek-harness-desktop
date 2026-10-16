@@ -4,8 +4,8 @@ import type { IconComponent } from '../components/icon'
 import type { SelectorHook } from '../types/selector'
 import { useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { SlotOutlet } from '@deepseek-ai/dsh-client-ui-renderer'
-import { clamp, cn, isEmpty, useEventListener, useResizeObserver, useStore } from 'dsh-tauri/client'
-import { useEffect, useRef, useState } from 'react'
+import { clamp, cn, isEmpty, useEventListener, useResizeObserver, useStore, useWatch } from 'dsh-tauri/client'
+import { useRef, useState } from 'react'
 import { Icon } from '../components/icon'
 import { ArrowLeft, Cubes3Overlap, Database, Gear, Ghost, Globe, LayoutSplitSideContentRight, PersonPencil, Puzzle, Smartphone, Tray } from '../components/icons'
 import { Input } from '../components/official'
@@ -89,15 +89,15 @@ export function SettingsSidebar(_props: SettingsSidebarProps): ReactElement | nu
       store.settings.close()
   })
 
-  useEffect(() => {
-    if (!ui.open)
+  useWatch(ui.open, (open) => {
+    if (!open)
       return
     const el = document.querySelector('[data-slot="sidebar"]')
     const width = el?.getBoundingClientRect().width
     if (typeof width === 'number' && width >= RAIL_WIDTH_MIN)
       store.settings.setRailWidth(clamp(width, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX))
     searchRef.current?.focus()
-  }, [ui.open])
+  }, { immediate: true })
 
   if (!ui.open)
     return null
