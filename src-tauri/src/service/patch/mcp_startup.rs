@@ -34,6 +34,13 @@ fn patch_source(source: &str) -> PatchOutcome {
     } else {
         source.replacen(READY_ANCHOR, READY_PATCHED, 1)
     };
+    if source.contains("@modelcontextprotocol/sdk/client/") {
+        return if source.contains(READY_PATCHED) {
+            PatchOutcome::AlreadyPatched
+        } else {
+            PatchOutcome::Patched(ready)
+        };
+    }
     let patched = ready
         .replacen(
             "function createTransport(config) {",
@@ -77,6 +84,19 @@ mod tests {
         std::fs::create_dir_all(core.path().join(MCP_INDEX_JS)).unwrap();
         let error = apply_at(core.path()).expect_err("unreadable MCP file must fail");
         assert!(error.starts_with("DSH_PATCH_READ:"));
+    }
+
+    #[test]
+    fn legacy_sdk_keeps_existing_transport_without_unavailable_imports() {
+        let source = format!("import {{ Client }} from \"@modelcontextprotocol/sdk/client/index.js\";\nfunction createTransport(config) {{\n{TRANSPORT_ANCHOR}\n}}\ngeneration.connect(createTransport(config));\nconst inject = [\"tools\"];\n{READY_ANCHOR}");
+        let PatchOutcome::Patched(patched) = patch_source(&source) else {
+            panic!("expected legacy readiness patch")
+        };
+        assert!(patched.contains(READY_PATCHED));
+        assert!(patched.contains(TRANSPORT_ANCHOR));
+        assert!(!patched.contains(OAUTH_IMPORT));
+        assert!(!patched.contains(OAUTH_SOURCE));
+        assert_eq!(patch_source(&patched), PatchOutcome::AlreadyPatched);
     }
 
     #[test]
